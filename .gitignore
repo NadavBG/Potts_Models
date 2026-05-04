@@ -1,0 +1,45 @@
+# ── Claude Code local settings ───────────────────────────────────────────
+.claude/
+
+# ── Python bytecode / caches ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ── Virtual environments ─────────────────────────────────────────────────
+env_SBM/
+.venv/
+venv/
+
+# ── scikit-build-core / CMake / setuptools build artifacts ───────────────
+build/
+_skbuild/
+dist/
+*.egg-info/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Compiled C++ extensions land next to the source after `pip install -e .`
+src/SBM/**/*.so
+src/SBM/**/*.dylib
+src/SBM/**/*.pyd
+
+# ── Test / lint / type-check caches ──────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── Jupyter ──────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── OS junk ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Editors / IDEs ───────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
