@@ -81,3 +81,28 @@ Each gradient step in `GradLogLike`:
 - After training, parameters meant for downstream comparison must pass through `Zero_Sum_Gauge` first.
 - New C++ kernels: register them in `CMakeLists.txt` (each module gets its own `add_library(... MODULE)` + install target), keep the `set_target_properties(... PROPERTIES PREFIX "")` line so Python finds the `.so` by module name, and mirror the `Wj` packing exactly.
 - New `options` keys: add a default in `ParseOptions` so existing callers don't need updates, and document any in-place mutation.
+
+## Figures
+
+This project uses the lab figure style. When writing or modifying any
+plotting code:
+
+- Activate the appropriate stylesheet before any plotting code:
+  `plt.style.use("lab-paper")` for figures destined for papers/posters,
+  `plt.style.use("lab-slides")` for talks. Pick by destination, not by
+  guess.
+- Save figures only via `lab_plotting.save_figure()`, never bare
+  `fig.savefig()`. The wrapper embeds git provenance and writes a
+  sidecar source script.
+- For semantic colors (reference, negative control, fit, highlight),
+  use the constants in `lab_plotting.LAB_COLORS`, not hex literals.
+- Panel labels go through `lab_plotting.panel_label()`. Do not place
+  bare `ax.text(...)` in the upper-left corner of axes.
+- Every axis label must include units in parentheses where applicable
+  (e.g. "ΔG_binding (kcal/mol)", not "delta G").
+- Every plotted point with measured uncertainty needs an error bar.
+  If error bars are not yet computed, leave a `# TODO: add error bars`
+  comment rather than plotting bare points and forgetting.
+- No spline-interpolated fit curves through data points. Fits are
+  straight lines or named mathematical functions, plotted across the
+  data range.
