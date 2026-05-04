@@ -1,0 +1,81 @@
+# Pre-commit hooks for a scientific Python + Snakemake + (occasional) C++ repo.
+# Runs automatically on `git commit`. Fails the commit if any hook flags a
+# problem; many hooks auto-fix and stage the fix, so re-running `git commit`
+# usually succeeds.
+#
+# Versions below are pinned for reproducibility. Refresh occasionally with:
+#   pre-commit autoupdate
+#
+# Skip a single commit (use sparingly, e.g. emergency fixes):
+#   git commit --no-verify
+#
+# Run all hooks against the whole repo (useful first time, or after autoupdate):
+#   pre-commit run --all-files
+
+# Raw data files are immutable: hooks must not rewrite them (e.g. EOL fixes
+# on FASTA inputs). Add other raw-data paths here as needed.
+exclude: '^data/'
+
+repos:
+  # ── General hygiene ──────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]   # blocks files > 1 MB; raise per-project if needed
+      - id: check-merge-conflict
+      - id: check-case-conflict   # catches Foo.py vs foo.py (breaks on case-insensitive FS)
+      - id: check-yaml            # validates YAML syntax (configs, GH Actions, conda envs)
+      - id: check-toml            # validates pyproject.toml
+      - id: check-json
+      - id: end-of-file-fixer     # ensures files end with exactly one newline
+      - id: trailing-whitespace
+        args: ["--markdown-linebreak-ext=md"]   # preserve trailing 2-space markdown breaks
+      - id: detect-private-key    # blocks accidentally committed SSH/GPG keys
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  # ── Python: lint + format in one fast tool ───────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff           # lint
+        args: ["--fix"]
+      - id: ruff-format    # format (replaces black)
+
+  # ── Notebooks: strip outputs before commit ───────────────────────────────
+  # Without this, every re-run of a notebook produces a noisy diff and
+  # commits embedded plot images. Configure once; forget about it.
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout
+
+  # ── Shell scripts ────────────────────────────────────────────────────────
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        args: ["--severity=warning"]   # error/warning only; loosens to "info" if you prefer
+
+  # ── Snakemake: formatter for Snakefiles and *.smk ────────────────────────
+  - repo: https://github.com/snakemake/snakefmt
+    rev: v0.10.2
+    hooks:
+      - id: snakefmt
+
+  # ── C++: formatter (uncomment when you start touching .cpp/.h files) ─────
+  # Requires a .clang-format file in the repo root defining the project style.
+  # - repo: https://github.com/pre-commit/mirrors-clang-format
+  #   rev: v19.1.6
+  #   hooks:
+  #     - id: clang-format
+  #       types_or: [c, c++]
+
+# ── Hooks deliberately NOT included ──────────────────────────────────────
+# - mypy / pyright: too slow and noisy for pre-commit; better as a CI step
+#   or run on demand with `mypy src/` locally.
+# - pytest: same reasoning. Tests run in CI or via `pytest` locally.
+# - snakemake --lint: no official pre-commit hook; run manually or in CI.
+# - codespell: useful but high false-positive rate on scientific jargon
+#   (gene names, math abbreviations). Add later if you want.

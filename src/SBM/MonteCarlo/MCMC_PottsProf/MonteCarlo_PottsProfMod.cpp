@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cmath> 
+#include <cmath>
 #include <random>
 #include <ctime>
 #include <vector>
@@ -16,7 +16,7 @@ PyObject* MC(PyObject*,PyObject* args) {
 	PyArrayObject *wO, *StatesO;
 	int tburn,Q;
 
-	if (!PyArg_ParseTuple(args, "O!O!ii", 
+	if (!PyArg_ParseTuple(args, "O!O!ii",
 		&PyArray_Type, &wO,
 		&PyArray_Type, &StatesO,
 		&tburn,
@@ -37,7 +37,7 @@ PyObject* MC(PyObject*,PyObject* args) {
 		std::uniform_int_distribution<int>unifpos(0,L-1);
 		std::uniform_real_distribution<double>unifrate(0.,1.);
 		int thread_id = omp_get_thread_num();
-		std::mt19937 rng(seed0 + thread_id); 
+		std::mt19937 rng(seed0 + thread_id);
 
 		//const unsigned int seed = seed0+123u*omp_get_thread_num();
 		//default_random_engine re(seed);

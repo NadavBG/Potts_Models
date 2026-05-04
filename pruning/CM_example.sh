@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 
 FULL_CM_ALG="../data/MSA_array/MSA_CM.npy"
 
