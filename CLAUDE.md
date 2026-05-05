@@ -4,23 +4,69 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-`SBM` (Stochastic Boltzmann Machine) infers the fields `h` and couplings `J` of a Potts model on a multiple sequence alignment (MSA) by gradient descent against MCMC-estimated statistics. The Python package wraps two C++/OpenMP MCMC kernels that are compiled at install time via scikit-build-core + CMake.
+`SBM` (Stochastic Boltzmann Machine) infers the fields `h` and couplings `J` of a Potts model on a multiple-sequence alignment (MSA) by gradient descent against MCMC-estimated statistics. The Python package wraps two C++/OpenMP MCMC kernels that are compiled at install time via scikit-build-core + CMake.
+
+## Where things live
+
+| If you need… | Look at |
+|---|---|
+| The optimizer entry point | `src/SBM/SBM_GD/SBM_proteins.py:SBM(align, options)` |
+| The MCMC sampler driver (Python) | `src/SBM/utils/utils.py:Create_modAlign` |
+| The C++ MCMC kernels | `src/SBM/MonteCarlo/MCMC_Potts/MonteCarlo_PottsMod.cpp` (full) and `MCMC_PottsProf/MonteCarlo_PottsProfMod.cpp` (profile-only) |
+| The packed-vector encoding | `src/SBM/utils/utils.py:Wj` / `Jw` |
+| The zero-sum gauge transform | `src/SBM/utils/utils.py:Zero_Sum_Gauge` |
+| Statistics / reweighting | `src/SBM/utils/utils.py:CalcWeights`, `CalcStatsWeighted`, `CalcThreeCorrWeighted` |
+| Run-level provenance helpers | `src/SBM/provenance.py` |
+| The training CLI | `scripts/train_sbm.py` (writes `results/<fam>/<run_id>/`) |
+| The pruning CLI | `pruning/build_mask.py` |
+| The figure helpers | `scripts/lab_plotting.py` (`save_figure`, `panel_label`, `LAB_COLORS`) |
+| The CM worked example | `scripts/examples/cm-family/run.sh`, `pruning/CM_example.sh` |
+
+`src/SBM/__init__.py` is empty by design — users import submodules directly (`SBM.SBM_GD.SBM_proteins`, `SBM.utils.utils`, `SBM.provenance`).
+
+## Data flow
+
+```
+MSA (.npy)
+   │
+   ▼  CalcWeights, CalcStatsWeighted
+fi, fij  ────────────────────────────────────────┐
+                                                 │
+W (packed h+J)  ──┐                              │
+                  ▼                              │
+        Create_modAlign  ──►  mc.MC / mcp.MC     │
+        (artificial alignment from current model)│
+                  │                              │
+                  ▼                              │
+            fi_mod, fij_mod                      │
+                  │                              │
+                  ▼   (subtract; pruning mask)   │
+              gradient ◄──────────────────────────┘
+                  │
+                  ▼  L-BFGS or vanilla GD step
+              new W → Wj/Jw → next iteration
+```
+
+After training, parameters are zero-sum gauged before averaging across replicates.
 
 ## Build, install, run
 
-The C++ extensions are required at runtime — `SBM.utils.utils` imports them eagerly. There is no pure-Python fallback. An editable install (`pip install -e .`) is the supported workflow; importing the source tree without building will fail.
-
 ```
+uv python install 3.12
+uv venv --python=3.12
+source .venv/bin/activate
 uv pip install -e ".[plotting,analysis,dev]"
 ```
 
-`pip install` works equivalently. All runtime deps (numpy, scipy, biopython, tqdm, pandas, matplotlib, more-itertools) are pinned in `pyproject.toml`. Optional extras: `plotting` (seaborn/plotly/POT/PyGSP), `analysis` (scikit-learn), `notebook` (ipykernel), `sca` (pySCA, only needed for the SCA pruning strategy), `dev` (pre-commit/ruff/pytest).
+`pip install -e .` works equivalently. Runtime deps are pinned in `pyproject.toml`; `requirements.lock` records exact pins for reproducible installs (`uv pip sync requirements.lock` then `uv pip install -e . --no-deps`).
 
-**macOS toolchain.** AppleClang has no OpenMP, so `pyproject.toml` forces `cmake/macos_llvm.cmake`, which hard-codes `/opt/homebrew/opt/llvm` and `libomp`. `brew install llvm libomp ninja cmake` is required; Intel-Mac or non-Homebrew prefixes need the toolchain file edited. On Linux, `python3-dev`, a GCC/G++ with OpenMP, CMake, and Ninja are sufficient.
+**macOS toolchain.** AppleClang has no OpenMP, so `pyproject.toml` forces `cmake/macos_llvm.cmake`, which hard-codes `/opt/homebrew/opt/llvm` and `libomp`. `brew install llvm libomp ninja cmake` is required; Intel-Mac or non-Homebrew prefixes need the toolchain file edited. On Linux, `python3-dev`, GCC/G++ with OpenMP, CMake, and Ninja are sufficient.
 
-**C++ rebuilds.** scikit-build-core's editable install does not auto-rebuild on `.cpp` changes. After editing C++ sources, run `uv pip install -e . --force-reinstall --no-deps`.
+**Don't use conda-forge / miniforge Python.** Its `python@3.12` libpython has an ABI quirk that segfaults during numpy's `import_array()` when our C++ extension is loaded. Use uv-managed standalone CPython or Homebrew's `python@3.12`.
 
-**Python.** 3.11+ (`requires-python = ">=3.11"`, wheel pinned to `cp311`).
+**C++ rebuilds.** scikit-build-core's editable install does not auto-rebuild on `.cpp` changes. After editing kernel source, run `uv pip install -e . --force-reinstall --no-deps`.
+
+**Python.** 3.11+ (`requires-python = ">=3.11"`).
 
 **Tests.** There is no test suite. After non-trivial changes, run the worked example as a smoke test:
 
@@ -32,39 +78,27 @@ It expects `data/MSA_array/MSA_CM.npy` to exist and writes a per-run directory u
 
 **Pruning workflow** lives in `pruning/` with its own `README.md` and `CM_example.sh`. The `"sca"` strategy depends on `pysca`, gated behind the `[sca]` optional-dependency group; `"fij"` and `"cij"` don't need it.
 
-## Architecture
-
-### Layers
-
-- `src/SBM/MonteCarlo/MCMC_Potts/` — full Potts MCMC (fields **and** couplings). Compiled C++ module `MonteCarlo_Potts`. ABI: `MC(w, states, tburn, Q, seed)`; honors `OMP_NUM_THREADS`.
-- `src/SBM/MonteCarlo/MCMC_PottsProf/` — profile-only MCMC (fields only, no couplings). Compiled C++ module `MonteCarlo_PottsProf`. Used when `Zero Couplings=True`. Same ABI shape.
-- `src/SBM/utils/utils.py` — alignment IO (`load_fasta`, `save_fasta_from_array`), the packed-vector encoding (`Wj`/`Jw`), MCMC driver (`Create_modAlign`), reweighting/statistics (`CalcWeights`, `CalcStatsWeighted`, `CalcThreeCorrWeighted`), and the zero-sum gauge transform (`Zero_Sum_Gauge`).
-- `src/SBM/SBM_GD/SBM_proteins.py` — the optimizer entry point `SBM(align, options, J0=None, h0=None)`, which dispatches to either:
-  - `Model='BM'` — vanilla Boltzmann-machine gradient descent (`alpha`/`Learning_rate`),
-  - `Model='SBM'` — limited-memory L-BFGS-style update (`AdvanceSearch` + `UpdateHessian`) with rank-`m` Hessian approximation.
-- `src/SBM/provenance.py` — manifest helpers used by the training driver and the mask builder. See "Run-level provenance" below.
-- `pruning/build_mask.py` — CLI that produces a binary `(L,L,q,q)` mask from MSA statistics (`fij`, `cij`, or pySCA `tildeC`); the mask is consumed by `SBM` via `options['Pruning Mask Couplings']`. Each generated mask gets a `<mask>.manifest.json` sidecar.
-- `scripts/train_sbm.py` — the family-agnostic training driver. Reads an MSA path, runs `SBM(...)`, writes per-run output (model + manifest + command). The CM-specific worked example lives at `scripts/examples/cm-family/`.
+## Architecture notes
 
 ### Data conventions
 
 - Amino-acid alphabet: `"-ACDEFGHIKLMNPQRSTVWY"`, with `q = 21` and `0 = gap`. `MSA` arrays are `int` of shape `(N_sequences, L)`.
 - Sequences containing any character outside the alphabet are **dropped** by `load_fasta` (mapped to `-1`, then filtered).
 - `options['q']` and `options['L']` are derived from the alignment in `Init_options`; do not set them manually.
-- Each training run writes `results/<fam>/<run_id>/{model.npy, manifest.json, command.sh}`. `model.npy` is still a pickled dict with the legacy keys (`J`, `h`, `W_all`, `Seeds`, `Train`, `Test`, `options0`, `options1`, …); the manifest carries the full provenance. The `options0`/`options1` split inside the model dict is preserved for backward compat but is no longer used for filename generation.
+- Each training run writes `results/<fam>/<run_id>/{model.npy, manifest.json, command.sh}`. `model.npy` is a pickled dict with the legacy keys (`J`, `h`, `W_all`, `Seeds`, `Train`, `Test`, `options0`, `options1`, …); the manifest carries the full provenance. The `options0`/`options1` split inside the model dict is preserved for backward compat but no longer drives filename generation.
 
 ### Packed-parameter layout (`Wj` / `Jw`)
 
-`SBM` optimizes a flat vector `W` of length `L*q + L*(L-1)/2 * q*q`, packing `h` (size `L*q`) after the unique upper-triangular `J[i<j]` block. The C++ MCMC indexes directly into this layout — see `MonteCarlo_PottsMod.cpp` — so any change to the encoding in `Wj`/`Jw` must be mirrored in both `.cpp` files. `Jw` symmetrizes `J[i,j,a,b] = J[j,i,b,a]` on unpack.
+`SBM` optimizes a flat vector `W` of length `L*q + L*(L-1)/2 * q*q`, packing `h` (size `L*q`) **after** the unique upper-triangular `J[i<j]` block. The C++ MCMC indexes directly into this layout — see `MonteCarlo_PottsMod.cpp` — so any change to the encoding in `Wj`/`Jw` must be mirrored in both `.cpp` files. `Jw` symmetrizes `J[i,j,a,b] = J[j,i,b,a]` on unpack.
 
 ### Gauge
 
-The model is over-parameterized; `Zero_Sum_Gauge` projects `(J,h)` onto the zero-sum gauge and is applied **after** training in the demo before the parameters are averaged across replicas. Comparing `J`/`h` across runs without first applying this transform is meaningless.
+The model is over-parameterized; `Zero_Sum_Gauge` projects `(J,h)` onto the zero-sum gauge and is applied **after** training in the demo before parameters are averaged across replicas. Comparing `J`/`h` across runs without first applying this transform is meaningless.
 
 ### Statistics-matching loop
 
 Each gradient step in `GradLogLike`:
-1. Builds an artificial alignment with `Create_modAlign` (calls `mc.MC` or `mcp.MC`, which performs `delta_t` Metropolis sweeps per chain via OpenMP).
+1. Builds an artificial alignment with `Create_modAlign` (calls `mc.MC` or `mcp.MC`, performing `delta_t` Metropolis sweeps per chain via OpenMP).
 2. Computes `fi_mod, fij_mod` from the artificial alignment (uniform weights) and `fi, fij` from data (sequence-reweighted, optionally with pseudocount).
 3. Returns `gradJ = fij_mod - fij + reg(J)` and `gradh = fi_mod - fi + reg(h)`. Pruning multiplies `gradJ` by the mask each step; `Zero Fields` / `Zero Couplings` zero the corresponding gradient.
 
@@ -88,7 +122,8 @@ The figure-side equivalent is `lab_plotting.save_figure()` (in `scripts/lab_plot
 - **`load_fasta` silently drops sequences** containing non-canonical residues. The reported "Final shape" may be smaller than the FASTA record count.
 - **`Zero Couplings=True` switches MCMC kernels** from `MonteCarlo_Potts` to `MonteCarlo_PottsProf` and packs `W` as just `h.flatten()`. Output-handling code branches on this, e.g. `output['J_norm']` becomes `None`.
 - **`'Pruning Mask Couplings'` is mutated in place** by `Init_Pruning` (path → array). The original path is stashed in `'Pruning Mask Couplings Source'` so the manifest can record it; don't reuse the options dict across `SBM(...)` calls expecting a clean re-init.
-- **No `__init__.py` exports**: importing `SBM` itself returns essentially nothing; users import `SBM.SBM_GD.SBM_proteins`, `SBM.utils.utils`, and `SBM.provenance` directly.
+- **`model.npy` bytes are not deterministic across runs** with the same seed — the saved dict includes wall-clock `Execution times`. The arrays inside (`J`, `h`, `W_all`, `Seeds`) **are** bit-identical with the same seed + `OMP_NUM_THREADS`. Compare arrays, not pickles.
+- **Conda Python segfaults** during `import_array()`. Use uv-managed CPython or Homebrew's `python@3.12`.
 - **Editable install + C++ edits.** `pip install -e .` does not auto-rebuild the C++ extensions on `.cpp` changes. After editing kernel source, run `pip install -e . --force-reinstall --no-deps`.
 
 ## Project-specific code conventions to follow
