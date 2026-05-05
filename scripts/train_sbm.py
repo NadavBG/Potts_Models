@@ -1,22 +1,58 @@
-"""
-Created in 2024
+"""SBM training driver.
 
-@author: Marion CHAUVEAU
+Reads a numerical MSA (`.npy`), runs ``SBM.SBM_GD.SBM_proteins.SBM`` once
+or more (averaged across replicates), and writes a self-describing run
+directory:
+
+    <results_path>/<fam>/<run_id>/
+        model.npy        # the existing pickled-dict model artifact
+        manifest.json    # full provenance: git, seeds, options, hashes,
+                         # package versions, timestamps
+        command.sh       # one-liner that re-invokes this run
+
+Each (rep × N_chains) combination produces one such run directory.
 """
 
-####################### MODULES #######################
+import argparse
+import datetime as _dt
+import sys
+from pathlib import Path
+
 import numpy as np  # type: ignore
+
+import SBM
 import SBM.SBM_GD.SBM_proteins as sbm
 import SBM.utils.utils as ut
-import argparse
-from pathlib import Path
-import SBM
+from SBM import provenance
 
 ROOT = Path(SBM.__file__).resolve().parents[2]
 data_dir = ROOT / "data"
 results_dir = ROOT / "results"
 
-##########################################################
+
+def _hash_input_array(path: Path | str | None) -> dict:
+    """For an MSA / train-indices file, record path + sha256 + shape."""
+    if path is None:
+        return {"path": None, "sha256": None}
+    p = Path(path)
+    entry = {"path": str(p), "sha256": provenance.file_sha256(p)}
+    try:
+        arr = np.load(p, allow_pickle=False)
+        entry["shape"] = list(arr.shape)
+        entry["dtype"] = str(arr.dtype)
+    except Exception:
+        pass
+    return entry
+
+
+def _spawn_seeds(seed: int | None, n: int) -> list[int]:
+    """Derive ``n`` per-replicate seeds from a master seed using
+    ``np.random.SeedSequence``. If ``seed`` is None, return ``[None]*n``
+    so SBM auto-generates each one (existing behavior)."""
+    if seed is None:
+        return [None] * n
+    children = np.random.SeedSequence(seed).spawn(n)
+    return [int(c.generate_state(1, dtype=np.uint32)[0]) for c in children]
 
 
 def run_SBM(
@@ -38,6 +74,7 @@ def run_SBM(
     ignore_gaps,
     prune_file,
     results_path,
+    seed,
 ):
     if results_path is None:
         results_path = results_dir
@@ -45,11 +82,18 @@ def run_SBM(
         results_path = Path(results_path)
     fam = str(fam)
 
+    msa_entry = _hash_input_array(Input_MSA)
+    train_entry = _hash_input_array(train_file)
+    prune_entry = _hash_input_array(prune_file)
+
     for rep in range(Nb_rep):
         for N_chains in N_chains_list:
+            replicate_seeds = _spawn_seeds(seed, Nb_av)
+            run_started = _dt.datetime.now(_dt.timezone.utc)
+
             W_rep = np.array([[]])
             Jnorm_rep = np.array([[]])
-            Seeds_rep = np.zeros(Nb_av)
+            Seeds_rep = np.zeros(Nb_av, dtype=np.int64)
             Extime_rep = np.zeros(Nb_av)
             for n_av in range(Nb_av):
                 print("AVG: ", n_av)
@@ -85,7 +129,7 @@ def run_SBM(
                         ("Train sequences", ind_train),
                         ("Weights", None),
                         ("SGD", None),
-                        ("Seed", None),
+                        ("Seed", replicate_seeds[n_av]),
                         ("Zero Fields", False),
                         ("Store Parameters", None),
                     ]
@@ -107,6 +151,7 @@ def run_SBM(
                 Seeds_rep[n_av] = output["options"]["Seed"]
                 Extime_rep[n_av] = output["Execution time"]
 
+            run_finished = _dt.datetime.now(_dt.timezone.utc)
             W_av = np.mean(W_rep, axis=0)
             J_av, h_av = ut.Jw(W_av, output["options"]["q"])
             output_av = {
@@ -121,6 +166,7 @@ def run_SBM(
                 "Train": output["Train"],
             }
 
+            # ── Backwards-compatible options0 / options1 split ──────────
             output_av["options0"] = {
                 "Model": output["options"]["Model"],
                 "N_iter": output["options"]["N_iter"],
@@ -132,7 +178,6 @@ def run_SBM(
                 "lambda_J": output["options"]["lambda_J"],
                 "Param_init": output["options"]["Param_init"],
             }
-
             output_av["options1"] = {
                 "skip_log": output["options"]["skip_log"],
                 "Pruning": output["options"]["Pruning"],
@@ -151,27 +196,58 @@ def run_SBM(
                 "L": output["options"]["L"],
             }
 
-            dossier = results_path / fam
-            dossier.mkdir(parents=True, exist_ok=True)
+            # ── Per-run directory + provenance ──────────────────────────
+            run_id = provenance.make_run_id(run_started)
+            run_dir = results_path / fam / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            model_path = run_dir / "model.npy"
+            np.save(model_path, output_av)
 
-            r = 0
-            file_name = fam
-            key_list = sorted(output_av["options0"].keys())
-
-            for k in key_list:
-                file_name += f"_{k}{output_av['options0'][k]}"
-
-            file_name += f"_N_Av{Nb_av}"
-
-            if prune_file is not None:
-                file_name += f"_{100*output_av['options1']['Pruning_perc']}pPruned"
-
-            path_result = dossier / f"{file_name}_R{r}.npy"
-
-            while path_result.exists():
-                r += 1
-                path_result = dossier / f"{file_name}_R{r}.npy"
-            np.save(path_result, output_av)
+            # Manifest captures the FULL options dict (incl. the 6 keys
+            # dropped from options0/options1) plus per-replicate seeds and
+            # exec times, plus input file hashes and library versions.
+            full_options = dict(output["options"])
+            # Restore the user-supplied mask path (Init_Pruning materializes
+            # the mask in-place, then stashes the source under a new key).
+            mask_source = full_options.pop("Pruning Mask Couplings Source", None)
+            manifest = provenance.build_run_manifest(
+                run_id=run_id,
+                command_line=sys.argv,
+                inputs={
+                    "msa": Input_MSA,
+                    "train_indices": train_file,
+                    "pruning_mask": mask_source,
+                },
+                options=full_options,
+                seed=seed,
+                started_at=run_started,
+                finished_at=run_finished,
+                output_path=model_path,
+                omp_threads_used=provenance.omp_threads_used(),
+                extra={
+                    "rep_index": rep,
+                    "Nb_rep": Nb_rep,
+                    "Nb_av": Nb_av,
+                    "replicate_seeds_actual": [int(s) for s in Seeds_rep],
+                    "replicate_seeds_planned": replicate_seeds,
+                    "replicate_exec_seconds": Extime_rep.tolist(),
+                    # Echo the input-array shapes/hashes (we rehash so the
+                    # entry has shape/dtype too, on top of the path-only
+                    # form provenance.build_run_manifest writes by default).
+                    "inputs_detail": {
+                        "msa": msa_entry,
+                        "train_indices": train_entry,
+                        "pruning_mask": prune_entry,
+                    },
+                },
+            )
+            provenance.save_run_manifest(manifest, run_dir / "manifest.json")
+            provenance.write_command_sh(
+                [sys.executable, *sys.argv],
+                run_dir / "command.sh",
+                cwd=Path.cwd(),
+            )
+            print(f"Run written: {run_dir}")
 
 
 if __name__ == "__main__":
@@ -224,6 +300,12 @@ if __name__ == "__main__":
         default=None,
         help="path to results directory. Default is <SBM Repo>/results/",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="master RNG seed; per-replicate seeds are spawned via SeedSequence",
+    )
     parser.add_argument("Input_MSA")
 
     args = parser.parse_args()
@@ -246,4 +328,5 @@ if __name__ == "__main__":
         args.ignore_gaps,
         args.prune,
         args.results_path,
+        args.seed,
     )

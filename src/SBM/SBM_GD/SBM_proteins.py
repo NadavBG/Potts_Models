@@ -159,6 +159,11 @@ def Init_statistics(options, train_align):
 
 def Init_Pruning(options, fij):
     if options["Pruning"]:
+        # Preserve the original input (path string or None) for provenance,
+        # since the next assignment overwrites the option with the array.
+        options.setdefault(
+            "Pruning Mask Couplings Source", options["Pruning Mask Couplings"]
+        )
         if options["Pruning Mask Couplings"] is None:
             # Nombre d'éléments à mettre à zéro
             total = fij.size

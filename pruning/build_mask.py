@@ -1,7 +1,13 @@
-import numpy as np
-import scipy.io as sio
-import pysca.scaTools as sca
 import argparse
+import datetime as _dt
+import sys
+from pathlib import Path
+
+import numpy as np
+import pysca.scaTools as sca
+import scipy.io as sio
+
+from SBM import provenance
 from SBM.utils.utils import CalcWeights
 
 BACKGROUND_FREQS_GAPLESS = np.array(
@@ -93,7 +99,43 @@ def write_file(outfile, prune_mat, verbose=False):
     return
 
 
-def partition_params(prune_vals, pcts, partial_outfile, outfile_path):
+def write_mask_manifest(outfile, *, alg_file, strategy, pct, theta, lbda, started_at):
+    """Write `<outfile>.manifest.json` with mask provenance.
+
+    Captures the input MSA (path + sha256 + shape), the strategy / theta /
+    lbda / percent that drove this mask, git state, package versions, and
+    timestamps. The output mask file itself is hashed too, so a manifest
+    commits to the bytes it sits next to.
+    """
+    finished_at = _dt.datetime.now(_dt.timezone.utc)
+    manifest = provenance.build_run_manifest(
+        run_id=provenance.make_run_id(started_at),
+        command_line=[sys.executable, *sys.argv],
+        inputs={"msa": alg_file},
+        options={
+            "strategy": strategy,
+            "percent": pct,
+            "theta": theta,
+            "lbda": lbda,
+        },
+        seed=None,  # mask generation is deterministic from inputs
+        started_at=started_at,
+        finished_at=finished_at,
+        output_path=outfile,
+        omp_threads_used=provenance.omp_threads_used(),
+    )
+    provenance.save_run_manifest(manifest, Path(outfile).with_suffix(".manifest.json"))
+
+
+def partition_params(
+    prune_vals, pcts, partial_outfile, outfile_path, *, manifest_meta=None
+):
+    """Generate one binary mask per requested percent and write it.
+
+    ``manifest_meta`` is a dict with keys ``alg_file``, ``strategy``,
+    ``theta``, ``lbda``, ``started_at``; if given, a manifest sidecar is
+    written next to each output file.
+    """
     N_pos = prune_vals.shape[0]
     triu = np.triu_indices(N_pos, k=1)  # ignore diagonal
     prune_vals_triu = np.zeros(prune_vals.shape)
@@ -109,6 +151,8 @@ def partition_params(prune_vals, pcts, partial_outfile, outfile_path):
                 bin_prune_mat[jj, ii] = bin_prune_mat[ii, jj].T
         outfile = "%s/%.2f_%s" % (outfile_path, pct, partial_outfile)
         write_file(outfile, bin_prune_mat)
+        if manifest_meta is not None:
+            write_mask_manifest(outfile, pct=pct, **manifest_meta)
 
 
 def main(
@@ -121,6 +165,7 @@ def main(
     outfile_path=".",  # folder to save files to
     pct=[95],
 ):
+    started_at = _dt.datetime.now(_dt.timezone.utc)
     # read in the file
     alg = None
     if alg_file[-4:] == ".npy":
@@ -132,6 +177,15 @@ def main(
         # get rid of any non-canonical AAs
         alg = sca.lett2num(alg, code="-ACDEFGHIKLMNPQRSTVWY")
         alg = alg[~(alg == 0).any(axis=1), :] - 1
+
+    def _meta(strategy):
+        return {
+            "alg_file": alg_file,
+            "strategy": strategy,
+            "theta": theta,
+            "lbda": lbda,
+            "started_at": started_at,
+        }
 
     # process inputs
     if not isinstance(pct, list):
@@ -147,6 +201,7 @@ def main(
             output_type,
         )
         write_file(outfile, prune_mat)
+        write_mask_manifest(outfile, pct=100.0, **_meta("Fij"))
         pct.remove(100)
 
     if len(pct) == 0:
@@ -171,18 +226,36 @@ def main(
         prune_vals = prune_vals.reshape(alg.shape[1], 21, alg.shape[1], 21).transpose(
             0, 2, 1, 3
         )
-        partition_params(prune_vals, pct, "%s_%s" % ("Cij", outfile_base), outfile_path)
+        partition_params(
+            prune_vals,
+            pct,
+            "%s_%s" % ("Cij", outfile_base),
+            outfile_path,
+            manifest_meta=_meta("Cij"),
+        )
     if "fij" in strategies:
         _, prune_vals, _ = sca.freq(alg + 1, seqw=seqw, Naa=21, lbda=0)
         prune_vals = prune_vals.reshape(alg.shape[1], 21, alg.shape[1], 21).transpose(
             0, 2, 1, 3
         )
-        partition_params(prune_vals, pct, "%s_%s" % ("Fij", outfile_base), outfile_path)
+        partition_params(
+            prune_vals,
+            pct,
+            "%s_%s" % ("Fij", outfile_base),
+            outfile_path,
+            manifest_meta=_meta("Fij"),
+        )
     if "sca" in strategies or "cij" in strategies:
         prune_vals = calcSCAMat(
             alg, seqw=seqw, lbda=lbda, freq0=freqs0, norm=None, include_gaps=True
         )
-        partition_params(prune_vals, pct, "%s_%s" % ("SCA", outfile_base), outfile_path)
+        partition_params(
+            prune_vals,
+            pct,
+            "%s_%s" % ("SCA", outfile_base),
+            outfile_path,
+            manifest_meta=_meta("SCA"),
+        )
     return
 
 

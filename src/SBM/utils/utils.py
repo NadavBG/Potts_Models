@@ -104,7 +104,7 @@ def save_fasta_from_array(Model_file, fasta_file, Nb_seq=100):
 ####################### CREATE ARTICIAL ALIGNEMENT #######################
 
 
-def Create_modAlign(output, N, delta_t=None, ITER="", temperature=1):
+def Create_modAlign(output, N, delta_t=None, ITER="", temperature=1, seed=None):
     """
         Function to create a alignment based on the provided parameters
         using the C_MonteCarlo module implemented in cython
@@ -116,6 +116,9 @@ def Create_modAlign(output, N, delta_t=None, ITER="", temperature=1):
         - ITER (str): Optional parameter (if several 'h' and 'J' values are stored in the output dictionary
         we can choose 'h' and 'J' values at a specific iteration)
     - temperature (float): Optional parameter to specify the temperature at which sampling should proceed
+        - seed (int): Master RNG seed for the C++ MCMC kernel. If None, a fresh
+        seed is drawn from the (already-seeded) global numpy RNG so callers
+        that previously relied on np.random.seed continue to be reproducible.
 
         Returns:
         - numpy.array: A 2D numpy array with the created alignment.
@@ -136,10 +139,14 @@ def Create_modAlign(output, N, delta_t=None, ITER="", temperature=1):
         J = None
     w = np.array(Wj(J, h))
     states = np.random.randint(q, size=(N, L)).astype("int32")
+    if seed is None:
+        # Drawn from the global RNG so reproducibility tracks np.random.seed.
+        seed = int(np.random.randint(0, 2**63 - 1, dtype=np.int64))
+    mcmc_seed = int(seed) & ((1 << 64) - 1)  # C++ ABI takes uint64
     if J is None:
-        mcp.MC(w, states, int(delta_t), int(q))
+        mcp.MC(w, states, int(delta_t), int(q), mcmc_seed)
     else:
-        mc.MC(w, states, int(delta_t), int(q))
+        mc.MC(w, states, int(delta_t), int(q), mcmc_seed)
     MSA = np.copy(states)
     return np.array(MSA, dtype="int64")
 

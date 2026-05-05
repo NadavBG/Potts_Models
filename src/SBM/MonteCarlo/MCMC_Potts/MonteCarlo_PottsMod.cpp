@@ -1,7 +1,6 @@
-#include <iostream>
 #include <cmath>
+#include <cstdint>
 #include <random>
-#include <ctime>
 #include <vector>
 #include <omp.h>
 #define PY_SSIZE_T_CLEAN
@@ -11,16 +10,26 @@
 
 using namespace std;
 
-const char* MC_doc = "Doc";
+// MC(w, states, tburn, Q, seed) -> None
+//   w:      packed coupling+field vector (float64)
+//   states: NxL int32 array, mutated in place
+//   tburn:  number of Metropolis sweeps per chain
+//   Q:      alphabet size
+//   seed:   master RNG seed; per-thread seed = seed + thread_id
+//
+// Honors OMP_NUM_THREADS; the caller is responsible for setting it.
+const char* MC_doc = "Run Metropolis MCMC on a Potts model. See ABI in source.";
 PyObject* MC(PyObject*,PyObject* args) {
 	PyArrayObject *wO, *StatesO;
-	int tburn,Q;
+	int tburn, Q;
+	unsigned long long seed0;
 
-	if (!PyArg_ParseTuple(args, "O!O!ii",
+	if (!PyArg_ParseTuple(args, "O!O!iiK",
 		&PyArray_Type, &wO,
 		&PyArray_Type, &StatesO,
 		&tburn,
-		&Q)) {
+		&Q,
+		&seed0)) {
 			PyErr_SetString(PyExc_RuntimeError, "Failed to parse input");
 			return nullptr;
 		}
@@ -29,18 +38,13 @@ PyObject* MC(PyObject*,PyObject* args) {
     const int L = PyArray_DIM(StatesO, 1);
     const double* w = (double*) PyArray_DATA(wO);
     int* States = (int*) PyArray_DATA(StatesO);
-    const unsigned int seed0 = time(nullptr);
 
-    omp_set_num_threads(50);
     #pragma omp parallel
     {
 		std::uniform_int_distribution<int>unifpos(0,L-1);
 		std::uniform_real_distribution<double>unifrate(0.,1.);
 		int thread_id = omp_get_thread_num();
-		std::mt19937 rng(seed0 + thread_id);
-
-		//const unsigned int seed = seed0+123u*omp_get_thread_num();
-		//default_random_engine re(seed);
+		std::mt19937_64 rng(seed0 + static_cast<uint64_t>(thread_id));
 
 		#pragma omp for
 		for (int m = 0; m < N; m++) {

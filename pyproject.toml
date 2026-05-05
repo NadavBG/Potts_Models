@@ -13,8 +13,41 @@ authors = [{ name = "Marion" }]
 requires-python = ">=3.11"
 readme = "README.md"
 
+# Runtime dependencies. Version bounds are upper-pinned to known-working
+# major versions; the lock file (requirements.lock) records exact pins for
+# reproducible installs.
 dependencies = [
-    "more-itertools",
+    "numpy>=1.26,<3",
+    "scipy>=1.11,<2",
+    "biopython>=1.83",
+    "tqdm>=4.66",
+    "more-itertools>=10",
+    "pandas>=2.2",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+plotting = [
+    "seaborn>=0.13",
+    "plotly>=5.18",
+    "POT>=0.9",
+    "PyGSP>=0.5",
+]
+analysis = [
+    "scikit-learn>=1.4",
+]
+notebook = [
+    "ipykernel",
+    "notebook",
+]
+# Pruning via the SCA strategy depends on pySCA, which isn't on PyPI.
+sca = [
+    "pysca @ git+https://github.com/ranganathanlab/pySCA",
+]
+dev = [
+    "pre-commit>=3.6",
+    "ruff>=0.8",
+    "pytest>=8",
 ]
 
 [project.urls]
