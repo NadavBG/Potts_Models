@@ -24,13 +24,16 @@ Use [`uv`](https://github.com/astral-sh/uv) for fast, reproducible installs:
 
 ```sh
 brew install uv               # macOS; or: pip install uv
-uv venv
+uv python install 3.12        # standalone CPython (see note below)
+uv venv --python=3.12
 source .venv/bin/activate
 uv pip install -e ".[plotting,analysis,dev]"
 pre-commit install
 ```
 
 `pip` works equally well — substitute `pip install` for `uv pip install`.
+
+> **Avoid conda/miniforge Python.** The conda-forge `python@3.12` builds have a libpython ABI quirk that segfaults during numpy's `import_array()` when our extension is loaded. Use uv's standalone-build Python (the `uv python install` step above) or Homebrew's `python@3.12`. The lock file (`requirements.lock`) was generated against `cpython-3.12.13-macos-aarch64-none`.
 
 The optional dependency groups are:
 

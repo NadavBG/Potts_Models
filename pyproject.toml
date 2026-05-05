@@ -56,7 +56,6 @@ Bug-Tracker = "https://github.com/StatBio/Stochastic-Boltzmann-Machine/-/issues"
 
 [tool.scikit-build]
 minimum-version = "0.7"
-wheel.py-api = "cp311"
 
 # IMPORTANT : activer un toolchain automatique sur macOS
 cmake.args = [
