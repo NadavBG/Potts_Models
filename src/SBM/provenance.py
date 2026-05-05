@@ -157,17 +157,25 @@ def package_versions(
     return out
 
 
-def env_block(omp_threads_used: int | None = None) -> dict[str, Any]:
+def env_block(omp_threads_requested: int | None = None) -> dict[str, Any]:
     """Snapshot of the runtime: Python, platform, host, OMP threads,
-    package versions. ``omp_threads_used`` should be the actual value
-    OpenMP saw at runtime, not the requested one (these can differ).
+    package versions.
+
+    ``omp_threads_requested`` is the value the *caller* asked for (typically
+    the parsed ``OMP_NUM_THREADS`` env var). It is **not** necessarily what
+    OpenMP actually used at runtime — OpenMP can clamp under
+    ``OMP_DYNAMIC`` or platform limits. The C++ kernels do not currently
+    report ``omp_get_max_threads()`` back, so we record only the request.
+    Bit-identical reproduction across machines requires both runs to land
+    on the same actual thread count, which usually means setting
+    ``OMP_NUM_THREADS`` to a value the hardware can satisfy on each.
     """
     return {
         "python": _platform.python_version(),
         "platform": _platform.platform(),
         "hostname": _socket.gethostname(),
         "omp_num_threads_env": _os.environ.get("OMP_NUM_THREADS"),
-        "omp_num_threads_used": omp_threads_used,
+        "omp_num_threads_requested": omp_threads_requested,
         "package_versions": package_versions(),
     }
 
@@ -246,7 +254,7 @@ def build_run_manifest(
     started_at: _dt.datetime,
     finished_at: _dt.datetime,
     output_path: Path | str | None = None,
-    omp_threads_used: int | None = None,
+    omp_threads_requested: int | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble a manifest dict ready to be JSON-dumped.
@@ -266,7 +274,7 @@ def build_run_manifest(
             "git_dirty": git_dirty(),
             "git_branch": git_branch(),
         },
-        "env": env_block(omp_threads_used=omp_threads_used),
+        "env": env_block(omp_threads_requested=omp_threads_requested),
         "inputs": {label: _input_entry(p) for label, p in inputs.items()},
         "options": sanitize_options(options),
         "seed": seed,
@@ -328,12 +336,13 @@ def write_command_sh(
 # ── Helpers for callers ─────────────────────────────────────────────────
 
 
-def omp_threads_used() -> int | None:
-    """Best-effort read of the OpenMP thread count the C++ kernels see.
+def omp_threads_requested() -> int | None:
+    """Best-effort read of the OpenMP thread count the user asked for.
 
-    Returns the value of ``OMP_NUM_THREADS`` if set, else None. The
-    C++ side will use ``omp_get_max_threads()`` at runtime; this is
-    just for the manifest's record of what the user requested.
+    Returns ``int(OMP_NUM_THREADS)`` if the env var is set, else None.
+    This is **not** necessarily the count OpenMP actually used at runtime
+    — the C++ kernels do not currently report ``omp_get_max_threads()``
+    back. Recorded in the manifest under ``env.omp_num_threads_requested``.
     """
     raw = _os.environ.get("OMP_NUM_THREADS")
     if raw is None:

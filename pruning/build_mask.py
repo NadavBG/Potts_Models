@@ -122,7 +122,7 @@ def write_mask_manifest(outfile, *, alg_file, strategy, pct, theta, lbda, starte
         started_at=started_at,
         finished_at=finished_at,
         output_path=outfile,
-        omp_threads_used=provenance.omp_threads_used(),
+        omp_threads_requested=provenance.omp_threads_requested(),
     )
     provenance.save_run_manifest(manifest, Path(outfile).with_suffix(".manifest.json"))
 

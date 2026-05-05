@@ -57,12 +57,12 @@ The mask generation script will output one file per combined strategy and percen
 ### Inference with Pruning Mask
 
 With the generated mask, a Potts model can be inferred in two ways:
-1. If calling `sbm.SBM` directly, include `Prune: True` and `Prune Mask Couplings: "path/to/prune_mask"` in your options dictionary.
-2. If running SBM through a wrapper Python script, as in the demo `SBM-CM-family.py`, include the pruning mask as a command line flag `--prune "path/to/prune_mask"`.
+1. If calling `sbm.SBM` directly, include `"Pruning": True` and `"Pruning Mask Couplings": "path/to/prune_mask"` in your options dictionary.
+2. If running SBM through `scripts/train_sbm.py`, include the pruning mask as a command line flag: `--prune "path/to/prune_mask"`.
 
 ### Example
 
 The script `CM_example.sh` generates a pruning mask for the chorismate mutase family that excludes 98% of the parameters based on SCA, and then it uses the mask to infer a Potts model.
 
 It can be run from the command line as:
-`>zsh CM_example.sh`.
+`bash CM_example.sh`

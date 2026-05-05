@@ -80,7 +80,7 @@ The options that matter most in practice:
 | `--seed S` | Master RNG seed. Required for bit-identical reproduction. | none (auto from `time()`) |
 | `--results_path` | Output root. | `<repo>/results` |
 
-Less common flags (`--Test/Train`, `--ignore_gaps`, `--SGD`, `--Zero Fields`, `--Zero Couplings`, …) are documented inline by `python scripts/train_sbm.py --help`.
+Run `python scripts/train_sbm.py --help` for the full flag list, including `--TestTrain`, `--ignore_gaps`, `--train_file`, `--mod` (`BM` vs `SBM`), and `--Input_MSA` positional argument ordering. Some `options` keys (`SGD`, `Zero Fields`, `Zero Couplings`, `Precomputed_Stats`, `Infinite Mask Fields`) are only reachable from Python by calling `SBM.SBM_GD.SBM_proteins.SBM(align, options)` directly — they aren't exposed on the CLI.
 
 ## What you get
 
@@ -175,7 +175,7 @@ The lock file (`requirements.lock`) was generated against `cpython-3.12.13-macos
   "command_line": ["python", "scripts/train_sbm.py", "CM", "..."],
   "code":  {"git_commit": "...", "git_dirty": false, "git_branch": "main"},
   "env":   {"python": "...", "platform": "...", "hostname": "...",
-            "omp_num_threads_env": "8", "omp_num_threads_used": 8,
+            "omp_num_threads_env": "8", "omp_num_threads_requested": 8,
             "package_versions": {"numpy": "...", "scipy": "...", ...}},
   "inputs":  {"msa": {"path": "...", "sha256": "..."},
               "train_indices": {"path": null, "sha256": null},

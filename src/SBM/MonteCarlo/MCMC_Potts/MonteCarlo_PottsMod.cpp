@@ -18,6 +18,14 @@ using namespace std;
 //   seed:   master RNG seed; per-thread seed = seed + thread_id
 //
 // Honors OMP_NUM_THREADS; the caller is responsible for setting it.
+//
+// Energy / acceptance convention:
+//   The packed vector `w` stores fields h and couplings J directly (not -h
+//   and -J). The Boltzmann probability is p(s) ∝ exp( h_i(s_i) + Σ J_ij ).
+//   So the variable named `dE` below is really Δ(log p) = -ΔE under the
+//   physics sign convention, and the Metropolis test reads
+//       accept iff dE >= 0  OR  rand() < exp(dE),
+//   which is min(1, exp(Δ log p)). Don't be fooled by the variable name.
 const char* MC_doc = "Run Metropolis MCMC on a Potts model. See ABI in source.";
 PyObject* MC(PyObject*,PyObject* args) {
 	PyArrayObject *wO, *StatesO;

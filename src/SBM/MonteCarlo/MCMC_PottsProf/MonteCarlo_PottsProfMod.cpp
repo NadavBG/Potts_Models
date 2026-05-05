@@ -12,7 +12,10 @@ using namespace std;
 
 // MC(w, states, tburn, Q, seed) -> None
 // Profile-only variant: w packs only fields h (no couplings J).
-// See MCMC_Potts/MonteCarlo_PottsMod.cpp for full ABI notes.
+// See MCMC_Potts/MonteCarlo_PottsMod.cpp for full ABI and energy /
+// acceptance convention. In short: `w` stores h directly, so the
+// variable named `dE` below is Δ(log p), and the Metropolis test
+// `dE >= 0 || rand() < exp(dE)` is min(1, exp(Δ log p)).
 const char* MC_doc = "Run Metropolis MCMC on a Potts profile model. See ABI in source.";
 PyObject* MC(PyObject*,PyObject* args) {
 	PyArrayObject *wO, *StatesO;

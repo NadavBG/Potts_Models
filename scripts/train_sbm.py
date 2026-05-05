@@ -15,6 +15,7 @@ Each (rep × N_chains) combination produces one such run directory.
 
 import argparse
 import datetime as _dt
+import logging
 import sys
 from pathlib import Path
 
@@ -25,23 +26,31 @@ import SBM.SBM_GD.SBM_proteins as sbm
 import SBM.utils.utils as ut
 from SBM import provenance
 
+log = logging.getLogger(__name__)
+
 ROOT = Path(SBM.__file__).resolve().parents[2]
 data_dir = ROOT / "data"
 results_dir = ROOT / "results"
 
 
 def _hash_input_array(path: Path | str | None) -> dict:
-    """For an MSA / train-indices file, record path + sha256 + shape."""
+    """For an MSA / train-indices file, record path + sha256 + shape.
+
+    Shape/dtype is best-effort: if the file isn't a plain ``.npy`` (e.g.
+    the user pointed at a pickled or unsupported format), we still record
+    path + sha256 and log a warning. The hash is the load-bearing field.
+    """
     if path is None:
         return {"path": None, "sha256": None}
     p = Path(path)
     entry = {"path": str(p), "sha256": provenance.file_sha256(p)}
     try:
         arr = np.load(p, allow_pickle=False)
-        entry["shape"] = list(arr.shape)
-        entry["dtype"] = str(arr.dtype)
-    except Exception:
-        pass
+    except (ValueError, OSError) as exc:
+        log.warning("could not read shape/dtype for %s: %s", p, exc)
+        return entry
+    entry["shape"] = list(arr.shape)
+    entry["dtype"] = str(arr.dtype)
     return entry
 
 
@@ -223,7 +232,7 @@ def run_SBM(
                 started_at=run_started,
                 finished_at=run_finished,
                 output_path=model_path,
-                omp_threads_used=provenance.omp_threads_used(),
+                omp_threads_requested=provenance.omp_threads_requested(),
                 extra={
                     "rep_index": rep,
                     "Nb_rep": Nb_rep,
