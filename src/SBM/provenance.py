@@ -221,15 +221,49 @@ def sanitize_options(options: dict[str, Any]) -> dict[str, Any]:
 # ── Manifest assembly ───────────────────────────────────────────────────
 
 
-def make_run_id(when: _dt.datetime | None = None) -> str:
-    """``YYYYMMDDTHHMMSSZ-xxxxx`` — sortable timestamp + 5-hex random.
+def make_run_id(
+    when: _dt.datetime | None = None,
+    *,
+    label: str | None = None,
+    parent_dir: Path | str | None = None,
+) -> str:
+    """Construct a run id.
 
-    The random suffix avoids collisions when two runs start in the same
-    second (multi-replicate sweeps). UTC.
+    Two formats:
+
+    1. **Human-readable** (when ``label`` is given): ``YYYY-MM-DD_<label>_<idx>``,
+       e.g. ``2026-05-05_CM-example_0``. ``idx`` is the next free integer
+       under ``parent_dir`` matching ``<date>_<label>_*``; if ``parent_dir``
+       is None or empty, ``idx`` starts at 0. Best-effort: a race between
+       two simultaneous runs can pick the same idx, but for a research
+       workflow the wall-clock spacing makes this unlikely.
+
+    2. **Legacy timestamp** (when ``label`` is None):
+       ``YYYYMMDDTHHMMSSZ-xxxxx`` — sortable UTC timestamp + 5-hex random
+       suffix. Kept so existing callers don't break.
+
+    UTC throughout. ``label`` should be filesystem-safe (no slashes); the
+    function does not sanitize.
     """
     when = when or _dt.datetime.now(_dt.timezone.utc)
-    stamp = when.strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}-{_secrets.token_hex(3)[:5]}"
+    if label is None:
+        stamp = when.strftime("%Y%m%dT%H%M%SZ")
+        return f"{stamp}-{_secrets.token_hex(3)[:5]}"
+    base = f"{when:%Y-%m-%d}_{label}"
+    if parent_dir is None:
+        return f"{base}_0"
+    parent = Path(parent_dir)
+    if not parent.is_dir():
+        return f"{base}_0"
+    used: list[int] = []
+    prefix = f"{base}_"
+    for entry in parent.iterdir():
+        if entry.name.startswith(prefix):
+            suffix = entry.name[len(prefix) :]
+            if suffix.isdigit():
+                used.append(int(suffix))
+    next_idx = (max(used) + 1) if used else 0
+    return f"{base}_{next_idx}"
 
 
 def _input_entry(path: Path | str | None) -> dict[str, Any]:

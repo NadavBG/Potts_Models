@@ -2,21 +2,17 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# Worked example: train an SBM model on the chorismate mutase (CM) family.
-# Run from the repo root after installing the package (`pip install -e .`).
+# Worked example: train an SBM model on the chorismate mutase (CM) family
+# and render its figures. Output lands at
+#   results/CM/<YYYY-MM-DD>_CM-example_<idx>/
+# with model.npy, manifest.json, command.sh, fig_data/, and figs/.
+#
+# Run from anywhere; this thin wrapper dispatches to scripts/run_sbm.sh.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../../.. && pwd)"
-cd "${REPO_ROOT}"
 
-python scripts/train_sbm.py CM "${REPO_ROOT}/data/MSA_array/MSA_CM.npy" \
-    --TestTrain 0 \
-    --m 1 \
-    --rep 1 \
-    --N_av 1 \
-    --N_iter 400 \
-    --theta 0.3 \
-    --ParamInit zero \
-    --lambdJ 0 \
-    --lambdh 0 \
-    --N_chains 70 \
-    --seed 42
+bash "${REPO_ROOT}/scripts/run_sbm.sh" \
+    SBM \
+    "${REPO_ROOT}/data/MSA_array/MSA_CM.npy" \
+    --label CM-example \
+    "$@"

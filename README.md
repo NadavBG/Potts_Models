@@ -16,16 +16,22 @@ uv venv --python=3.12
 source .venv/bin/activate
 uv pip install -e ".[plotting,analysis,dev]"
 
-# 3. train a model on the bundled CM example (~30 s on 4 cores)
-OMP_NUM_THREADS=4 python scripts/train_sbm.py CM data/MSA_array/MSA_CM.npy \
-    --N_iter 100 --N_chains 50 --k_MCMC 5000 \
-    --rep 1 --N_av 1 --m 1 \
-    --theta 0.3 --ParamInit zero \
-    --lambdJ 0 --lambdh 0 \
-    --seed 42
+# 3. train a model AND render its figures, in one command
+OMP_NUM_THREADS=4 bash scripts/run_sbm.sh SBM data/MSA_array/MSA_CM.npy \
+    --label CM-example
 ```
 
-The model lands in `results/CM/<run_id>/`. See `bash scripts/examples/cm-family/run.sh` for the canonical example, and `pruning/CM_example.sh` for the same with a pruning mask.
+That writes `results/CM/2026-05-05_CM-example_0/` with:
+
+- `model.npy` — trained `J`, `h`, train/test splits, etc.
+- `manifest.json` — git commit, RNG seed, input hashes, package versions
+- `command.sh` — self-contained re-runner
+- `figs/*.pdf` — the canonical figure set (correlation scatter plots, PCA, etc.)
+- `fig_data/` — cached intermediates (artificial alignment, statistics) so re-rendering is fast
+
+Run it again and `_idx` increments to `_1`. The CM example is also available as `bash scripts/examples/cm-family/run.sh`; pruning is `bash pruning/CM_example.sh`.
+
+The two inputs you'll usually care about are the **MSA path** and `--prune <mask.npy>`. Everything else has a default; see `bash scripts/run_sbm.sh --help`.
 
 > **Heads-up: avoid conda-forge / miniforge Python.** Its `python@3.12` build has a libpython ABI quirk that segfaults during numpy's `import_array()` when our C++ extension is loaded. Use `uv python install` (above) or Homebrew's `python@3.12`.
 
@@ -59,37 +65,63 @@ data/
 
 ## Training
 
+The recommended entry point is `scripts/run_sbm.sh`, which trains the model and renders figures in one step.
+
 ```sh
-python scripts/train_sbm.py <fam> <MSA.npy> [options]
+bash scripts/run_sbm.sh <MODE> <MSA_NPY> [options] [-- <train_sbm.py overrides>]
 ```
 
-The options that matter most in practice:
+`<MODE>` is **`BM`** (vanilla gradient descent) or **`SBM`** (L-BFGS-style). The two important inputs are `<MSA_NPY>` and `--prune <mask>`; everything else has a default.
 
-| Flag | What it controls | Sensible default |
+The options most users will touch:
+
+| Flag | What it does | Default |
 |---|---|---|
-| `--N_iter` | Number of gradient-descent steps. Bigger MSA / richer model → more iters. | 400 |
-| `--N_chains` | Number of MCMC chains used to estimate model statistics each step. Larger = lower-variance gradient, more wall time. | 50–100 |
-| `--k_MCMC` | Metropolis sweeps per chain per step. Larger = better mixing. | 5000–100 000 |
-| `--m` | L-BFGS Hessian rank (only meaningful for `--mod SBM`). | 1–20 |
-| `--theta` | Sequence-reweighting similarity threshold (`1 - hamming_distance` cutoff). | 0.2–0.3 |
-| `--ParamInit` | `zero`, `profile`, `random`, or `custom`. Use `profile` to start from data-derived fields. | `zero` |
-| `--lambdJ`, `--lambdh` | L2 regularization on couplings / fields. | 0–0.01 |
-| `--rep` | Number of *independent* runs (each goes to its own `<run_id>/`). | 1 |
-| `--N_av` | Number of replicates *averaged within one run* (each gets a sub-seed via `SeedSequence`). | 1 |
-| `--prune <mask.npy>` | Restrict couplings to a binary mask (see Pruning below). | none |
-| `--seed S` | Master RNG seed. Required for bit-identical reproduction. | none (auto from `time()`) |
-| `--results_path` | Output root. | `<repo>/results` |
+| `--label NAME` | Label embedded in the run dir name (`<date>_<label>_<idx>`) | family name |
+| `--seed N` | Master RNG seed | `42` |
+| `--prune PATH` | Restrict couplings to a binary mask (see [Pruning](#pruning-workflow)) | none |
+| `--results-path DIR` | Output root | `<repo>/results` |
+| `--N_iter N` | Gradient-descent iterations | 400 |
+| `--N_chains N` | MCMC chains used to estimate model statistics each step | 70 |
+| `--k_MCMC N` | Metropolis sweeps per chain per step | 10 000 |
+| `--no-figures` | Skip rendering (just train) | off |
 
-Run `python scripts/train_sbm.py --help` for the full flag list, including `--TestTrain`, `--ignore_gaps`, `--train_file`, `--mod` (`BM` vs `SBM`), and `--Input_MSA` positional argument ordering. Some `options` keys (`SGD`, `Zero Fields`, `Zero Couplings`, `Precomputed_Stats`, `Infinite Mask Fields`) are only reachable from Python by calling `SBM.SBM_GD.SBM_proteins.SBM(align, options)` directly — they aren't exposed on the CLI.
+Anything after `--` is forwarded verbatim to `scripts/train_sbm.py`, so the long-tail flags (`--m`, `--lambdJ`, `--theta`, `--ParamInit`, `--TestTrain`, `--ignore_gaps`, …) are reachable without bloating the bash CLI. Run `bash scripts/run_sbm.sh --help` for the short list and `python scripts/train_sbm.py --help` for the long list.
+
+A few `options` keys (`SGD`, `Zero Fields`, `Zero Couplings`, `Precomputed_Stats`, `Infinite Mask Fields`) are only reachable by calling `SBM.SBM_GD.SBM_proteins.SBM(align, options)` directly from Python.
+
+If you prefer to drive training yourself and skip figures, call `scripts/train_sbm.py` directly:
+
+```sh
+python scripts/train_sbm.py <fam> <MSA.npy> --mod SBM --label CM-example --seed 42 [...]
+```
+
+To re-render figures on an already-trained run (e.g. after editing plot code) without retraining:
+
+```sh
+python scripts/render_figures.py results/CM/2026-05-05_CM-example_0
+```
 
 ## What you get
 
 ```text
-results/<fam>/<run_id>/
+results/<fam>/<YYYY-MM-DD>_<label>_<idx>/
 ├── model.npy        # pickled dict (see below)
 ├── manifest.json    # full provenance — schema in src/SBM/provenance.py
-└── command.sh       # self-contained shell script that re-invokes this run
+├── command.sh       # self-contained shell script that re-invokes this run
+├── fig_data/        # cached intermediates (artificial alignment, statistics)
+│   ├── align_mod.npy
+│   └── stats.npy
+└── figs/            # rendered PDFs, one per plot type
+    ├── freq.pdf            # 1-point frequency: train vs test vs artificial
+    ├── pair_freq.pdf       # 2-point connected correlations
+    ├── corr3.pdf           # 3-point connected correlations
+    ├── pca_0.pdf, pca_1.pdf  # PCA of natural / artificial sequences
+    ├── coupling_evol.pdf   # ‖J‖ over training iterations
+    └── (energy, similarity, diversity, length — only when --TestTrain 1)
 ```
+
+Each PDF embeds the git commit, run id, and timestamp in its metadata, plus a sidecar `<figure>.source.py` next to it (a copy of `render_figures.py` at the time of the run). Figure data lives in `fig_data/` so re-rendering is fast: `python scripts/render_figures.py <run_dir>` reuses the cache.
 
 Loading the model:
 

@@ -2,16 +2,19 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# Worked example: build a pruning mask for the CM family, then train an SBM
-# model that respects it. Run from this directory after installing the
-# package and the optional `sca` extra (`pip install -e ".[sca]"`).
+# Worked example: build a pruning mask for the CM family, then train an
+# SBM model that respects it. Output lands at
+#   results/CM/<YYYY-MM-DD>_CM-pruned_<idx>/
+# with model.npy, manifest.json, command.sh, fig_data/, and figs/.
+#
+# Requires the [sca] optional extra (`pip install -e ".[sca]"`).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 FULL_CM_ALG="${REPO_ROOT}/data/MSA_array/MSA_CM.npy"
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-# 1. Build a pruning mask from the full alignment.
+# 1. Build a pruning mask from the full alignment (98% of couplings zeroed).
 python build_mask.py \
     --alg "${FULL_CM_ALG}" \
     --theta 0.7 \
@@ -22,18 +25,12 @@ python build_mask.py \
     --path "./prune_output" \
     --percent 98
 
-# 2. Train an SBM model that uses the mask.
-python "${REPO_ROOT}/scripts/train_sbm.py" SCAPruned_CM "${FULL_CM_ALG}" \
-    --TestTrain 0 \
-    --m 20 \
-    --rep 1 \
-    --N_av 1 \
-    --N_iter 400 \
-    --theta 0.3 \
-    --ParamInit zero \
-    --lambdJ 0.01 \
-    --lambdh 0.01 \
-    --N_chains 100 \
-    --prune "./prune_output/98.00_SCA_CM_SeqW_0.7.npy" \
-    --results_path "./example_output/" \
-    --seed 42
+# 2. Train an SBM model that uses the SCA-derived mask. Higher-rank Hessian
+#    (m=20) and small L2 regularization (1e-2 each on J and h) are
+#    appropriate when most couplings are constrained to zero.
+bash "${REPO_ROOT}/scripts/run_sbm.sh" \
+    SBM "${FULL_CM_ALG}" \
+    --prune "$(pwd)/prune_output/98.00_SCA_CM_SeqW_0.7.npy" \
+    --label CM-pruned \
+    --results-path "$(pwd)/example_output" \
+    -- --m 20 --lambdJ 0.01 --lambdh 0.01 --N_chains 100

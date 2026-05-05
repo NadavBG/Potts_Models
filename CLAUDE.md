@@ -10,17 +10,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | If you need… | Look at |
 |---|---|
+| The user-facing entry point | `scripts/run_sbm.sh` (bash dispatcher: train + render in one go) |
+| The training CLI | `scripts/train_sbm.py` (writes `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/`) |
+| The figure renderer | `scripts/render_figures.py` (writes `fig_data/` + `figs/` under a run dir; idempotent) |
 | The optimizer entry point | `src/SBM/SBM_GD/SBM_proteins.py:SBM(align, options)` |
 | The MCMC sampler driver (Python) | `src/SBM/utils/utils.py:Create_modAlign` |
 | The C++ MCMC kernels | `src/SBM/MonteCarlo/MCMC_Potts/MonteCarlo_PottsMod.cpp` (full) and `MCMC_PottsProf/MonteCarlo_PottsProfMod.cpp` (profile-only) |
 | The packed-vector encoding | `src/SBM/utils/utils.py:Wj` / `Jw` |
 | The zero-sum gauge transform | `src/SBM/utils/utils.py:Zero_Sum_Gauge` |
 | Statistics / reweighting | `src/SBM/utils/utils.py:CalcWeights`, `CalcStatsWeighted`, `CalcThreeCorrWeighted` |
+| Plot recipes (used by `render_figures.py`) | `src/SBM/utils/utils_plot.py:plot_stats` (9 modes) |
 | Run-level provenance helpers | `src/SBM/provenance.py` |
-| The training CLI | `scripts/train_sbm.py` (writes `results/<fam>/<run_id>/`) |
 | The pruning CLI | `pruning/build_mask.py` |
-| The figure helpers | `scripts/lab_plotting.py` (`save_figure`, `panel_label`, `LAB_COLORS`) |
-| The CM worked example | `scripts/examples/cm-family/run.sh`, `pruning/CM_example.sh` |
+| The figure-save helpers | `scripts/lab_plotting.py` (`save_figure`, `panel_label`, `LAB_COLORS`) |
+| The CM worked example | `scripts/examples/cm-family/run.sh`, `pruning/CM_example.sh` (both thin wrappers around `run_sbm.sh`) |
 
 `src/SBM/__init__.py` is empty by design — users import submodules directly (`SBM.SBM_GD.SBM_proteins`, `SBM.utils.utils`, `SBM.provenance`).
 
@@ -85,7 +88,7 @@ It expects `data/MSA_array/MSA_CM.npy` to exist and writes a per-run directory u
 - Amino-acid alphabet: `"-ACDEFGHIKLMNPQRSTVWY"`, with `q = 21` and `0 = gap`. `MSA` arrays are `int` of shape `(N_sequences, L)`.
 - Sequences containing any character outside the alphabet are **dropped** by `load_fasta` (mapped to `-1`, then filtered).
 - `options['q']` and `options['L']` are derived from the alignment in `Init_options`; do not set them manually.
-- Each training run writes `results/<fam>/<run_id>/{model.npy, manifest.json, command.sh}`. `model.npy` is a pickled dict with the legacy keys (`J`, `h`, `W_all`, `Seeds`, `Train`, `Test`, `options0`, `options1`, …); the manifest carries the full provenance. The `options0`/`options1` split inside the model dict is preserved for backward compat but no longer drives filename generation.
+- Each run writes `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/{model.npy, manifest.json, command.sh, fig_data/, figs/}`. The dir name is built by `provenance.make_run_id(label=..., parent_dir=...)`; `idx` auto-increments by scanning sibling dirs. `model.npy` is a pickled dict with the legacy keys (`J`, `h`, `W_all`, `Seeds`, `Train`, `Test`, `options0`, `options1`, …); the manifest carries the full provenance. The `options0`/`options1` split inside the model dict is preserved for backward compat. `fig_data/` caches the heavy `compute_stats` output and the artificial alignment so `render_figures.py` can re-render figures cheaply after plot-code edits. `figs/` is the rendered PDFs (one per `utils_plot.plot_stats` mode), saved through `lab_plotting.save_figure` with git/run-id metadata.
 
 ### Packed-parameter layout (`Wj` / `Jw`)
 

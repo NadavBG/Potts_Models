@@ -84,6 +84,7 @@ def run_SBM(
     prune_file,
     results_path,
     seed,
+    label,
 ):
     if results_path is None:
         results_path = results_dir
@@ -206,8 +207,15 @@ def run_SBM(
             }
 
             # ── Per-run directory + provenance ──────────────────────────
-            run_id = provenance.make_run_id(run_started)
-            run_dir = results_path / fam / run_id
+            # Run-id format is <YYYY-MM-DD>_<label>_<idx>; label defaults to
+            # the family name. The legacy timestamp+random format is still
+            # available via make_run_id(label=None) for non-CLI callers.
+            fam_dir = results_path / fam
+            fam_dir.mkdir(parents=True, exist_ok=True)
+            run_id = provenance.make_run_id(
+                run_started, label=label or fam, parent_dir=fam_dir
+            )
+            run_dir = fam_dir / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
             model_path = run_dir / "model.npy"
             np.save(model_path, output_av)
@@ -315,6 +323,12 @@ if __name__ == "__main__":
         default=None,
         help="master RNG seed; per-replicate seeds are spawned via SeedSequence",
     )
+    parser.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="label embedded in the run dir name (default: family name)",
+    )
     parser.add_argument("Input_MSA")
 
     args = parser.parse_args()
@@ -338,4 +352,5 @@ if __name__ == "__main__":
         args.prune,
         args.results_path,
         args.seed,
+        args.label,
     )
