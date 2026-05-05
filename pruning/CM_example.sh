@@ -2,10 +2,14 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# Worked example: build a pruning mask for the CM family, then train an
-# SBM model that respects it. Output lands at
-#   results/CM/<YYYY-MM-DD>_CM-pruned_<idx>/
+# Worked example: build a pruning mask for the CM family, then train a
+# BM positive control that respects it. Output lands at
+#   results/CM/<YYYY-MM-DD>_CM-bm-pruned_<idx>/
 # with model.npy, manifest.json, command.sh, fig_data/, and figs/.
+#
+# This is the BM ("positive control") regime from Summary Note 3:
+# m=20, lambda_J=lambda_h=0.01, N_chains=100. run_sbm.sh applies these
+# defaults automatically when MODE=BM, so no manual overrides are needed.
 #
 # Requires the [sca] optional extra (`pip install -e ".[sca]"`).
 
@@ -25,12 +29,11 @@ python build_mask.py \
     --path "./prune_output" \
     --percent 98
 
-# 2. Train an SBM model that uses the SCA-derived mask. Higher-rank Hessian
-#    (m=20) and small L2 regularization (1e-2 each on J and h) are
-#    appropriate when most couplings are constrained to zero.
+# 2. Train a BM model that uses the SCA-derived mask. The BM defaults
+#    in run_sbm.sh (m=20, lambda=0.01, N_chains=100) are appropriate
+#    when most couplings are constrained to zero.
 bash "${REPO_ROOT}/scripts/run_sbm.sh" \
-    SBM "${FULL_CM_ALG}" \
+    BM "${FULL_CM_ALG}" \
     --prune "$(pwd)/prune_output/98.00_SCA_CM_SeqW_0.7.npy" \
-    --label CM-pruned \
-    --results-path "$(pwd)/example_output" \
-    -- --m 20 --lambdJ 0.01 --lambdh 0.01 --N_chains 100
+    --label CM-bm-pruned \
+    --results-path "$(pwd)/example_output"

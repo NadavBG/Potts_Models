@@ -1,10 +1,18 @@
-"""Render the canonical figure set for an SBM run.
+"""Render figures for an SBM run.
 
-Reads ``<run_dir>/model.npy``, computes intermediate ``fig_data/`` once
-(an artificial alignment + the heavy ``compute_stats`` output), and saves
-figures into ``<run_dir>/figs/``. Idempotent: re-running on the same run
-dir loads from cache and just re-renders, so this is also the right
-script to run after editing figure code.
+Reads ``<run_dir>/model.npy`` and saves figures into ``<run_dir>/figs/``.
+Idempotent: re-running on the same run dir loads from cache and just
+re-renders, so this is also the right script to run after editing
+figure code.
+
+By default only ``coupling_evol`` is rendered — it is the only figure
+that does not require a synthetic alignment (which is a separate
+post-training sampling step). To render diagnostic figures that
+compare data statistics to a model-sampled MSA (``freq``, ``pair_freq``,
+``corr3``, ``pca``, ``energy``, ``similarity``, ``diversity``,
+``length``), pass them explicitly via ``--figs``. The synthetic
+alignment is then drawn at inference temperature T=1 (matching how
+the model was trained) and cached under ``fig_data/``.
 
 Reuses ``SBM.utils.utils_plot.plot_stats`` for the nine plot modes.
 PDFs go through ``lab_plotting.save_figure`` (sibling script in
@@ -14,8 +22,6 @@ in the PDF metadata.
 Usage::
 
     python scripts/render_figures.py <run_dir> [--figs name [name ...]]
-
-Default ``--figs`` is everything that has the data to render.
 """
 
 from __future__ import annotations
@@ -55,6 +61,11 @@ ALL_FIGS: tuple[str, ...] = (
     "diversity",
     "length",
 )
+
+#: Figures rendered by default. Restricted to those that need no
+#: synthetic alignment, since sampling from the trained model is a
+#: separate downstream step. Everything else in ALL_FIGS is opt-in.
+DEFAULT_FIGS: tuple[str, ...] = ("coupling_evol",)
 
 # ``utils_plot.plot_stats`` selects modes by string. Map our snake_case
 # figure names to the ``plot=...`` strings that file expects.
@@ -251,9 +262,7 @@ def _filter_renderable(model: dict, requested: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Render the canonical figure set for an SBM run."
-    )
+    parser = argparse.ArgumentParser(description="Render figures for an SBM run.")
     parser.add_argument(
         "run_dir",
         type=Path,
@@ -263,10 +272,16 @@ def main(argv: list[str] | None = None) -> int:
         "--figs",
         nargs="+",
         choices=ALL_FIGS,
-        default=list(ALL_FIGS),
+        default=list(DEFAULT_FIGS),
         metavar="NAME",
         help=(
-            "which figures to render (default: all). Choices: " + ", ".join(ALL_FIGS)
+            "which figures to render. Default: "
+            + ", ".join(DEFAULT_FIGS)
+            + " (the only figures that don't require sampling a synthetic "
+            "alignment). Other choices, all of which need a synthetic "
+            "alignment: "
+            + ", ".join(f for f in ALL_FIGS if f not in DEFAULT_FIGS)
+            + "."
         ),
     )
     args = parser.parse_args(argv)

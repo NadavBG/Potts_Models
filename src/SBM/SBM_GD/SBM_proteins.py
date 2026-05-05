@@ -19,19 +19,24 @@ import SBM.utils.utils as ut
 
 def ParseOptions(options):
     assert options["Model"] in ["BM", "SBM"]
+    # BM and SBM both run L-BFGS by default; they differ in m, lambda_J/h,
+    # and N_chains (set by the caller). Vanilla gradient descent is opt-in
+    # via Optimizer="GD", which then consumes alpha / Learning_rate.
     Opt = [
+        ("Optimizer", "LBFGS"),  # "LBFGS" (default for BM and SBM) or "GD"
         ("N_iter", 300),  # nb of GD iterations
         ("N_chains", 1000),  # nb of states used to compute statistics
-        ("m", 1),  # Rank of the Hessian matrix (only for SBM)
+        ("m", 1),  # L-BFGS memory rank
         ("theta", 0.2),
         (
             "ignore_gaps_weighting",
             True,
         ),  # ignore gaps when calculating sequence weights
         ("k_MCMC", 10000),
+        ("Record_every", 100),  # iters between successive J_norm recordings
         ("PseudoCount", False),  # the default pseudo count is 1/Neff
-        ("alpha", 0.2),  # Learning rate for the BM method
-        ("Learning_rate", None),
+        ("alpha", 0.2),  # Learning rate exponent for Optimizer="GD"
+        ("Learning_rate", None),  # If set, overrides decaying alpha for "GD"
         ("lambda_h", 0),  # regularization for the fields
         ("lambda_J", 0),  # regularization for the couplings
         ("regul", "L2"),
@@ -58,13 +63,11 @@ def ParseOptions(options):
         ),  # if not None store couplings and fields every ** iterations ('Store Couplings', **)
     ]
     for k, v in Opt:
-        if k not in options.keys():
-            if options["Model"] == "SBM":
-                if k not in ["alpha", "Learning rate"]:
-                    options[k] = v
-            else:
-                if k not in ["m"]:
-                    options[k] = v
+        options.setdefault(k, v)
+    if options["Optimizer"] not in ("LBFGS", "GD"):
+        raise ValueError(
+            f"Optimizer must be 'LBFGS' or 'GD' (got {options['Optimizer']!r})"
+        )
     return options
 
 
@@ -352,13 +355,20 @@ def GradLogLike(w, lambdaJ, lambdah, fi, fij, options, align_subsamp=None):
 
 def Minimizer(fun, x0, options):
     x = np.copy(x0)
-    output = {"skipping": 0, "J_norm": 0, "h_norm": 0}
+    output = {
+        "skipping": 0,
+        "J_norm": 0,  # leading scalar; np.append builds a 1-D array around it
+        "J_norm_iters": [],  # iteration index for each J_norm record (no entry for the placeholder)
+        "h_norm": 0,
+    }
     if options["Store Parameters"] is not None:
         output["Trajectory"] = {"w_0": x0}
 
+    record_every = options["Record_every"]
+
     for i in tqdm(range(options["N_iter"])):
-        ########## SBM METHOD #########
-        if options["Model"] == "SBM":
+        ########## L-BFGS (default for BM and SBM) #########
+        if options["Optimizer"] == "LBFGS":
             if i == 0:
                 g = fun(x)
                 h = -g
@@ -377,8 +387,8 @@ def Minimizer(fun, x0, options):
             )
         ################################
 
-        ########## BM METHOD ###########
-        else:
+        ########## Vanilla gradient descent (opt-in via Optimizer="GD") ###
+        else:  # options["Optimizer"] == "GD" (validated in ParseOptions)
             if options["Learning_rate"] is not None:
                 t = options["Learning_rate"]
             else:
@@ -402,16 +412,29 @@ def Minimizer(fun, x0, options):
                 elif idx % options["Store Parameters"] == 0:
                     output["Trajectory"]["w_" + str(idx)] = np.copy(x)
 
-        if i % 100 == 0:
+        if i % record_every == 0:
             if not options["Zero Couplings"]:
                 J, h_field = ut.Jw(x, options["q"])
                 J_norm = np.mean(np.linalg.norm(J, "fro", axis=(2, 3)))
                 output["J_norm"] = np.append(output["J_norm"], np.round(J_norm, 3))
+                output["J_norm_iters"].append(i)
         if options["Zero Couplings"]:
             J, h_field = ut.Jw(x, options["q"], Couplings=False)
             J, h_field = ut.Zero_Sum_Gauge(J, h_field)
             h_norm = np.mean(h_field[:, 1])  # np.sqrt(np.sum(h_field**2,axis = 1)))
             output["h_norm"] = np.append(output["h_norm"], h_norm)
+
+    # Final J_norm at i = N_iter so the trajectory ends at training
+    # completion, not at the last record_every-aligned step before it
+    # (the in-loop condition `i % record_every == 0` over `range(N_iter)`
+    # never fires at i = N_iter). Skip the rare case where the in-loop
+    # already recorded at the last step (i.e. (N_iter - 1) is a multiple
+    # of record_every).
+    if not options["Zero Couplings"] and (options["N_iter"] - 1) % record_every != 0:
+        J, h_field = ut.Jw(x, options["q"])
+        J_norm = np.mean(np.linalg.norm(J, "fro", axis=(2, 3)))
+        output["J_norm"] = np.append(output["J_norm"], np.round(J_norm, 3))
+        output["J_norm_iters"].append(options["N_iter"])
 
     return x, output
 

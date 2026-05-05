@@ -4,7 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-`SBM` (Stochastic Boltzmann Machine) infers the fields `h` and couplings `J` of a Potts model on a multiple-sequence alignment (MSA) by gradient descent against MCMC-estimated statistics. The Python package wraps two C++/OpenMP MCMC kernels that are compiled at install time via scikit-build-core + CMake.
+`SBM` infers the fields `h` and couplings `J` of a Potts model on a multiple-sequence alignment (MSA) by L-BFGS against MCMC-estimated statistics. The Python package wraps two C++/OpenMP MCMC kernels that are compiled at install time via scikit-build-core + CMake.
+
+Two training regimes share the L-BFGS algorithm and differ only in parameter values (per Summary Note 3):
+
+| Parameter | BM (positive control) | SBM (stochastic regularization) |
+| --- | --- | --- |
+| `m` (L-BFGS memory) | 20 | 1 |
+| `lambda_J`, `lambda_h` | 0.01 | 0 |
+| `N_chains` | 100 | 50 |
+| Sampling temperature (post-training, separate step) | 0.75 | 1.0 |
+
+`N_iter=400`, zero-initialized parameters, and inference temperature `T=1` are shared. Inference temperature is always 1 — the model is meant to reproduce data statistics at T=1. Sampling synthetic alignments at a different temperature is a separate downstream step and is not part of the training pipeline. Vanilla gradient descent is available via `Optimizer="GD"` (`--optimizer GD` on the CLI) but is rarely needed.
 
 ## Where things live
 
@@ -88,7 +99,7 @@ It expects `data/MSA_array/MSA_CM.npy` to exist and writes a per-run directory u
 - Amino-acid alphabet: `"-ACDEFGHIKLMNPQRSTVWY"`, with `q = 21` and `0 = gap`. `MSA` arrays are `int` of shape `(N_sequences, L)`.
 - Sequences containing any character outside the alphabet are **dropped** by `load_fasta` (mapped to `-1`, then filtered).
 - `options['q']` and `options['L']` are derived from the alignment in `Init_options`; do not set them manually.
-- Each run writes `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/{model.npy, manifest.json, command.sh, fig_data/, figs/}`. The dir name is built by `provenance.make_run_id(label=..., parent_dir=...)`; `idx` auto-increments by scanning sibling dirs. `model.npy` is a pickled dict with the legacy keys (`J`, `h`, `W_all`, `Seeds`, `Train`, `Test`, `options0`, `options1`, …); the manifest carries the full provenance. The `options0`/`options1` split inside the model dict is preserved for backward compat. `fig_data/` caches the heavy `compute_stats` output and the artificial alignment so `render_figures.py` can re-render figures cheaply after plot-code edits. `figs/` is the rendered PDFs (one per `utils_plot.plot_stats` mode), saved through `lab_plotting.save_figure` with git/run-id metadata.
+- Each run writes `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/{model.npy, manifest.json, command.sh, fig_data/, figs/}`. The dir name is built by `provenance.make_run_id(label=..., parent_dir=...)`; `idx` auto-increments by scanning sibling dirs. `model.npy` is a pickled dict with the legacy keys (`J`, `h`, `W_all`, `Seeds`, `Train`, `Test`, `options0`, `options1`, …); the manifest carries the full provenance. The `options0`/`options1` split inside the model dict is preserved for backward compat (with `Optimizer` added under `options0`). `fig_data/` caches the synthetic alignment and `compute_stats` output for any opt-in figures that need them. `figs/` is the rendered PDFs, saved through `lab_plotting.save_figure` with git/run-id metadata. By default `render_figures.py` produces only `coupling_evol` (the only figure that does not require sampling); the other modes (`freq`, `pair_freq`, `corr3`, `pca`, `energy`, `similarity`, `diversity`, `length`) need an artificial alignment and are opt-in via `--figs`.
 
 ### Packed-parameter layout (`Wj` / `Jw`)
 
@@ -101,11 +112,20 @@ The model is over-parameterized; `Zero_Sum_Gauge` projects `(J,h)` onto the zero
 ### Statistics-matching loop
 
 Each gradient step in `GradLogLike`:
-1. Builds an artificial alignment with `Create_modAlign` (calls `mc.MC` or `mcp.MC`, performing `delta_t` Metropolis sweeps per chain via OpenMP).
+1. Builds an artificial alignment with `Create_modAlign` (calls `mc.MC` or `mcp.MC`, performing `delta_t` Metropolis sweeps per chain via OpenMP). Inference temperature is hardcoded T=1 (the default value of `Create_modAlign`'s `temperature` argument); training never overrides it.
 2. Computes `fi_mod, fij_mod` from the artificial alignment (uniform weights) and `fi, fij` from data (sequence-reweighted, optionally with pseudocount).
 3. Returns `gradJ = fij_mod - fij + reg(J)` and `gradh = fi_mod - fi + reg(h)`. Pruning multiplies `gradJ` by the mask each step; `Zero Fields` / `Zero Couplings` zero the corresponding gradient.
 
 `'Pruning Mask Couplings'` may be either a path string (loaded once) or an in-memory `int` array; `Init_Pruning` overwrites the option to the materialized mask. The original input path is preserved under `'Pruning Mask Couplings Source'` for the manifest.
+
+### Optimizer dispatch
+
+`SBM_proteins.Minimizer` selects the algorithm based on `options["Optimizer"]`:
+
+- `"LBFGS"` (default) — runs `AdvanceSearch` / `UpdateHessian`. Both `Model="BM"` and `Model="SBM"` use this path; the difference between the two is the parameter values supplied (`m`, `lambda_J`, `lambda_h`, `N_chains`), not the algorithm.
+- `"GD"` — opt-in vanilla gradient descent using `alpha` (default 0.2) for a decaying learning rate, or `Learning_rate` if set. Rarely useful; kept for completeness.
+
+`run_sbm.sh` applies BM-vs-SBM defaults in shell. If you call `train_sbm.py` directly, pass `--m`, `--lambdJ`, `--lambdh`, `--N_chains` explicitly.
 
 ### Run-level provenance
 

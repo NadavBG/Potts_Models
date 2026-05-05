@@ -26,8 +26,9 @@ Usage:
     bash scripts/run_sbm.sh <MODE> <MSA_NPY> [options] [-- extra train_sbm.py args]
 
 Required positional:
-    <MODE>                BM | SBM (case-insensitive). BM uses vanilla
-                          gradient descent; SBM uses an L-BFGS-style update.
+    <MODE>                BM | SBM (case-insensitive). Both modes run
+                          L-BFGS; they differ in parameter values
+                          (m, lambda_J/h, N_chains) per Summary Note 3.
     <MSA_NPY>             path to the numerical MSA (.npy)
 
 Optional:
@@ -39,23 +40,33 @@ Optional:
     --results-path DIR    output root (default: <repo>/results)
     --fam NAME            family name (default: stripped from
                           basename(MSA), e.g. MSA_CM.npy → CM)
-    --N_iter N            number of GD iterations
-                          (default: 400 for both modes)
+    --N_iter N            number of L-BFGS iterations (default: 400)
     --N_chains N          number of MCMC chains
-                          (default: 70 for both modes)
+                          (default: BM=100, SBM=50)
+    --m N                 L-BFGS memory rank
+                          (default: BM=20, SBM=1)
+    --lambdJ X            L2 regularization on couplings
+                          (default: BM=0.01, SBM=0)
+    --lambdh X            L2 regularization on fields
+                          (default: BM=0.01, SBM=0)
     --k_MCMC N            Metropolis sweeps per chain per step
-                          (default: 10000)
+                          (default: 100_000)
     --no-figures          skip rendering (just train)
     -h, --help            this message
 
+Inference temperature is fixed at T=1 (the model is meant to reproduce
+data statistics at T=1). Sampling synthetic alignments — including
+those used for diagnostic figures — is a separate post-training step
+not handled by this script.
+
 Anything after `--` is forwarded verbatim to scripts/train_sbm.py, so
-you can reach the long tail of options (e.g. --m 20 --lambdJ 0.01).
+you can reach the long tail of options (e.g. --optimizer GD, --theta).
 
 Examples:
-    bash scripts/run_sbm.sh SBM data/MSA_array/MSA_CM.npy --label CM-example
+    bash scripts/run_sbm.sh SBM data/MSA_array/MSA_CM.npy --label CM-sbm
     bash scripts/run_sbm.sh BM  data/MSA_array/MSA_CM.npy --label CM-bm
-    bash scripts/run_sbm.sh SBM data/MSA_array/MSA_CM.npy \
-        --prune ./mask.npy --label CM-pruned -- --m 20 --lambdJ 0.01
+    bash scripts/run_sbm.sh BM  data/MSA_array/MSA_CM.npy \
+        --prune ./mask.npy --label CM-bm-pruned
 EOF
 }
 
@@ -64,20 +75,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
-# ── Defaults ────────────────────────────────────────────────────────────
-# These apply to both modes. Mode-specific overrides are set after we
-# parse <MODE> below.
+# ── Defaults shared by BM and SBM ───────────────────────────────────────
+# Mode-specific defaults (m, N_chains, lambdJ, lambdh) follow Summary
+# Note 3 and are set after <MODE> is parsed. Inference T is always 1
+# (no override); sampling for downstream sequence generation is a
+# separate step outside this script.
 N_ITER=400
-N_CHAINS=70
-K_MCMC=10000
+K_MCMC=100_000
 SEED=42
 N_AV=1
 REP=1
 TEST_TRAIN=0
 THETA=0.3
 PARAM_INIT=zero
-LAMBD_J=0
-LAMBD_H=0
+
+# Mode-specific defaults — populated below once we know <MODE>.
+N_CHAINS=""
+M=""
+LAMBD_J=""
+LAMBD_H=""
 
 PRUNE=""
 LABEL=""
@@ -119,18 +135,25 @@ case "${MODE}" in
         ;;
 esac
 
-# Mode-specific default overrides. Today both modes share most defaults;
-# this block is the place to diverge them later (e.g. different N_iter
-# or theta) without surprising callers.
+# Mode-specific defaults (Summary Note 3). Both modes run L-BFGS; the
+# mode label selects parameter values, not algorithm. User --flags below
+# can still override any of these.
 case "${MODE}" in
     BM)
-        # BM uses --alpha (decaying learning rate) instead of --m. There's
-        # no --alpha CLI flag on train_sbm.py at the moment; the BM default
-        # alpha=0.2 is set in src/SBM/SBM_GD/SBM_proteins.py:ParseOptions.
-        : # keep the shared defaults above
+        # Positive-control regime: more L-BFGS memory, small L2,
+        # larger synthetic MSA per gradient step.
+        N_CHAINS=100
+        M=20
+        LAMBD_J=0.01
+        LAMBD_H=0.01
         ;;
     SBM)
-        : # keep the shared defaults above
+        # Stochastic-regularization regime: m=1 keeps the synthetic MSA
+        # small (effective size ~ m * N_chains), no L2.
+        N_CHAINS=50
+        M=1
+        LAMBD_J=0
+        LAMBD_H=0
         ;;
 esac
 
@@ -143,6 +166,9 @@ while [[ $# -gt 0 ]]; do
         --fam)           FAM="$2"; shift 2 ;;
         --N_iter)        N_ITER="$2"; shift 2 ;;
         --N_chains)      N_CHAINS="$2"; shift 2 ;;
+        --m)             M="$2"; shift 2 ;;
+        --lambdJ)        LAMBD_J="$2"; shift 2 ;;
+        --lambdh)        LAMBD_H="$2"; shift 2 ;;
         --k_MCMC)        K_MCMC="$2"; shift 2 ;;
         --no-figures)    RENDER_FIGURES=0; shift ;;
         -h|--help)       usage; exit 0 ;;
@@ -176,12 +202,15 @@ if [[ -z "${LABEL}" ]]; then
 fi
 
 # ── Build train_sbm.py invocation ──────────────────────────────────────
+# Both modes pass --m: per Summary Note 3 they both run L-BFGS, with
+# different memory rank (m=20 for BM, m=1 for SBM).
 TRAIN_ARGS=(
     "${FAM}"
     "${MSA}"
     --mod "${MODE}"
     --N_iter "${N_ITER}"
     --N_chains "${N_CHAINS}"
+    --m "${M}"
     --k_MCMC "${K_MCMC}"
     --N_av "${N_AV}"
     --rep "${REP}"
@@ -199,11 +228,6 @@ if [[ -n "${PRUNE}" ]]; then
 fi
 if [[ -n "${RESULTS_PATH}" ]]; then
     TRAIN_ARGS+=(--results_path "${RESULTS_PATH}")
-fi
-# Append --m only for SBM (BM ignores it but ParseOptions tolerates extra
-# keys; still, less noise this way).
-if [[ "${MODE}" == "SBM" ]]; then
-    TRAIN_ARGS+=(--m 1)
 fi
 # Forward anything the user supplied after `--`. argparse lets the last
 # occurrence of a flag win, so user overrides above defaults.

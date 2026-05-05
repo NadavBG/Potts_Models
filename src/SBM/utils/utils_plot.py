@@ -429,17 +429,31 @@ def plot_stats(output, Stats, plot="Freq", ma=None):
 
     if plot == "Coupling_evol":
         fig = plt.figure(figsize=(5, 4))
-        plt.plot(output["J_norm"], "o", markersize=2, color="tab:blue")
-        plt.xlabel("Iterations")
+        # train_sbm.py stores J_norm as (N_av, 1 + N_records); the leading
+        # column is the scalar-0 placeholder that ``output["J_norm"]``
+        # holds before any recording is appended in Minimizer.
+        j_norm = np.atleast_2d(output["J_norm"])[:, 1:]
+
+        # Iteration label for each column. Prefer the explicit list saved
+        # by Minimizer (new runs include a final recording at i = N_iter).
+        # Fall back to reconstructing from Record_every for models written
+        # before that field existed.
+        iters = output.get("J_norm_iters")
+        if iters is None or len(iters) != j_norm.shape[1]:
+            record_every = output["options"].get("Record_every", 100)
+            iters = np.arange(j_norm.shape[1]) * record_every
+        else:
+            iters = np.asarray(iters)
+
+        for row in j_norm:
+            plt.plot(iters, row, "o", markersize=4, color="tab:blue")
+        plt.xlabel("Iteration")
         plt.ylabel("Couplings norm")
-        # plt.xticks(fontsize = 16)
         plt.grid()
-        # plt.yscale('log')
         plt.title(
-            "SBM, n_states="
-            + str(output["options"]["n_states"])
-            + " m="
-            + str(output["options"]["m"])
+            f"{output['options']['Model']}, "
+            f"N_chains={output['options']['n_states']} "
+            f"m={output['options']['m']}"
         )
 
 

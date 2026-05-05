@@ -85,6 +85,8 @@ def run_SBM(
     results_path,
     seed,
     label,
+    optimizer,
+    record_every,
 ):
     if results_path is None:
         results_path = results_dir
@@ -123,6 +125,7 @@ def run_SBM(
                 options = dict(
                     [
                         ("Model", Model),
+                        ("Optimizer", optimizer),
                         ("N_iter", N_iter),
                         ("N_chains", N_chains),
                         ("m", m),
@@ -130,6 +133,7 @@ def run_SBM(
                         ("theta", theta),
                         ("ignore_gaps_weighting", ignore_gaps),
                         ("k_MCMC", k_MCMC),
+                        ("Record_every", record_every),
                         ("lambda_h", lambdh),
                         ("lambda_J", lambdJ),
                         ("Pruning", prune_file is not None),
@@ -171,6 +175,9 @@ def run_SBM(
                 "Seeds": Seeds_rep,
                 "Execution times": Extime_rep,
                 "J_norm": Jnorm_rep,
+                # All replicates share N_iter and Record_every, so
+                # J_norm_iters is identical across them; store one copy.
+                "J_norm_iters": list(output.get("J_norm_iters", [])),
                 "align": output["align"],
                 "Test": output["Test"],
                 "Train": output["Train"],
@@ -179,11 +186,13 @@ def run_SBM(
             # ── Backwards-compatible options0 / options1 split ──────────
             output_av["options0"] = {
                 "Model": output["options"]["Model"],
+                "Optimizer": output["options"]["Optimizer"],
                 "N_iter": output["options"]["N_iter"],
                 "N_chains": output["options"]["N_chains"],
                 "m": output["options"]["m"],
                 "theta": output["options"]["theta"],
                 "k_MCMC": output["options"]["k_MCMC"],
+                "Record_every": output["options"]["Record_every"],
                 "lambda_h": output["options"]["lambda_h"],
                 "lambda_J": output["options"]["lambda_J"],
                 "Param_init": output["options"]["Param_init"],
@@ -284,6 +293,18 @@ if __name__ == "__main__":
         "--N_av", type=int, default=20, help="Number of averaged models"
     )
     parser.add_argument("--mod", type=str, default="SBM", help="Model")
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="LBFGS",
+        choices=["LBFGS", "GD"],
+        help=(
+            "Optimization algorithm. LBFGS is the default for both BM and SBM "
+            "(they differ in m, lambda_J/h, and N_chains, not in the algorithm). "
+            "GD selects vanilla gradient descent (uses --alpha / --learning_rate "
+            "instead of --m); rarely needed."
+        ),
+    )
     parser.add_argument("--N_iter", type=int, default=400, help="Number of iterations")
     parser.add_argument("--m", type=int, default=1, help="Parameter m")
     parser.add_argument(
@@ -294,6 +315,16 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--k_MCMC", type=int, default=100000, help="Number of MCMC steps"
+    )
+    parser.add_argument(
+        "--record_every",
+        type=int,
+        default=100,
+        help=(
+            "Record J_norm every N L-BFGS iterations (default: 100). A final "
+            "recording at iteration N_iter is added unconditionally so the "
+            "trajectory ends at training completion."
+        ),
     )
     parser.add_argument("--lambdJ", type=float, default=0, help="lambda J")
     parser.add_argument("--lambdh", type=float, default=0, help="lambda h")
@@ -353,4 +384,6 @@ if __name__ == "__main__":
         args.results_path,
         args.seed,
         args.label,
+        args.optimizer,
+        args.record_every,
     )
