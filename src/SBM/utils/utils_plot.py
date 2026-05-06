@@ -1,10 +1,19 @@
-"""
-@author: Marion CHAUVEAU
+"""Figure renderers for SBM/BM runs.
 
-:On:  October 2022
+Original author: Marion CHAUVEAU (October 2022).
+
+Refactored to take a list of artificial alignments (one per sampling
+temperature) and emit consolidated multi-panel figures: a single
+``Correlations`` figure with rows=temperatures × cols=orders replaces
+the legacy ``Freq`` / ``Pair_freq`` / ``Corr3`` triplet, and PCA
+becomes a ``1 × (1 + N_temps)`` grid (natural + each artificial).
+Energy / similarity / diversity / length overlay all temperatures in
+one panel.
 """
 
 ####################### MODULES #######################
+
+import logging
 
 import numpy as np  # type: ignore
 import matplotlib.pyplot as plt  # type: ignore
@@ -13,422 +22,354 @@ from matplotlib.colors import Normalize  # type: ignore
 from scipy.stats import gaussian_kde  # type: ignore
 from matplotlib import cm  # type: ignore
 
+log = logging.getLogger(__name__)
+
 ##########################################################
 
 ####################### PLOT STATISTICS #######################
 
 
-def plot_stats(output, Stats, plot="Freq", ma=None):
-    if plot == "Freq":
-        if ma is None:
-            ma = 1
-        fig = plt.figure(figsize=(12, 4))
-        fig.add_subplot(1, 2, 1)
-        Pears = np.round(
-            np.corrcoef(
-                Stats["Test"]["Freq"].flatten(), Stats["Artificial"]["Freq"].flatten()
-            )[0, 1],
-            2,
-        )
-        plt.plot(
-            [],
-            [],
-            "o",
-            markersize=3,
-            color="white",
-            label="1st order statistics\n Pearson: " + str(Pears),
-        )
-        plt.plot(
-            Stats["Test"]["Freq"].flatten(),
-            Stats["Artificial"]["Freq"].flatten(),
-            "o",
-            markersize=3,
-            color="grey",
-        )
-        plt.xlabel("Test set", fontsize=14)
-        plt.ylabel("Artificial set", fontsize=14)
-        plt.plot([0, ma], [0, ma], color="black")
-        # plt.xticks(fontsize = 16)
-        plt.legend(fontsize=12)
-        plt.grid()
-        plt.title("Artificial VS Test")
+def _art_label(base, temperature=None):
+    """Append the sampling temperature to a label mentioning the
+    artificial set: ``"Artificial set"`` → ``"Artificial set (T=0.75)"``.
+    Returns ``base`` unchanged when ``temperature`` is None.
+    """
+    if temperature is None:
+        return base
+    return f"{base} (T={float(temperature):g})"
 
-        fig.add_subplot(1, 2, 2)
-        Pears = np.round(
-            np.corrcoef(
-                Stats["Test"]["Freq"].flatten(), Stats["Train"]["Freq"].flatten()
-            )[0, 1],
-            2,
-        )
-        plt.plot(
-            [],
-            [],
-            "o",
-            markersize=3,
-            color="white",
-            label="1st order statistics\n Pearson: " + str(Pears),
-        )
-        plt.plot(
-            Stats["Test"]["Freq"].flatten(),
-            Stats["Train"]["Freq"].flatten(),
-            "o",
-            markersize=3,
-            color="grey",
-        )
-        plt.xlabel("Test set", fontsize=14)
-        plt.ylabel("Training set", fontsize=14)
-        plt.plot([0, ma], [0, ma], color="black")
-        # plt.xticks(fontsize = 16)
-        plt.legend(fontsize=12)
-        plt.grid()
-        plt.title("Train VS Test")
 
-        fig.tight_layout()
+def _scatter_panel(ax, x, y, *, label_pearson, xlabel, ylabel, title, diag_xy):
+    """Render a single scatter panel into ``ax`` (data + diagonal +
+    Pearson legend). ``diag_xy`` is a ``([x0, x1], [y0, y1])`` pair
+    drawn as the equality line, or ``None`` to skip it.
 
-    if plot == "Pair_freq":
-        if ma is None:
-            ma = 0.4
-        fig = plt.figure(figsize=(12, 4))
-        fig.add_subplot(1, 2, 1)
-        ind = np.triu_indices(output["align_mod"].shape[1], 1)
-        Pears = np.round(
-            np.corrcoef(
-                Stats["Test"]["Pair_freq"][ind].flatten(),
-                Stats["Artificial"]["Pair_freq"][ind].flatten(),
-            )[0, 1],
-            2,
-        )
-        plt.plot(
-            [],
-            [],
-            "o",
-            markersize=3,
-            color="white",
-            label="Pairwise Corr\n Pearson: " + str(Pears),
-        )
-        plt.plot(
-            Stats["Test"]["Pair_freq"][ind].flatten(),
-            Stats["Artificial"]["Pair_freq"][ind].flatten(),
-            "o",
-            markersize=3,
-            color="grey",
-        )
-        plt.xlabel("Test set", fontsize=14)
-        plt.ylabel("Artificial set", fontsize=14)
-        # plt.plot([0,ma],[0,ma])
-        plt.plot([-ma, ma], [-ma, ma], color="black")
-        # plt.xticks(fontsize = 16)
-        plt.legend(fontsize=12)
-        plt.grid()
-        plt.title("Artificial VS Test")
+    Sizes / fonts come from the active matplotlib style (lab-paper);
+    do not override them inline here.
+    """
+    pears = float(np.corrcoef(x, y)[0, 1])
+    # Invisible point as a label-only legend entry (carries the Pearson).
+    ax.plot([], [], "o", color="white", label=f"{label_pearson}\nPearson: {pears:.2f}")
+    ax.plot(x, y, "o", color="0.4")
+    if xlabel:
+        ax.set_xlabel(xlabel)
+    if ylabel:
+        ax.set_ylabel(ylabel)
+    if diag_xy is not None:
+        ax.plot(diag_xy[0], diag_xy[1], color="black", linewidth=0.8)
+    ax.legend()
+    if title:
+        ax.set_title(title)
 
-        fig.add_subplot(1, 2, 2)
-        Pears = np.round(
-            np.corrcoef(
-                Stats["Test"]["Pair_freq"][ind].flatten(),
-                Stats["Train"]["Pair_freq"][ind].flatten(),
-            )[0, 1],
-            2,
-        )
-        plt.plot(
-            [],
-            [],
-            "o",
-            markersize=3,
-            color="white",
-            label="Pairwise Corr\n Pearson: " + str(Pears),
-        )
-        plt.plot(
-            Stats["Test"]["Pair_freq"][ind].flatten(),
-            Stats["Train"]["Pair_freq"][ind].flatten(),
-            "o",
-            markersize=3,
-            color="grey",
-        )
-        plt.xlabel("Test set", fontsize=14)
-        plt.ylabel("Training set", fontsize=14)
-        # plt.plot([0,ma],[0,ma])
-        plt.plot([-ma, ma], [-ma, ma], color="black")
-        # plt.xticks(fontsize = 16)
-        plt.legend(fontsize=12)
-        plt.grid()
-        plt.title("Train VS Test")
 
-        fig.tight_layout()
+# (statistic-key, column header, fixed range, diag_form)
+# ``fixed_range`` is None for orders whose extent depends on the data
+# (3rd-order tensor); the diagonal is then taken from the reference's
+# min/max. Otherwise the diagonal is anchored at +/- range.
+# ``diag_form``:
+#   "0_to_R"   : [(0,0)-(R,R)] — frequencies in [0,1]
+#   "minus_R"  : [(-R,-R)-(R,R)] — centered correlations
+#   "data"     : [(min,min)-(max,max)] — dynamic
+_ORDER_SPEC: tuple[tuple, ...] = (
+    ("Freq", "1st order statistics", 1.0, "0_to_R"),
+    ("Pair_freq", "Pairwise correlations", 0.4, "minus_R"),
+    ("Three_corr", "3rd order correlations", None, "data"),
+)
 
-    if plot == "Corr3":
-        if ma is None:
-            ma = 0.1
-        fig = plt.figure(figsize=(12, 4))
-        fig.add_subplot(1, 2, 1)
-        Pears = np.round(
-            np.corrcoef(
-                Stats["Test"]["Three_corr"].flatten(),
-                Stats["Artificial"]["Three_corr"].flatten(),
-            )[0, 1],
-            2,
-        )
-        plt.plot(
-            [],
-            [],
-            "o",
-            markersize=3,
-            color="white",
-            label="3rd order correlations\n Pearson: " + str(Pears),
-        )
-        plt.plot(
-            Stats["Test"]["Three_corr"].flatten(),
-            Stats["Artificial"]["Three_corr"].flatten(),
-            "o",
-            markersize=3,
-            color="grey",
-        )
-        plt.xlabel("Test set", fontsize=14)
-        plt.ylabel("Artificial set", fontsize=14)
-        plt.plot(
-            [
-                np.amin(Stats["Test"]["Three_corr"]),
-                np.amax(Stats["Test"]["Three_corr"]),
-            ],
-            [
-                np.amin(Stats["Test"]["Three_corr"]),
-                np.amax(Stats["Test"]["Three_corr"]),
-            ],
-            color="black",
-        )
-        # plt.xticks(fontsize = 14)
-        # plt.plot([-ma,ma],[-ma,ma])
-        plt.legend(loc="upper left", fontsize=12)
-        plt.grid()
-        plt.title("Artificial VS Test")
 
-        fig.add_subplot(1, 2, 2)
-        Pears = np.round(
-            np.corrcoef(
-                Stats["Test"]["Three_corr"].flatten(),
-                Stats["Train"]["Three_corr"].flatten(),
-            )[0, 1],
-            2,
-        )
-        plt.plot(
-            [],
-            [],
-            "o",
-            markersize=3,
-            color="white",
-            label="3rd order correlations\n Pearson: " + str(Pears),
-        )
-        plt.plot(
-            Stats["Test"]["Three_corr"].flatten(),
-            Stats["Train"]["Three_corr"].flatten(),
-            "o",
-            markersize=3,
-            color="grey",
-        )
-        plt.xlabel("Test set", fontsize=14)
-        plt.ylabel("Training set", fontsize=14)
-        plt.plot(
-            [
-                np.amin(Stats["Test"]["Three_corr"]),
-                np.amax(Stats["Test"]["Three_corr"]),
-            ],
-            [
-                np.amin(Stats["Test"]["Three_corr"]),
-                np.amax(Stats["Test"]["Three_corr"]),
-            ],
-            color="black",
-        )
-        # plt.xticks(fontsize = 14)
-        plt.legend(loc="upper left", fontsize=12)
-        plt.grid()
-        plt.title("Train VS Test")
+def _diag_for(stats_ref_vals, fixed_range, diag_form):
+    """Build a `(x_pair, y_pair)` diagonal-line tuple for ``_scatter_panel``."""
+    if diag_form == "0_to_R":
+        return ([0, fixed_range], [0, fixed_range])
+    if diag_form == "minus_R":
+        return ([-fixed_range, fixed_range], [-fixed_range, fixed_range])
+    if diag_form == "data":
+        a = float(np.amin(stats_ref_vals))
+        b = float(np.amax(stats_ref_vals))
+        return ([a, b], [a, b])
+    raise ValueError(f"unknown diag_form: {diag_form!r}")
 
-        fig.tight_layout()
+
+def _flatten_for(key, arr, ind_pair):
+    """Pick the right view of a stats array for a scatter:
+    Pair_freq uses only the upper triangle; others flatten directly."""
+    if key == "Pair_freq":
+        return arr[ind_pair].flatten()
+    return arr.flatten()
+
+
+def plot_stats(output, plot="Correlations", *, artificial=None):
+    """Render one figure for the requested plot mode.
+
+    Parameters
+    ----------
+    output
+        The model dict (carries ``align``, ``Train``, optionally ``Test``,
+        ``h``, ``J``, ``J_norm``, ``options``).
+    plot
+        Mode name. One of ``Correlations``, ``PCA``, ``Energy``,
+        ``Coupling_evol``, ``Similarity``, ``Diversity``, ``Length``.
+    artificial
+        List of dicts, one per sampling temperature, each with keys
+        ``temperature`` (float | None), ``align_mod`` (ndarray, required
+        for align-needing modes), ``stats`` (dict from compute_stats,
+        required for Correlations). Empty / None for ``Coupling_evol``.
+    """
+    # The signature changed in this refactor (removed positional ``Stats``,
+    # ``ma``, ``temperature``; added kw-only ``artificial``). Catch the
+    # legacy positional call eagerly so old notebooks don't silently
+    # render nothing.
+    if not isinstance(plot, str):
+        raise TypeError(
+            "plot_stats signature changed: pass artificial=[{...}] as a "
+            "keyword. Got plot=%r (likely the old positional ``Stats``)"
+            % type(plot).__name__
+        )
+    artificial = list(artificial) if artificial else []
+    has_test = output.get("Test") is not None
+
+    if plot == "Correlations":
+        if not artificial:
+            raise ValueError("Correlations plot requires at least one artificial set")
+        ref_key = "Test" if has_test else "Train"
+        ref_xlabel = "Test set" if has_test else "Train set"
+        L = artificial[0]["align_mod"].shape[1]
+        ind_pair = np.triu_indices(L, 1)
+
+        # Compute per-column diagonals once. With ``sharey="col"`` the
+        # axes auto-scale to the union of all rows' data, so a row-local
+        # diagonal would visually mismatch the actual axis range. For
+        # the dynamic ("data") forms we therefore concatenate every
+        # row's reference values for that column.
+        col_diags: list = []
+        for j, (key, _header, fixed, form) in enumerate(_ORDER_SPEC):
+            if form == "data":
+                concat = np.concatenate(
+                    [
+                        _flatten_for(key, item["stats"][ref_key][key], ind_pair)
+                        for item in artificial
+                    ]
+                )
+                col_diags.append(_diag_for(concat, fixed, form))
+            else:
+                col_diags.append(_diag_for(None, fixed, form))
+
+        n_rows = len(artificial)
+        n_cols = len(_ORDER_SPEC)
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(3.5 * n_cols, 3.5 * n_rows),
+            sharex="col",
+            sharey="col",
+            squeeze=False,
+        )
+        for i, item in enumerate(artificial):
+            stats_i = item["stats"]
+            T = item["temperature"]
+            row_label = _art_label("Artificial", T)
+            for j, (key, header, _fixed, _form) in enumerate(_ORDER_SPEC):
+                ax = axes[i, j]
+                ref_vals = _flatten_for(key, stats_i[ref_key][key], ind_pair)
+                art_vals = _flatten_for(key, stats_i["Artificial"][key], ind_pair)
+                _scatter_panel(
+                    ax,
+                    ref_vals,
+                    art_vals,
+                    label_pearson=header,
+                    xlabel=ref_xlabel if i == n_rows - 1 else "",
+                    ylabel=row_label if j == 0 else "",
+                    title=header if i == 0 else "",
+                    diag_xy=col_diags[j],
+                )
 
     if plot == "PCA":
-        axis_font = {"size": "17"}
+        if not artificial:
+            raise ValueError("PCA plot requires at least one artificial set")
         Max = 0.15
         align_nat = output["align"]
-        M = min(align_nat.shape[0], output["align_mod"].shape[0])
-        sub_align_PCA = align_nat[
-            np.random.choice(align_nat.shape[0], M, replace=False)
-        ]
-        sub_align_mod = output["align_mod"][
-            np.random.choice(output["align_mod"].shape[0], M, replace=False)
-        ]
+        # Match subsample size to the smallest population so density
+        # estimates are comparable across panels.
+        Ms = [item["align_mod"].shape[0] for item in artificial]
+        M = min(min(Ms), align_nat.shape[0])
 
-        bin_align = ut.alg2bin(sub_align_PCA, N_aa=20)
-        bin_align_mod = ut.alg2bin(sub_align_mod, N_aa=20)
+        nat_idx = np.random.choice(align_nat.shape[0], M, replace=False)
+        bin_nat = ut.alg2bin(align_nat[nat_idx], N_aa=20)
 
-        X, X_mod = ut.PCA_comparison(bin_align, bin_align_mod, Pears=0, Mask=1)
+        # Fit PC1/PC2 on the natural alignment once; project every
+        # artificial alignment onto the same basis for fair comparison.
+        cov = np.cov(bin_nat.T)
+        W, V = np.linalg.eigh(cov)
+        ind = np.argsort(W)[::-1]
+        v1, v2 = V[:, ind[0]], V[:, ind[1]]
+        v1 = v1 / np.linalg.norm(v1)
+        v2 = v2 / np.linalg.norm(v2)
+        # Pin sign convention: ``np.linalg.eigh`` returns eigenvectors
+        # whose sign is implementation-defined (and can flip between
+        # numpy releases or BLAS backends). Force the largest-magnitude
+        # entry to be positive so the plotted PCA is reproducible across
+        # environments. Natural-vs-artificial within one figure agree
+        # regardless, but the figure as a whole would otherwise mirror.
+        if v1[np.argmax(np.abs(v1))] < 0:
+            v1 = -v1
+        if v2[np.argmax(np.abs(v2))] < 0:
+            v2 = -v2
+        conserved = float((W[ind[0]] + W[ind[1]]) / np.sum(W))
+        log.info("PCA conserved variance: %.4f %%", conserved * 100)
 
+        X_nat = np.column_stack((bin_nat @ v1, bin_nat @ v2))
+        art_Xs = []
+        for item in artificial:
+            sub_idx = np.random.choice(item["align_mod"].shape[0], M, replace=False)
+            bin_art = ut.alg2bin(item["align_mod"][sub_idx], N_aa=20)
+            art_Xs.append(np.column_stack((bin_art @ v1, bin_art @ v2)))
+
+        all_pts = np.concatenate([X_nat] + art_Xs, axis=0)
         shift = 0.4
-        ma1, mi1 = np.amax(X[:, 0]) + shift, np.amin(X[:, 0]) - shift
-        ma2, mi2 = np.amax(X[:, 1]) + shift, np.amin(X[:, 1]) - shift
-        # Wass_dist = ot.sliced_wasserstein_distance(X, X_mod, n_projections=500)
-        # print('Dist:',Wass_dist)
+        mi1 = float(np.amin(all_pts[:, 0])) - shift
+        ma1 = float(np.amax(all_pts[:, 0])) + shift
+        mi2 = float(np.amin(all_pts[:, 1])) - shift
+        ma2 = float(np.amax(all_pts[:, 1])) + shift
 
-        density_scatter(X[:, 0], X[:, 1], Max=Max, markersize=18)
-        plt.xlim([mi1, ma1])
-        plt.ylim([mi2, ma2])
-        plt.xlabel("PC 1", **axis_font)
-        plt.ylabel("PC 2", **axis_font)
-        plt.title("Natural sequences", **axis_font)
-        plt.grid(color="gray", linestyle=(0, (5, 10)))
-        plt.gca().spines[["right", "top", "left", "bottom"]].set_visible(False)
-
-        density_scatter(X_mod[:, 0], X_mod[:, 1], Max=Max, markersize=18)
-        plt.xlim([mi1, ma1])
-        plt.ylim([mi2, ma2])
-        plt.xlabel("PC 1", **axis_font)
-        plt.ylabel("PC 2", **axis_font)
-        plt.title("Artificial sequences", **axis_font)
-        plt.grid(color="gray", linestyle=(0, (5, 10)))
-        plt.gca().spines[["right", "top", "left", "bottom"]].set_visible(False)
+        n_panels = 1 + len(artificial)
+        fig, axes = plt.subplots(
+            1,
+            n_panels,
+            figsize=(3.5 * n_panels, 3.5),
+            sharex=True,
+            sharey=True,
+            squeeze=False,
+        )
+        axes = axes[0]
+        panels = [(axes[0], X_nat, "Natural sequences")]
+        for ax, item, X_a in zip(axes[1:], artificial, art_Xs):
+            panels.append(
+                (ax, X_a, _art_label("Artificial sequences", item["temperature"]))
+            )
+        # density_scatter draws the points with vmin=0, vmax=Max so the
+        # color mapping is identical across panels. We add a single
+        # shared colorbar after the loop instead of one per panel.
+        for ax, pts, title in panels:
+            density_scatter(pts[:, 0], pts[:, 1], Max=Max, ax=ax, add_colorbar=False)
+            ax.set_xlim(mi1, ma1)
+            ax.set_ylim(mi2, ma2)
+            ax.set_xlabel("PC 1")
+            ax.set_title(title)
+        axes[0].set_ylabel("PC 2")
+        norm = Normalize(vmin=0, vmax=Max)
+        fig.colorbar(
+            cm.ScalarMappable(norm=norm, cmap="magma"),
+            ax=axes.tolist(),
+            shrink=0.8,
+            label="Local density (KDE)",
+        )
 
     if plot == "Energy":
-        fig = plt.figure(figsize=(8, 4))
+        if not artificial:
+            raise ValueError("Energy plot requires at least one artificial set")
+        fig, ax = plt.subplots(figsize=(3.5, 2.6))
         Bins = 60
-        # Random Sequences
-        rand = np.round(np.random.random(output["align_mod"].shape)).astype("int32")
-
-        Erand_SBM = ut.compute_energies(rand, output["h"], output["J"])
-        Etest_SBM = ut.compute_energies(output["Test"], output["h"], output["J"])
-        Etrain_SBM = ut.compute_energies(output["Train"], output["h"], output["J"])
-        Emod_SBM = ut.compute_energies(output["align_mod"], output["h"], output["J"])
-        Mean_SBM = np.mean(Etrain_SBM)
-        STD_SBM = np.std(Etrain_SBM)
-        Erand_SBM, Etest_SBM, Etrain_SBM, Emod_SBM = (
-            (Erand_SBM - Mean_SBM) / STD_SBM,
-            (Etest_SBM - Mean_SBM) / STD_SBM,
-            (Etrain_SBM - Mean_SBM) / STD_SBM,
-            (Emod_SBM - Mean_SBM) / STD_SBM,
+        # A random alignment as a worst-case baseline. Shape from the
+        # first artificial set; all share L (validated upstream).
+        rand = np.round(np.random.random(artificial[0]["align_mod"].shape)).astype(
+            "int32"
         )
 
-        fig.add_subplot(1, 1, 1)
-        c1, c2, c3 = (
-            "rgb(0.279,0.681,0.901)",
-            "rgb(0.616,0.341,0.157)",
-            "rgb(0.092,0.239,0.404)",
-        )
-        mi = np.amin(np.concatenate((Etest_SBM, Etrain_SBM, Emod_SBM, Erand_SBM)))
-        ma = np.amax(np.concatenate((Etest_SBM, Etrain_SBM, Emod_SBM, Erand_SBM)))
-        plt.hist(
-            Etest_SBM,
-            Bins,
-            range=(mi - 0.5, ma + 0.5),
-            alpha=0.4,
-            label="Test",
-            color=c1,
-            density=True,
-        )
-        plt.hist(
-            Emod_SBM,
-            Bins,
-            range=(mi - 0.5, ma + 0.5),
-            alpha=0.4,
-            label="Artificial",
-            color=c2,
-            density=True,
-        )
-        plt.hist(
-            Etrain_SBM,
-            Bins,
-            range=(mi - 0.5, ma + 0.5),
-            alpha=0.4,
-            label="Train",
-            color=c3,
-            density=True,
-        )
-        plt.hist(
-            Erand_SBM,
-            Bins,
-            range=(mi - 0.5, ma + 0.5),
-            alpha=0.4,
-            label="Random",
-            color="grey",
-            density=True,
-        )
-        plt.legend()
-        plt.xlabel("Statistical energy")
-        plt.ylabel("probability den.")
-        plt.grid()
+        Etest = ut.compute_energies(output["Test"], output["h"], output["J"])
+        Etrain = ut.compute_energies(output["Train"], output["h"], output["J"])
+        Erand = ut.compute_energies(rand, output["h"], output["J"])
+        Emods = [
+            (
+                item["temperature"],
+                ut.compute_energies(item["align_mod"], output["h"], output["J"]),
+            )
+            for item in artificial
+        ]
+        mu, sd = float(np.mean(Etrain)), float(np.std(Etrain))
+        Etest = (Etest - mu) / sd
+        Etrain = (Etrain - mu) / sd
+        Erand = (Erand - mu) / sd
+        Emods = [(T, (e - mu) / sd) for T, e in Emods]
 
-        fig.tight_layout()
+        all_e = [Etest, Etrain, Erand] + [e for _, e in Emods]
+        mi = float(np.amin(np.concatenate(all_e)))
+        ma = float(np.amax(np.concatenate(all_e)))
+        common = dict(bins=Bins, range=(mi - 0.5, ma + 0.5), alpha=0.5, density=True)
+        ax.hist(Etest, label="Test", **common)
+        ax.hist(Etrain, label="Train", **common)
+        for T, e in Emods:
+            ax.hist(e, label=_art_label("Artificial", T), **common)
+        ax.hist(Erand, label="Random", color="0.6", **common)
+        ax.legend()
+        ax.set_xlabel("Statistical energy (z-score)")
+        ax.set_ylabel("Probability density")
 
     if plot == "Similarity":
-        fig = plt.figure(figsize=(8, 4))
-        Bins = 80  # 25
-        # align_train = ut.RemoveCloseSeqs(output['Train'],0.2)$
-        Sim_SBM = ut.compute_similarities(output["align_mod"], output["Train"])
-        Sim_train = ut.compute_similarities(output["Train"])
-        Sim_test = ut.compute_similarities(output["Test"], output["Train"])
-
-        fig.add_subplot(1, 1, 1)
-        plt.hist(Sim_test, Bins, range=(0, 1), alpha=0.4, density=True, label="Test")
-        plt.hist(
-            Sim_SBM, Bins, range=(0, 1), alpha=0.4, density=True, label="Artificial"
+        if not artificial:
+            raise ValueError("Similarity plot requires at least one artificial set")
+        fig, ax = plt.subplots(figsize=(3.5, 2.6))
+        Bins = 80
+        common = dict(bins=Bins, range=(0, 1), alpha=0.5, density=True)
+        ax.hist(
+            ut.compute_similarities(output["Test"], output["Train"]),
+            label="Test",
+            **common,
         )
-        plt.hist(Sim_train, Bins, range=(0, 1), alpha=0.4, density=True, label="Train")
-        plt.xlabel("Distance to closest natural seq")
-        plt.ylabel("probability den.")
-        plt.legend()
-        plt.grid()
-        fig.tight_layout()
+        ax.hist(ut.compute_similarities(output["Train"]), label="Train", **common)
+        for item in artificial:
+            ax.hist(
+                ut.compute_similarities(item["align_mod"], output["Train"]),
+                label=_art_label("Artificial", item["temperature"]),
+                **common,
+            )
+        ax.set_xlabel("Distance to closest natural seq")
+        ax.set_ylabel("Probability density")
+        ax.legend()
 
     if plot == "Diversity":
+        if not artificial:
+            raise ValueError("Diversity plot requires at least one artificial set")
+        fig, ax = plt.subplots(figsize=(3.5, 2.6))
         Bins = 60
-        fig = plt.figure(figsize=(8, 4))
-        Div_SBM = ut.compute_diversity(output["align_mod"])
-        Div_train = ut.compute_diversity(output["Train"])
-        Div_test = ut.compute_diversity(output["Test"])
-
-        fig.add_subplot(1, 1, 1)
-        plt.hist(Div_train, Bins, range=(0, 1), label="Train", alpha=0.3, density=True)
-        plt.hist(Div_test, Bins, range=(0, 1), label="Test", alpha=0.3, density=True)
-        plt.hist(
-            Div_SBM, Bins, range=(0, 1), alpha=0.3, label="Artificial", density=True
-        )
-        plt.legend()
-        plt.xlabel("Diversity")
-        plt.ylabel("probability den.")
-        plt.grid()
-        fig.tight_layout()
+        common = dict(bins=Bins, range=(0, 1), alpha=0.5, density=True)
+        ax.hist(ut.compute_diversity(output["Train"]), label="Train", **common)
+        ax.hist(ut.compute_diversity(output["Test"]), label="Test", **common)
+        for item in artificial:
+            ax.hist(
+                ut.compute_diversity(item["align_mod"]),
+                label=_art_label("Artificial", item["temperature"]),
+                **common,
+            )
+        ax.legend()
+        ax.set_xlabel("Diversity")
+        ax.set_ylabel("Probability density")
 
     if plot == "Length":
+        if not artificial:
+            raise ValueError("Length plot requires at least one artificial set")
+        fig, ax = plt.subplots(figsize=(3.5, 2.6))
         Bins = 80
-        fig = plt.figure(figsize=(8, 4))
-        Length_SBM = np.sum(output["align_mod"], axis=1)
         Length_train = np.sum(output["Train"], axis=1)
         Length_test = np.sum(output["Test"], axis=1)
+        Length_arts = [
+            (item["temperature"], np.sum(item["align_mod"], axis=1))
+            for item in artificial
+        ]
 
-        fig.add_subplot(1, 1, 1)
-        mi, ma = (
-            np.amin(np.concatenate((Length_SBM, Length_train, Length_test))),
-            np.amax(np.concatenate((Length_SBM, Length_train, Length_test))),
-        )
-        plt.hist(
-            Length_train, Bins, range=(mi, ma), label="Train", alpha=0.3, density=True
-        )
-        plt.hist(
-            Length_test, Bins, range=(mi, ma), label="Test", alpha=0.3, density=True
-        )
-        plt.hist(
-            Length_SBM,
-            Bins,
-            range=(mi, ma),
-            alpha=0.3,
-            label="Artificial",
-            density=True,
-        )
-        plt.legend()
-        plt.xlabel("Genome Length")
-        plt.ylabel("probability den.")
-        plt.grid()
-        fig.tight_layout()
+        all_l = [Length_train, Length_test] + [L for _, L in Length_arts]
+        mi = float(np.amin(np.concatenate(all_l)))
+        ma = float(np.amax(np.concatenate(all_l)))
+        common = dict(bins=Bins, range=(mi, ma), alpha=0.5, density=True)
+        ax.hist(Length_train, label="Train", **common)
+        ax.hist(Length_test, label="Test", **common)
+        for T, L in Length_arts:
+            ax.hist(L, label=_art_label("Artificial", T), **common)
+        ax.legend()
+        ax.set_xlabel("Genome length")
+        ax.set_ylabel("Probability density")
 
     if plot == "Coupling_evol":
-        fig = plt.figure(figsize=(5, 4))
+        fig, ax = plt.subplots(figsize=(3.5, 2.6))
         # train_sbm.py stores J_norm as (N_av, 1 + N_records); the leading
         # column is the scalar-0 placeholder that ``output["J_norm"]``
         # holds before any recording is appended in Minimizer.
@@ -446,36 +387,38 @@ def plot_stats(output, Stats, plot="Freq", ma=None):
             iters = np.asarray(iters)
 
         for row in j_norm:
-            plt.plot(iters, row, "o", markersize=4, color="tab:blue")
-        plt.xlabel("Iteration")
-        plt.ylabel("Couplings norm")
-        plt.grid()
-        plt.title(
+            ax.plot(iters, row, "o")
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Couplings norm")
+        ax.set_title(
             f"{output['options']['Model']}, "
             f"N_chains={output['options']['n_states']} "
             f"m={output['options']['m']}"
         )
 
 
-def density_scatter(x, y, Max, markersize=10):
+def density_scatter(x, y, Max, *, ax=None, fig=None, markersize=10, add_colorbar=True):
+    """Scatter plot colored by 2D KDE density.
+
+    Pass ``ax`` to draw into an existing axes (used by the PCA panel
+    grid). Pass ``add_colorbar=False`` to suppress the per-axes
+    colorbar — the PCA caller draws a single shared colorbar instead.
+    Color normalization is pinned to ``[0, Max]`` via explicit
+    ``vmin``/``vmax`` so the palette is consistent across panels even
+    when each panel's KDE has a different scale.
     """
-    Scatter plot colored by 2d histogram
-    """
-    # Calculate the point density
     xy = np.vstack([x, y])
     z = gaussian_kde(xy)(xy)
-    # Sort the points by density, so that the densest points are plotted last
     idx = z.argsort()
     x, y, z = x[idx], y[idx], z[idx]
-    # print(np.min(z),np.max(z))
-    z = np.concatenate((np.array([0]), z, np.array([Max])))
-    x = np.concatenate((np.array([-10]), x, np.array([-10])))
-    y = np.concatenate((np.array([-10]), y, np.array([-10])))
-    # print(x.shape,y.shape,z.shape)
-    fig, ax = plt.subplots()
-    ax.scatter(x, y, c=z, s=markersize, cmap="magma")
 
-    norm = Normalize(vmin=0, vmax=Max)
-    fig.colorbar(cm.ScalarMappable(norm=norm, cmap="magma"), ax=ax)
-    # cbar.ax.set_ylabel('Density')q
+    if ax is None:
+        fig, ax = plt.subplots()
+    elif fig is None:
+        fig = ax.figure
+    ax.scatter(x, y, c=z, s=markersize, cmap="magma", vmin=0, vmax=Max)
+
+    if add_colorbar:
+        norm = Normalize(vmin=0, vmax=Max)
+        fig.colorbar(cm.ScalarMappable(norm=norm, cmap="magma"), ax=ax)
     return ax

@@ -381,33 +381,43 @@ def CalcThreeCorrWeighted(MSA, fi, fij, p=None, ind_L=None):
 
 
 def compute_stats(output, align_mod):
-    """
-    Function to compute various statistics (frequency, pairwise frequency, and three-point correlation)
-    for the test, training and artificial sets stored in the output dictionary.
+    """Compute frequency, pairwise frequency, and 3-point correlation
+    for the train, test, and artificial alignments.
+
+    When the run has no held-out test set (``output["Test"] is None``),
+    ``Stats["Test"]`` is set to ``None`` rather than silently substituted
+    with the training alignment — callers must handle the absence
+    explicitly. ``plot_stats`` does this.
 
     Args:
-    - output (dict): A dictionary containing various data including 'Test', 'options', 'Train', and 'align_mod'.
-    - align_mod (numpy.array): A 2D numpy array representing the alignment data.
+        output: dict with keys ``"Train"``, ``"Test"``, ``"options0"``,
+            ``"options1"``.
+        align_mod: artificial alignment, ``(N, L)`` integer array.
 
     Returns:
-    - dict: A dictionary containing different statistics calculated from the input data.
+        dict with keys ``"Train"``, ``"Test"`` (possibly ``None``), and
+        ``"Artificial"``. Each non-None entry maps to a sub-dict with
+        ``"Freq"``, ``"Pair_freq"``, ``"Three_corr"``.
     """
     Stats = {}
-    # options = output['options']
     train_align = output["Train"]
     test_align = output["Test"]
-    if test_align is None:
-        test_align = np.copy(train_align)
-    M = min(train_align.shape[0], test_align.shape[0], align_mod.shape[0])
+
+    sizes = [train_align.shape[0], align_mod.shape[0]]
+    if test_align is not None:
+        sizes.append(test_align.shape[0])
+    M = min(sizes)
+
     train_align = train_align[
         np.sort(np.random.choice(train_align.shape[0], M, replace=False))
     ]
     align_mod = align_mod[
         np.sort(np.random.choice(align_mod.shape[0], M, replace=False))
     ]
-    test_align = test_align[
-        np.sort(np.random.choice(test_align.shape[0], M, replace=False))
-    ]
+    if test_align is not None:
+        test_align = test_align[
+            np.sort(np.random.choice(test_align.shape[0], M, replace=False))
+        ]
 
     ind_L = np.random.choice(output["options1"]["L"], 10, replace=False)
     # Artificial stats
@@ -416,7 +426,7 @@ def compute_stats(output, align_mod):
     fi_s, fij_s = CalcStatsWeighted(output["options1"]["q"], align_mod, W / N_eff)
     C3_s = CalcThreeCorrWeighted(align_mod, fi_s, fij_s, p=W / N_eff, ind_L=ind_L)
     art["Freq"] = fi_s
-    art["Pair_freq"] = CalcCorr2(fi_s, fij_s)  # fij_s#
+    art["Pair_freq"] = CalcCorr2(fi_s, fij_s)
     art["Three_corr"] = C3_s
 
     # Train stats
@@ -425,21 +435,23 @@ def compute_stats(output, align_mod):
     fi, fij = CalcStatsWeighted(output["options1"]["q"], train_align, W / N_eff)
     C3 = CalcThreeCorrWeighted(train_align, fi, fij, p=W / N_eff, ind_L=ind_L)
     train["Freq"] = fi
-    train["Pair_freq"] = CalcCorr2(fi, fij)  # fij#
+    train["Pair_freq"] = CalcCorr2(fi, fij)
     train["Three_corr"] = C3
 
-    # Test stats
-    test = {}
-    W, N_eff = CalcWeights(test_align, output["options0"]["theta"])
-    fi, fij = CalcStatsWeighted(output["options1"]["q"], test_align, W / N_eff)
-    C3 = CalcThreeCorrWeighted(test_align, fi, fij, p=W / N_eff, ind_L=ind_L)
-    test["Freq"] = fi
-    test["Pair_freq"] = CalcCorr2(fi, fij)  # fij #
-    test["Three_corr"] = C3
-
     Stats["Train"] = train
-    Stats["Test"] = test
     Stats["Artificial"] = art
+
+    if test_align is None:
+        Stats["Test"] = None
+    else:
+        test = {}
+        W, N_eff = CalcWeights(test_align, output["options0"]["theta"])
+        fi, fij = CalcStatsWeighted(output["options1"]["q"], test_align, W / N_eff)
+        C3 = CalcThreeCorrWeighted(test_align, fi, fij, p=W / N_eff, ind_L=ind_L)
+        test["Freq"] = fi
+        test["Pair_freq"] = CalcCorr2(fi, fij)
+        test["Three_corr"] = C3
+        Stats["Test"] = test
 
     return Stats
 

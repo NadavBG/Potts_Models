@@ -8,10 +8,10 @@ IFS=$'\n\t'
 #
 # Output lands at:
 #   example_output/CM/<YYYY-MM-DD>_CM-bm-pruned_<idx>/
-#       model.npy, manifest.json, command.sh    (from run_sbm.sh)
-#       synthetic/align_T0.75_seed42.npy + .json (from sample_sbm.sh)
-#       figs/coupling_evol.pdf, figs/freq.pdf, ...,
-#           figs/inputs/{stats.npy, sources.json}  (from render_sbm.sh)
+#       model.npy, manifest.json, command.sh           (from run_sbm.sh)
+#       synthetic/align_T{0.75,1}_seed42.{npy,json}    (from sample_sbm.sh)
+#       figs/{coupling_evol,correlations,pca}.pdf,
+#           figs/inputs/{stats_*.npy, sources.json}    (from render_sbm.sh)
 #
 # This is the BM ("positive control") regime from Summary Note 3:
 # m=20, lambda_J=lambda_h=0.01, N_chains=100. run_sbm.sh applies these
@@ -56,13 +56,12 @@ if [[ -z "${RUN_DIR}" || ! -d "${RUN_DIR}" ]]; then
     exit 1
 fi
 
-# 3. Sample a synthetic alignment. BM mode → T=0.75 by default
-#    (Summary Note 3). The seed and N default to the manifest's master
-#    seed and the training MSA size respectively.
+# 3. Sample synthetic alignments. By default sample_sbm.sh produces
+#    one alignment per temperature in {0.75, 1.0} (N=2000 each). Seed
+#    defaults to the manifest's master seed.
 bash "${REPO_ROOT}/scripts/sample_sbm.sh" "${RUN_DIR}"
 
-# 4. Render figures. coupling_evol is the only figure that does not
-#    need a synthetic alignment; the rest pick up the alignment that
-#    sample_sbm.sh just wrote under <RUN_DIR>/synthetic/.
-bash "${REPO_ROOT}/scripts/render_sbm.sh" "${RUN_DIR}" \
-    --figs coupling_evol freq pair_freq pca
+# 4. Render figures. Default mode renders every figure whose data is
+#    present: coupling_evol always; correlations + pca because the
+#    sampler just wrote alignments under <RUN_DIR>/synthetic/.
+bash "${REPO_ROOT}/scripts/render_sbm.sh" "${RUN_DIR}"

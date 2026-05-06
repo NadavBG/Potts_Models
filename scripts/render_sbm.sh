@@ -8,17 +8,23 @@ IFS=$'\n\t'
 # Layout:
 #   <RUN_DIR>/figs/                  ← always regenerated
 #       inputs/
-#           stats.npy                (cache of compute_stats output)
-#           sources.json             (paths + sha256 of model.npy and
-#                                     the synthetic alignment used)
+#           render_figures.py             (canonical copy of the renderer)
+#           stats_<align_stem>.npy        (one cache per alignment)
+#           sources.json                  (paths + sha256 of model.npy
+#                                          and every synthetic alignment)
 #       coupling_evol.pdf
-#       <other figures>.pdf
+#       correlations.pdf                  (rows = temperatures × cols = orders)
+#       pca.pdf                           (1×(1+N_temps) panels)
+#       <test-set-only figures>.pdf
 #
-# Default fig set is `coupling_evol` (the only figure that does not
-# need a synthetic alignment). For anything else, sample a synthetic
-# alignment first with `scripts/sample_sbm.sh`; render_figures.py will
-# auto-discover the result under <RUN_DIR>/synthetic/, preferring the
-# file whose temperature matches the run's mode (BM=0.75, SBM=1.0).
+# By default, render every figure whose data is present in the run:
+#   * coupling_evol always (depends only on model.npy)
+#   * correlations, pca if at least one synthetic alignment exists
+#     (auto-discovered: every .npy under <RUN_DIR>/synthetic/)
+#   * energy, similarity, diversity, length additionally if the run was
+#     trained with Test/Train > 0
+# Pass --figs NAME [NAME ...] to render an explicit subset; in that
+# mode, requesting a figure whose data is missing is an error.
 # ─────────────────────────────────────────────────────────────────────────
 
 usage() {
@@ -30,27 +36,29 @@ Required:
     <RUN_DIR>           a run directory produced by scripts/run_sbm.sh
 
 Optional:
-    --synthetic PATH    synthetic alignment .npy
-                        (default: auto-discover from <RUN_DIR>/synthetic/)
-    --figs NAME ...     figure types to render (default: coupling_evol)
-                        all choices: coupling_evol, freq, pair_freq, corr3,
-                        pca, energy, similarity, diversity, length
+    --synthetic PATH... one or more synthetic alignment .npy files
+                        (default: auto-discover every .npy under
+                         <RUN_DIR>/synthetic/)
+    --figs NAME ...     figure types to render
+                        (default: every figure whose data is present)
+                        all choices: coupling_evol, correlations, pca,
+                        energy, similarity, diversity, length
     -h, --help          this message
 
 Behaviour:
     * <RUN_DIR>/figs/ is deleted and regenerated on every invocation.
-    * Auto-discovery (when --synthetic is not given) is performed by
-      render_figures.py, which prefers the file whose temperature
-      matches the run's mode default and falls back to the newest .npy
-      with a warning otherwise.
+    * Multiple alignments under synthetic/ become multi-panel
+      comparisons (correlations becomes rows × 3 grid; pca becomes
+      1 × (1 + N_temps) panels).
 
 Examples:
-    bash scripts/render_sbm.sh results/CM/2026-05-06_CM-bm_0
-    bash scripts/render_sbm.sh results/CM/2026-05-06_CM-bm_0 \
-        --figs coupling_evol freq pca
-    bash scripts/render_sbm.sh results/CM/2026-05-06_CM-bm_0 \
+    bash scripts/render_sbm.sh results/CM/2026-05-06_CM_0
+    bash scripts/render_sbm.sh results/CM/2026-05-06_CM_0 \
+        --figs coupling_evol correlations pca
+    bash scripts/render_sbm.sh results/CM/2026-05-06_CM_0 \
         --synthetic results/CM/.../synthetic/align_T0.75_seed42.npy \
-        --figs energy similarity
+                    results/CM/.../synthetic/align_T1_seed42.npy \
+        --figs correlations
 EOF
 }
 
@@ -83,12 +91,19 @@ if [[ ! -f "${RUN_DIR}/model.npy" ]]; then
     exit 1
 fi
 
-SYNTHETIC=""
+SYNTHETICS=()
 FIGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --synthetic)
-            SYNTHETIC="$2"; shift 2 ;;
+            shift
+            # Collect alignment paths until the next flag (anything
+            # starting with -). render_figures.py validates that each
+            # path exists.
+            while [[ $# -gt 0 && "$1" != -* ]]; do
+                SYNTHETICS+=("$1"); shift
+            done
+            ;;
         --figs)
             shift
             # Collect fig names until the next flag (anything starting with -).
@@ -108,9 +123,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -n "${SYNTHETIC}" && ! -f "${SYNTHETIC}" ]]; then
-    echo "error: synthetic alignment not found at '${SYNTHETIC}'" >&2
-    exit 1
+if [[ ${#SYNTHETICS[@]} -gt 0 ]]; then
+    for s in "${SYNTHETICS[@]}"; do
+        if [[ ! -f "${s}" ]]; then
+            echo "error: synthetic alignment not found at '${s}'" >&2
+            exit 1
+        fi
+    done
 fi
 
 # ── Regenerate figs/ from scratch ──────────────────────────────────────
@@ -118,8 +137,8 @@ echo "── Rendering figures for ${RUN_DIR} ───────────�
 rm -rf -- "${RUN_DIR}/figs"
 
 PY_ARGS=("${RUN_DIR}")
-if [[ -n "${SYNTHETIC}" ]]; then
-    PY_ARGS+=(--synthetic-alignment "${SYNTHETIC}")
+if [[ ${#SYNTHETICS[@]} -gt 0 ]]; then
+    PY_ARGS+=(--synthetic-alignment "${SYNTHETICS[@]}")
 fi
 if [[ ${#FIGS[@]} -gt 0 ]]; then
     PY_ARGS+=(--figs "${FIGS[@]}")

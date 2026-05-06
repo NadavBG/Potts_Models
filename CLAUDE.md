@@ -13,9 +13,8 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | `m` (L-BFGS memory) | 20 | 1 |
 | `lambda_J`, `lambda_h` | 0.01 | 0 |
 | `N_chains` | 100 | 50 |
-| Sampling temperature (post-training, separate step) | 0.75 | 1.0 |
 
-`N_iter=400`, zero-initialized parameters, and inference temperature `T=1` are shared. Inference temperature is always 1 — the model is meant to reproduce data statistics at T=1. Sampling synthetic alignments at a different temperature is a separate downstream step and is not part of the training pipeline. Vanilla gradient descent is available via `Optimizer="GD"` (`--optimizer GD` on the CLI) but is rarely needed.
+`N_iter=400`, zero-initialized parameters, and inference temperature `T=1` are shared. Inference temperature is always 1 — the model is meant to reproduce data statistics at T=1. Sampling synthetic alignments is a separate downstream step (`sample_sbm.sh`); it always produces both T=0.75 (low-T, mode-collapsed) and T=1.0 (the model's native fit) regardless of training mode, so every figure compares the two. Vanilla gradient descent is available via `Optimizer="GD"` (`--optimizer GD` on the CLI) but is rarely needed.
 
 ## Where things live
 
@@ -23,7 +22,7 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 |---|---|
 | The user-facing entry points (3 scripts, run in order) | `scripts/run_sbm.sh` (train), `scripts/sample_sbm.sh` (synthetic MSA), `scripts/render_sbm.sh` (figures) |
 | The training CLI | `scripts/train_sbm.py` (writes `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/`) |
-| The synthetic-sampling CLI | `scripts/sample_sbm.py` (writes `<run_dir>/synthetic/align_T<T>_seed<seed>.npy` + JSON sidecar) |
+| The synthetic-sampling CLI | `scripts/sample_sbm.py` (writes one `<run_dir>/synthetic/align_T<T>_seed<seed>.npy` + JSON sidecar per requested temperature; default = both 0.75 and 1.0; default N=2000) |
 | The figure renderer | `scripts/render_figures.py` (writes `<run_dir>/figs/` and `<run_dir>/figs/inputs/`; the bash wrapper `render_sbm.sh` deletes `figs/` first so each call regenerates) |
 | The optimizer entry point | `src/SBM/SBM_GD/SBM_proteins.py:SBM(align, options)` |
 | The MCMC sampler driver (Python) | `src/SBM/utils/utils.py:Create_modAlign` |
@@ -31,7 +30,7 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | The packed-vector encoding | `src/SBM/utils/utils.py:Wj` / `Jw` |
 | The zero-sum gauge transform | `src/SBM/utils/utils.py:Zero_Sum_Gauge` |
 | Statistics / reweighting | `src/SBM/utils/utils.py:CalcWeights`, `CalcStatsWeighted`, `CalcThreeCorrWeighted` |
-| Plot recipes (used by `render_figures.py`) | `src/SBM/utils/utils_plot.py:plot_stats` (9 modes) |
+| Plot recipes (used by `render_figures.py`) | `src/SBM/utils/utils_plot.py:plot_stats` (7 modes; `correlations` is rows=temperatures × cols=1st/2nd/3rd order, `pca` is 1×(1+N_temps)) |
 | Run-level provenance helpers | `src/SBM/provenance.py` |
 | The pruning CLI | `pruning/build_mask.py` |
 | The figure-save helpers | `scripts/lab_plotting.py` (`save_figure`, `panel_label`, `LAB_COLORS`) |
@@ -100,7 +99,7 @@ It expects `data/MSA_array/MSA_CM.npy` to exist, builds a pruning mask, trains a
 - Amino-acid alphabet: `"-ACDEFGHIKLMNPQRSTVWY"`, with `q = 21` and `0 = gap`. `MSA` arrays are `int` of shape `(N_sequences, L)`.
 - Sequences containing any character outside the alphabet are **dropped** by `load_fasta` (mapped to `-1`, then filtered).
 - `options['q']` and `options['L']` are derived from the alignment in `Init_options`; do not set them manually.
-- Each run writes `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/`. `run_sbm.sh` (inference) populates `model.npy`, `manifest.json`, `command.sh`. `sample_sbm.sh` adds `synthetic/align_T<T>_seed<seed>.npy` and a JSON sidecar — the synthetic alignment is a first-class artifact (and may eventually be tested experimentally), so it lives at the run-dir top level rather than inside any figure folder. `render_sbm.sh` regenerates `figs/` on every call; `figs/inputs/` carries `stats.npy` (cached `compute_stats` output) and `sources.json` (paths + sha256s of `model.npy` and the synthetic-alignment file used — pointers only, not copies). The dir name is built by `provenance.make_run_id(label=..., parent_dir=...)`; `idx` auto-increments by scanning sibling dirs. `model.npy` is a pickled dict with the legacy keys (`J`, `h`, `W_all`, `Seeds`, `Train`, `Test`, `options0`, `options1`, …); the manifest carries the full provenance. By default `render_figures.py` produces only `coupling_evol` (the only figure that does not require a synthetic alignment); the other modes (`freq`, `pair_freq`, `corr3`, `pca`, `energy`, `similarity`, `diversity`, `length`) need one and are opt-in via `--figs`.
+- Each run writes `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/`. `run_sbm.sh` (inference) populates `model.npy`, `manifest.json`, `command.sh`. `sample_sbm.sh` adds one `synthetic/align_T<T>_seed<seed>.npy` and JSON sidecar per requested temperature (default: both T=0.75 and T=1.0) — synthetic alignments are first-class artifacts (and may eventually be tested experimentally), so they live at the run-dir top level rather than inside any figure folder. `render_sbm.sh` regenerates `figs/` on every call; `figs/inputs/` carries `stats_<align_stem>.npy` (one cached `compute_stats` output per alignment) and `sources.json` (paths + sha256s of `model.npy` and every synthetic-alignment file used — pointers only, not copies). The dir name is built by `provenance.make_run_id(label=..., parent_dir=...)`; `idx` auto-increments by scanning sibling dirs. `model.npy` is a pickled dict with the legacy keys (`J`, `h`, `W_all`, `Seeds`, `Train`, `Test`, `options0`, `options1`, …); the manifest carries the full provenance. By default `render_figures.py` produces every figure whose required data is present in the run: `coupling_evol` always (depends only on `model.npy`); `correlations` (one figure with rows=temperatures × cols=1st/2nd/3rd order) and `pca` (1×(1+N_temps) panels) if at least one synthetic alignment is available (auto-discovered under `<run_dir>/synthetic/` or supplied via `--synthetic-alignment PATH ...`); `energy`, `similarity`, `diversity`, `length` additionally if the run has `Test/Train>0` (each overlays every available temperature in one panel). Pass `--figs NAME [NAME ...]` to render an explicit subset — in that mode, requesting a figure whose data is missing is an error.
 
 ### Packed-parameter layout (`Wj` / `Jw`)
 

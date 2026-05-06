@@ -3,14 +3,17 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ─────────────────────────────────────────────────────────────────────────
-# sample_sbm.sh — generate a synthetic alignment from a trained model.
+# sample_sbm.sh — generate synthetic alignments from a trained model.
 #
 # Output lands in:
 #   <RUN_DIR>/synthetic/align_T<T>_seed<seed>[_<label>].npy
 #   <RUN_DIR>/synthetic/align_T<T>_seed<seed>[_<label>].json   (params)
 #
-# Mode-aware temperature default: BM samples at T=0.75, SBM at T=1.0
-# (Summary Note 3). Override with --temperature.
+# By default samples at BOTH T=0.75 and T=1.0 (one alignment per T) —
+# every downstream analysis in this project compares the two. Pass
+# `--temperature T1 [T2 ...]` to override.
+#
+# Default N is 2000 sequences regardless of training MSA size.
 #
 # This is a thin wrapper around scripts/sample_sbm.py.
 # ─────────────────────────────────────────────────────────────────────────
@@ -26,25 +29,28 @@ Required:
 
 Optional:
     --N N               number of synthetic sequences
-                        (default: size of training MSA)
-    --temperature T     sampling temperature
-                        (default: 0.75 for BM, 1.0 for SBM)
+                        (default: 2000)
+    --temperature T...  one or more sampling temperatures; one .npy +
+                        .json is written per value
+                        (default: 0.75 1.0)
     --delta_t N         Metropolis sweeps per chain
                         (default: options0.k_MCMC from model.npy)
     --seed N            master RNG seed
                         (default: master seed from manifest)
     --label NAME        suffix added to default filename
-    --output PATH       full output .npy path
-                        (overrides default location under synthetic/)
+    --output PATH       full output .npy path; only valid with a single
+                        temperature
     --force             overwrite an existing alignment / sidecar at the
                         target path (default: refuse, to protect prior
                         samples)
     -h, --help          this message
 
 Examples:
-    bash scripts/sample_sbm.sh results/CM/2026-05-06_CM-bm_0
-    bash scripts/sample_sbm.sh results/CM/2026-05-06_CM-bm_0 --temperature 1.0
-    bash scripts/sample_sbm.sh results/CM/2026-05-06_CM-sbm_0 \
+    bash scripts/sample_sbm.sh results/CM/2026-05-06_CM_0
+    bash scripts/sample_sbm.sh results/CM/2026-05-06_CM_0 --temperature 1.0
+    bash scripts/sample_sbm.sh results/CM/2026-05-06_CM_0 \
+        --temperature 0.5 0.75 1.0 1.5
+    bash scripts/sample_sbm.sh results/CM/2026-05-06_CM_0 \
         --N 5000 --label highT --temperature 1.5
 EOF
 }
@@ -78,22 +84,9 @@ if [[ ! -f "${RUN_DIR}/model.npy" ]]; then
     exit 1
 fi
 
-# ── Forward all remaining args to sample_sbm.py ────────────────────────
-PY_ARGS=("${RUN_DIR}")
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --N|--temperature|--delta_t|--seed|--label|--output)
-            PY_ARGS+=("$1" "$2"); shift 2 ;;
-        --force)
-            PY_ARGS+=("$1"); shift ;;
-        -h|--help)
-            usage; exit 0 ;;
-        *)
-            echo "error: unknown option '$1'" >&2
-            usage >&2
-            exit 2
-            ;;
-    esac
-done
-
-python scripts/sample_sbm.py "${PY_ARGS[@]}"
+# ── Forward all remaining args to sample_sbm.py verbatim ────────────────
+# We don't case-match individual flags here because --temperature takes a
+# variable number of values (nargs="+") and case-by-case parsing would
+# fight with that. argparse on the Python side validates and explains
+# unknown flags.
+python scripts/sample_sbm.py "${RUN_DIR}" "$@"
