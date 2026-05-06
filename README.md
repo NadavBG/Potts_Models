@@ -16,22 +16,26 @@ uv venv --python=3.12
 source .venv/bin/activate
 uv pip install -e ".[plotting,analysis,dev]"
 
-# 3. train a model AND render its figures, in one command
-OMP_NUM_THREADS=4 bash scripts/run_sbm.sh SBM data/MSA_array/MSA_CM.npy \
-    --label CM-example
+# 3. train, then sample, then render — three independent steps
+RUN=results/CM/2026-05-05_CM-example_0
+OMP_NUM_THREADS=4 bash scripts/run_sbm.sh SBM data/MSA_array/MSA_CM.npy --label CM-example
+bash scripts/sample_sbm.sh "$RUN"
+bash scripts/render_sbm.sh "$RUN" --figs coupling_evol freq pca
 ```
 
-That writes `results/CM/2026-05-05_CM-example_0/` with:
+`run_sbm.sh` writes `results/CM/2026-05-05_CM-example_0/` with:
 
 - `model.npy` — trained `J`, `h`, train/test splits, etc.
 - `manifest.json` — git commit, RNG seed, input hashes, package versions
 - `command.sh` — self-contained re-runner
-- `figs/*.pdf` — the canonical figure set (correlation scatter plots, PCA, etc.)
-- `fig_data/` — cached intermediates (artificial alignment, statistics) so re-rendering is fast
 
-Run it again and `_idx` increments to `_1`. The CM example is also available as `bash scripts/examples/cm-family/run.sh`; pruning is `bash pruning/CM_example.sh`.
+`sample_sbm.sh` adds `synthetic/align_T<T>_seed<seed>.npy` (+ a JSON sidecar) — a synthetic alignment drawn from the trained model at the mode-default temperature (BM=0.75, SBM=1.0; override with `--temperature`).
 
-The two inputs you'll usually care about are the **MSA path** and `--prune <mask.npy>`. Everything else has a default; see `bash scripts/run_sbm.sh --help`.
+`render_sbm.sh` regenerates `figs/`: PDFs at the top level plus `figs/inputs/{stats.npy, sources.json}` (the stats cache and a pointer file recording the sha256 of the model and synthetic alignment that fed each figure). Re-running blows away `figs/` and rebuilds.
+
+Run training again and `_idx` increments to `_1`. The CM-with-pruning worked example is `bash pruning/CM_example.sh`.
+
+The two inputs you'll usually care about for training are the **MSA path** and `--prune <mask.npy>`. Everything else has a default; see `bash scripts/run_sbm.sh --help`.
 
 > **Heads-up: avoid conda-forge / miniforge Python.** Its `python@3.12` build has a libpython ABI quirk that segfaults during numpy's `import_array()` when our C++ extension is loaded. Use `uv python install` (above) or Homebrew's `python@3.12`.
 
@@ -65,7 +69,7 @@ data/
 
 ## Training
 
-The recommended entry point is `scripts/run_sbm.sh`, which trains the model and renders figures in one step.
+The recommended entry point is `scripts/run_sbm.sh`. It trains the model and writes a self-describing run directory; sampling and figure rendering are separate scripts so each step can be re-run independently.
 
 ```sh
 bash scripts/run_sbm.sh <MODE> <MSA_NPY> [options] [-- <train_sbm.py overrides>]
@@ -88,13 +92,12 @@ The options most users will touch:
 | `--theta X` | Similarity threshold for sequence reweighting | 0.3 |
 | `--rep N` | Independent replicate runs | 1 |
 | `--N_av N` | Models averaged per replicate | 1 |
-| `--no-figures` | Skip rendering (just train) | off |
 
 Anything after `--` is forwarded verbatim to `scripts/train_sbm.py`, so the long-tail flags (`--m`, `--lambdJ`, `--ParamInit`, `--ignore_gaps`, `--record_every`, …) are reachable without bloating the bash CLI. Run `bash scripts/run_sbm.sh --help` for the short list and `python scripts/train_sbm.py --help` for the long list.
 
 A few `options` keys (`SGD`, `Zero Fields`, `Zero Couplings`, `Precomputed_Stats`, `Infinite Mask Fields`) are only reachable by calling `SBM.SBM_GD.SBM_proteins.SBM(align, options)` directly from Python.
 
-If you prefer to drive training yourself and skip figures, call `scripts/train_sbm.py` directly:
+If you prefer to drive training yourself, call `scripts/train_sbm.py` directly:
 
 ```sh
 python scripts/train_sbm.py <fam> <MSA.npy> --mod SBM --label CM-example --seed 42 [...]
@@ -103,29 +106,35 @@ python scripts/train_sbm.py <fam> <MSA.npy> --mod SBM --label CM-example --seed 
 To re-render figures on an already-trained run (e.g. after editing plot code) without retraining:
 
 ```sh
-python scripts/render_figures.py results/CM/2026-05-05_CM-example_0
+bash scripts/render_sbm.sh results/CM/2026-05-05_CM-example_0 --figs coupling_evol freq pca
 ```
+
+`render_sbm.sh` deletes and regenerates `figs/` each call; figures that need a synthetic alignment auto-discover the latest under `<run_dir>/synthetic/`, or accept `--synthetic PATH`.
 
 ## What you get
 
 ```text
 results/<fam>/<YYYY-MM-DD>_<label>_<idx>/
-├── model.npy        # pickled dict (see below)
-├── manifest.json    # full provenance — schema in src/SBM/provenance.py
-├── command.sh       # self-contained shell script that re-invokes this run
-├── fig_data/        # cached intermediates (artificial alignment, statistics)
-│   ├── align_mod.npy
-│   └── stats.npy
-└── figs/            # rendered PDFs, one per plot type
+├── model.npy        # pickled dict (see below)            ─┐  from
+├── manifest.json    # full provenance — schema in src/SBM/provenance.py │  run_sbm.sh
+├── command.sh       # self-contained shell script that re-invokes this run ─┘
+├── synthetic/       # synthetic alignments (one per call to sample_sbm.sh)
+│   ├── align_T0.75_seed42.npy
+│   └── align_T0.75_seed42.json     # sampling parameters + sha256s
+└── figs/            # regenerated by every render_sbm.sh call
+    ├── inputs/
+    │   ├── stats.npy               # cache of compute_stats output
+    │   └── sources.json            # paths + sha256 of model.npy and the
+    │                               # synthetic alignment that fed these figures
+    ├── coupling_evol.pdf   # ‖J‖ over training iterations (no alignment needed)
     ├── freq.pdf            # 1-point frequency: train vs test vs artificial
     ├── pair_freq.pdf       # 2-point connected correlations
     ├── corr3.pdf           # 3-point connected correlations
     ├── pca_0.pdf, pca_1.pdf  # PCA of natural / artificial sequences
-    ├── coupling_evol.pdf   # ‖J‖ over training iterations
     └── (energy, similarity, diversity, length — only when --TestTrain 1)
 ```
 
-Each PDF embeds the git commit, run id, and timestamp in its metadata, plus a sidecar `<figure>.source.py` next to it (a copy of `render_figures.py` at the time of the run). Figure data lives in `fig_data/` so re-rendering is fast: `python scripts/render_figures.py <run_dir>` reuses the cache.
+Each PDF embeds the git commit, run id, and timestamp in its metadata, plus a sidecar `<figure>.source.py` next to it (a copy of `render_figures.py` at the time of the run). The synthetic alignment lives at the run-dir top level (it is a first-class artifact, not a figure intermediate); `figs/inputs/sources.json` records pointers to model + synthetic-alignment paths and their sha256s without duplicating the bytes.
 
 Loading the model:
 
@@ -148,20 +157,21 @@ To re-run a result exactly: `bash results/<fam>/<run_id>/command.sh` from the re
 
 ## Sampling synthetic sequences from a trained model
 
-```python
-import numpy as np
-import SBM.utils.utils as ut
+The supported workflow is `scripts/sample_sbm.sh`:
 
-m = np.load("results/CM/<run_id>/model.npy", allow_pickle=True).item()
-synthetic = ut.Create_modAlign(m, N=200, delta_t=10000, seed=0)   # (200, L) int array
+```sh
+# Default: N = training-MSA size, T = mode default (BM=0.75, SBM=1.0),
+# delta_t = options0.k_MCMC, seed = manifest's master seed.
+bash scripts/sample_sbm.sh results/CM/<run_id>
 
-# Or directly to FASTA:
-ut.save_fasta_from_array("results/CM/<run_id>/model.npy",
-                         "results/CM/<run_id>/synthetic.fasta",
-                         Nb_seq=200)
+# Override anything:
+bash scripts/sample_sbm.sh results/CM/<run_id> \
+    --N 5000 --temperature 1.0 --label highT --seed 7
 ```
 
-`delta_t` is the number of Metropolis sweeps per chain. `seed=None` falls back to numpy's global RNG.
+Each invocation writes a fresh `synthetic/align_T<T>_seed<seed>[_<label>].npy` plus a JSON sidecar carrying the sampling parameters, the run-dir path, and sha256s of both the model and the alignment. `sample_sbm.sh` refuses to overwrite an existing file at the target path; pass `--force` if you mean it, or use `--label` / `--output` to write somewhere else.
+
+For ad-hoc Python use, `SBM.utils.utils.Create_modAlign(model_dict, N, delta_t=..., temperature=..., seed=...)` is the underlying primitive (returns an `(N, L)` `int64` array). `seed=None` falls back to numpy's global RNG.
 
 ## Pruning workflow
 

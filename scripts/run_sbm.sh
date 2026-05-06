@@ -3,15 +3,17 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ─────────────────────────────────────────────────────────────────────────
-# run_sbm.sh — train an SBM/BM Potts model and render its figures in one
-# command. Output is a single self-describing run directory:
+# run_sbm.sh — train an SBM/BM Potts model. Inference only: synthetic
+# sequence generation and figure rendering are separate scripts
+# (sample_sbm.sh, render_sbm.sh) so each step can be invoked, repeated,
+# and parameterised independently.
+#
+# Output is a single self-describing run directory:
 #
 #   results/<fam>/<YYYY-MM-DD>_<label>_<idx>/
 #       model.npy        — trained parameters (J, h, ...)
 #       manifest.json    — git, seed, hashes, options, package versions
 #       command.sh       — re-runnable copy of this invocation
-#       fig_data/        — cached intermediates (artificial alignment, stats)
-#       figs/            — rendered PDFs (one per plot type)
 #
 # Two important inputs:
 #   <MSA_NPY>      a numerical alignment (NumPy .npy, shape N×L, int)
@@ -59,13 +61,15 @@ Optional:
                           (default: 1)
     --N_av N              number of models averaged per replicate
                           (default: 1)
-    --no-figures          skip rendering (just train)
     -h, --help            this message
 
 Inference temperature is fixed at T=1 (the model is meant to reproduce
 data statistics at T=1). Sampling synthetic alignments — including
-those used for diagnostic figures — is a separate post-training step
-not handled by this script.
+those used for diagnostic figures — is a separate post-training step.
+After this script completes, run:
+
+    bash scripts/sample_sbm.sh <run_dir>      # generate synthetic MSA
+    bash scripts/render_sbm.sh <run_dir>      # render figures
 
 Anything after `--` is forwarded verbatim to scripts/train_sbm.py, so
 you can reach the long tail of options (e.g. --optimizer GD,
@@ -108,7 +112,6 @@ PRUNE=""
 LABEL=""
 RESULTS_PATH=""
 FAM=""
-RENDER_FIGURES=1
 EXTRA_ARGS=()
 
 # ── Positional + named arg parsing ─────────────────────────────────────
@@ -183,7 +186,6 @@ while [[ $# -gt 0 ]]; do
         --theta)         THETA="$2"; shift 2 ;;
         --rep)           REP="$2"; shift 2 ;;
         --N_av)          N_AV="$2"; shift 2 ;;
-        --no-figures)    RENDER_FIGURES=0; shift ;;
         -h|--help)       usage; exit 0 ;;
         --)              shift; EXTRA_ARGS=("$@"); break ;;
         *)
@@ -277,20 +279,20 @@ if [[ ${#RUN_DIRS[@]} -eq 0 ]]; then
     exit 1
 fi
 
-# ── Render figures ─────────────────────────────────────────────────────
-if [[ "${RENDER_FIGURES}" -ne 1 ]]; then
-    echo "── Skipping figures (--no-figures) ─────────────────────────────────"
-    echo "Run dir(s):"
-    for d in "${RUN_DIRS[@]}"; do echo "  ${d}"; done
-    exit 0
-fi
-
-for run_dir in "${RUN_DIRS[@]}"; do
-    echo
-    echo "── Rendering figures for ${run_dir} ─────────────────────────────"
-    python scripts/render_figures.py "${run_dir}"
-done
-
+# ── Done ───────────────────────────────────────────────────────────────
+# Inference is complete. Synthetic-sequence generation and figures are
+# separate scripts so they can be re-run, parameterised, and compared
+# without retraining.
 echo
 echo "── Done ─────────────────────────────────────────────────────────────"
-for d in "${RUN_DIRS[@]}"; do echo "  ${d}"; done
+for d in "${RUN_DIRS[@]}"; do
+    echo "Run dir: ${d}"
+done
+echo
+echo "Next steps:"
+# Quote the path in the suggested commands so a copy-paste survives run
+# dirs containing spaces (label can be user-supplied).
+for d in "${RUN_DIRS[@]}"; do
+    printf "    bash scripts/sample_sbm.sh %q\n" "${d}"
+    printf "    bash scripts/render_sbm.sh %q\n" "${d}"
+done

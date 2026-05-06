@@ -21,9 +21,10 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 
 | If you need… | Look at |
 |---|---|
-| The user-facing entry point | `scripts/run_sbm.sh` (bash dispatcher: train + render in one go) |
+| The user-facing entry points (3 scripts, run in order) | `scripts/run_sbm.sh` (train), `scripts/sample_sbm.sh` (synthetic MSA), `scripts/render_sbm.sh` (figures) |
 | The training CLI | `scripts/train_sbm.py` (writes `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/`) |
-| The figure renderer | `scripts/render_figures.py` (writes `fig_data/` + `figs/` under a run dir; idempotent) |
+| The synthetic-sampling CLI | `scripts/sample_sbm.py` (writes `<run_dir>/synthetic/align_T<T>_seed<seed>.npy` + JSON sidecar) |
+| The figure renderer | `scripts/render_figures.py` (writes `<run_dir>/figs/` and `<run_dir>/figs/inputs/`; the bash wrapper `render_sbm.sh` deletes `figs/` first so each call regenerates) |
 | The optimizer entry point | `src/SBM/SBM_GD/SBM_proteins.py:SBM(align, options)` |
 | The MCMC sampler driver (Python) | `src/SBM/utils/utils.py:Create_modAlign` |
 | The C++ MCMC kernels | `src/SBM/MonteCarlo/MCMC_Potts/MonteCarlo_PottsMod.cpp` (full) and `MCMC_PottsProf/MonteCarlo_PottsProfMod.cpp` (profile-only) |
@@ -34,7 +35,7 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | Run-level provenance helpers | `src/SBM/provenance.py` |
 | The pruning CLI | `pruning/build_mask.py` |
 | The figure-save helpers | `scripts/lab_plotting.py` (`save_figure`, `panel_label`, `LAB_COLORS`) |
-| The CM worked example | `scripts/examples/cm-family/run.sh`, `pruning/CM_example.sh` (both thin wrappers around `run_sbm.sh`) |
+| The CM worked example | `pruning/CM_example.sh` (chains `run_sbm.sh` → `sample_sbm.sh` → `render_sbm.sh`) |
 
 `src/SBM/__init__.py` is empty by design — users import submodules directly (`SBM.SBM_GD.SBM_proteins`, `SBM.utils.utils`, `SBM.provenance`).
 
@@ -85,10 +86,10 @@ uv pip install -e ".[plotting,analysis,dev]"
 **Tests.** There is no test suite. After non-trivial changes, run the worked example as a smoke test:
 
 ```
-bash scripts/examples/cm-family/run.sh
+bash pruning/CM_example.sh
 ```
 
-It expects `data/MSA_array/MSA_CM.npy` to exist and writes a per-run directory under `results/CM/<run_id>/`.
+It expects `data/MSA_array/MSA_CM.npy` to exist, builds a pruning mask, trains a BM model, samples a synthetic MSA, and renders figures. Output lands under `pruning/example_output/CM/<run_id>/`.
 
 **Pruning workflow** lives in `pruning/` with its own `README.md` and `CM_example.sh`. The `"sca"` strategy depends on `pysca`, gated behind the `[sca]` optional-dependency group; `"fij"` and `"cij"` don't need it.
 
@@ -99,7 +100,7 @@ It expects `data/MSA_array/MSA_CM.npy` to exist and writes a per-run directory u
 - Amino-acid alphabet: `"-ACDEFGHIKLMNPQRSTVWY"`, with `q = 21` and `0 = gap`. `MSA` arrays are `int` of shape `(N_sequences, L)`.
 - Sequences containing any character outside the alphabet are **dropped** by `load_fasta` (mapped to `-1`, then filtered).
 - `options['q']` and `options['L']` are derived from the alignment in `Init_options`; do not set them manually.
-- Each run writes `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/{model.npy, manifest.json, command.sh, fig_data/, figs/}`. The dir name is built by `provenance.make_run_id(label=..., parent_dir=...)`; `idx` auto-increments by scanning sibling dirs. `model.npy` is a pickled dict with the legacy keys (`J`, `h`, `W_all`, `Seeds`, `Train`, `Test`, `options0`, `options1`, …); the manifest carries the full provenance. The `options0`/`options1` split inside the model dict is preserved for backward compat (with `Optimizer` added under `options0`). `fig_data/` caches the synthetic alignment and `compute_stats` output for any opt-in figures that need them. `figs/` is the rendered PDFs, saved through `lab_plotting.save_figure` with git/run-id metadata. By default `render_figures.py` produces only `coupling_evol` (the only figure that does not require sampling); the other modes (`freq`, `pair_freq`, `corr3`, `pca`, `energy`, `similarity`, `diversity`, `length`) need an artificial alignment and are opt-in via `--figs`.
+- Each run writes `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/`. `run_sbm.sh` (inference) populates `model.npy`, `manifest.json`, `command.sh`. `sample_sbm.sh` adds `synthetic/align_T<T>_seed<seed>.npy` and a JSON sidecar — the synthetic alignment is a first-class artifact (and may eventually be tested experimentally), so it lives at the run-dir top level rather than inside any figure folder. `render_sbm.sh` regenerates `figs/` on every call; `figs/inputs/` carries `stats.npy` (cached `compute_stats` output) and `sources.json` (paths + sha256s of `model.npy` and the synthetic-alignment file used — pointers only, not copies). The dir name is built by `provenance.make_run_id(label=..., parent_dir=...)`; `idx` auto-increments by scanning sibling dirs. `model.npy` is a pickled dict with the legacy keys (`J`, `h`, `W_all`, `Seeds`, `Train`, `Test`, `options0`, `options1`, …); the manifest carries the full provenance. By default `render_figures.py` produces only `coupling_evol` (the only figure that does not require a synthetic alignment); the other modes (`freq`, `pair_freq`, `corr3`, `pca`, `energy`, `similarity`, `diversity`, `length`) need one and are opt-in via `--figs`.
 
 ### Packed-parameter layout (`Wj` / `Jw`)
 
