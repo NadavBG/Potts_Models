@@ -82,11 +82,15 @@ The options most users will touch:
 | `--prune PATH` | Restrict couplings to a binary mask (see [Pruning](#pruning-workflow)) | none |
 | `--results-path DIR` | Output root | `<repo>/results` |
 | `--N_iter N` | Gradient-descent iterations | 400 |
-| `--N_chains N` | MCMC chains used to estimate model statistics each step | 70 |
-| `--k_MCMC N` | Metropolis sweeps per chain per step | 10 000 |
+| `--N_chains N` | MCMC chains used to estimate model statistics each step | BM=100, SBM=50 |
+| `--k_MCMC N` | Metropolis sweeps per chain per step | 100 000 |
+| `--TestTrain 0\|1` | Hold out 20% of the MSA as a test set | 0 |
+| `--theta X` | Similarity threshold for sequence reweighting | 0.3 |
+| `--rep N` | Independent replicate runs | 1 |
+| `--N_av N` | Models averaged per replicate | 1 |
 | `--no-figures` | Skip rendering (just train) | off |
 
-Anything after `--` is forwarded verbatim to `scripts/train_sbm.py`, so the long-tail flags (`--m`, `--lambdJ`, `--theta`, `--ParamInit`, `--TestTrain`, `--ignore_gaps`, …) are reachable without bloating the bash CLI. Run `bash scripts/run_sbm.sh --help` for the short list and `python scripts/train_sbm.py --help` for the long list.
+Anything after `--` is forwarded verbatim to `scripts/train_sbm.py`, so the long-tail flags (`--m`, `--lambdJ`, `--ParamInit`, `--ignore_gaps`, `--record_every`, …) are reachable without bloating the bash CLI. Run `bash scripts/run_sbm.sh --help` for the short list and `python scripts/train_sbm.py --help` for the long list.
 
 A few `options` keys (`SGD`, `Zero Fields`, `Zero Couplings`, `Precomputed_Stats`, `Infinite Mask Fields`) are only reachable by calling `SBM.SBM_GD.SBM_proteins.SBM(align, options)` directly from Python.
 

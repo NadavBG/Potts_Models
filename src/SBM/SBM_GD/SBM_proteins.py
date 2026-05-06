@@ -33,7 +33,7 @@ def ParseOptions(options):
             True,
         ),  # ignore gaps when calculating sequence weights
         ("k_MCMC", 10000),
-        ("Record_every", 100),  # iters between successive J_norm recordings
+        ("Record_every", 5),  # iters between successive J_norm recordings
         ("PseudoCount", False),  # the default pseudo count is 1/Neff
         ("alpha", 0.2),  # Learning rate exponent for Optimizer="GD"
         ("Learning_rate", None),  # If set, overrides decaying alpha for "GD"

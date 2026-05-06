@@ -125,7 +125,7 @@ Each gradient step in `GradLogLike`:
 - `"LBFGS"` (default) — runs `AdvanceSearch` / `UpdateHessian`. Both `Model="BM"` and `Model="SBM"` use this path; the difference between the two is the parameter values supplied (`m`, `lambda_J`, `lambda_h`, `N_chains`), not the algorithm.
 - `"GD"` — opt-in vanilla gradient descent using `alpha` (default 0.2) for a decaying learning rate, or `Learning_rate` if set. Rarely useful; kept for completeness.
 
-`run_sbm.sh` applies BM-vs-SBM defaults in shell. If you call `train_sbm.py` directly, pass `--m`, `--lambdJ`, `--lambdh`, `--N_chains` explicitly.
+`run_sbm.sh` applies BM-vs-SBM defaults in shell. If you call `train_sbm.py` directly: `--N_chains` is required; `--m`, `--lambdJ`, `--lambdh` default to the SBM regime (1, 0, 0) and must be set explicitly for BM-mode runs.
 
 ### Run-level provenance
 

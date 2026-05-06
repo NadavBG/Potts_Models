@@ -285,14 +285,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--TestTrain",
         type=int,
-        default=1,
-        help="1 if you want Test/Train sets, 0 otherwise",
+        default=0,
+        help="1 to hold out 20%% of the MSA as a test set, 0 to train on all rows",
     )
-    parser.add_argument("--rep", type=int, default=10, help="Number of repetitions")
+    parser.add_argument("--rep", type=int, default=1, help="Number of repetitions")
+    parser.add_argument("--N_av", type=int, default=1, help="Number of averaged models")
     parser.add_argument(
-        "--N_av", type=int, default=20, help="Number of averaged models"
+        "--mod",
+        type=lambda s: s.upper(),
+        default="SBM",
+        choices=["BM", "SBM"],
+        help="Model regime (case-insensitive). Selects a label, not algorithm — "
+        "BM and SBM both run L-BFGS; the mode-specific knobs (--m, --lambdJ, "
+        "--lambdh, --N_chains) must still be set explicitly when calling this "
+        "script directly. run_sbm.sh applies the per-mode defaults from "
+        "Summary Note 3.",
     )
-    parser.add_argument("--mod", type=str, default="SBM", help="Model")
     parser.add_argument(
         "--optimizer",
         type=str,
@@ -306,9 +314,20 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument("--N_iter", type=int, default=400, help="Number of iterations")
-    parser.add_argument("--m", type=int, default=1, help="Parameter m")
     parser.add_argument(
-        "--N_chains", type=int, nargs="+", help="List of N_chains values"
+        "--m",
+        type=int,
+        default=1,
+        help="L-BFGS memory rank. Recommended: BM=20, SBM=1 (Summary Note 3). "
+        "Default 1 matches the SBM regime.",
+    )
+    parser.add_argument(
+        "--N_chains",
+        type=int,
+        nargs="+",
+        required=True,
+        help="MCMC chains per gradient step. Required. One value, or several "
+        "to sweep (each spawns its own run dir). Recommended: BM=100, SBM=50.",
     )
     parser.add_argument(
         "--ParamInit", type=str, default="Zero", help="Init of fields and couplings"
@@ -319,15 +338,27 @@ if __name__ == "__main__":
     parser.add_argument(
         "--record_every",
         type=int,
-        default=100,
+        default=5,
         help=(
-            "Record J_norm every N L-BFGS iterations (default: 100). A final "
+            "Record J_norm every N L-BFGS iterations (default: 5). A final "
             "recording at iteration N_iter is added unconditionally so the "
             "trajectory ends at training completion."
         ),
     )
-    parser.add_argument("--lambdJ", type=float, default=0, help="lambda J")
-    parser.add_argument("--lambdh", type=float, default=0, help="lambda h")
+    parser.add_argument(
+        "--lambdJ",
+        type=float,
+        default=0,
+        help="L2 regularization on couplings. Recommended: BM=0.01, SBM=0. "
+        "Default 0 matches the SBM regime.",
+    )
+    parser.add_argument(
+        "--lambdh",
+        type=float,
+        default=0,
+        help="L2 regularization on fields. Recommended: BM=0.01, SBM=0. "
+        "Default 0 matches the SBM regime.",
+    )
     parser.add_argument(
         "--theta",
         type=float,

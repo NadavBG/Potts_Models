@@ -51,6 +51,14 @@ Optional:
                           (default: BM=0.01, SBM=0)
     --k_MCMC N            Metropolis sweeps per chain per step
                           (default: 100_000)
+    --TestTrain 0|1       hold out 20% of the MSA as a test set
+                          (default: 0 — train on the full MSA)
+    --theta X             similarity threshold for sequence reweighting
+                          (default: 0.3)
+    --rep N               number of independent replicate runs
+                          (default: 1)
+    --N_av N              number of models averaged per replicate
+                          (default: 1)
     --no-figures          skip rendering (just train)
     -h, --help            this message
 
@@ -60,7 +68,8 @@ those used for diagnostic figures — is a separate post-training step
 not handled by this script.
 
 Anything after `--` is forwarded verbatim to scripts/train_sbm.py, so
-you can reach the long tail of options (e.g. --optimizer GD, --theta).
+you can reach the long tail of options (e.g. --optimizer GD,
+--ParamInit, --record_every).
 
 Examples:
     bash scripts/run_sbm.sh SBM data/MSA_array/MSA_CM.npy --label CM-sbm
@@ -170,6 +179,10 @@ while [[ $# -gt 0 ]]; do
         --lambdJ)        LAMBD_J="$2"; shift 2 ;;
         --lambdh)        LAMBD_H="$2"; shift 2 ;;
         --k_MCMC)        K_MCMC="$2"; shift 2 ;;
+        --TestTrain)     TEST_TRAIN="$2"; shift 2 ;;
+        --theta)         THETA="$2"; shift 2 ;;
+        --rep)           REP="$2"; shift 2 ;;
+        --N_av)          N_AV="$2"; shift 2 ;;
         --no-figures)    RENDER_FIGURES=0; shift ;;
         -h|--help)       usage; exit 0 ;;
         --)              shift; EXTRA_ARGS=("$@"); break ;;
