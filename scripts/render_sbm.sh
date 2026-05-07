@@ -18,7 +18,10 @@ IFS=$'\n\t'
 #       <test-set-only figures>.pdf
 #
 # By default, render every figure whose data is present in the run:
-#   * coupling_evol always (depends only on model.npy)
+#   * coupling_evol and params always (depend only on model.npy).
+#     params is a two-panel field/coupling heatmap (h matrix on top,
+#     ‖J_ij‖_F below); CM runs (L=96) get a sector strip above the
+#     panels using Emily's definition from CM_sector.py.
 #   * correlations, pca, energy, similarity, diversity if at least
 #     one synthetic alignment exists (auto-discovered: every .npy
 #     under <RUN_DIR>/synthetic/). similarity and diversity are
@@ -43,8 +46,11 @@ Optional:
                          <RUN_DIR>/synthetic/)
     --figs NAME ...     figure types to render
                         (default: every figure whose data is present)
-                        all choices: coupling_evol, correlations, pca,
-                        energy, similarity, diversity, length
+                        all choices: coupling_evol, params, correlations,
+                        pca, energy, similarity, diversity, length
+    --sector NAME       which CM sector definition to mark on the
+                        params figure: emily (default), rama, or none.
+                        No effect on non-CM runs (L != 96).
     -h, --help          this message
 
 Behaviour:
@@ -95,6 +101,7 @@ fi
 
 SYNTHETICS=()
 FIGS=()
+SECTOR=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --synthetic)
@@ -114,6 +121,15 @@ while [[ $# -gt 0 ]]; do
             while [[ $# -gt 0 && "$1" != -* ]]; do
                 FIGS+=("$1"); shift
             done
+            ;;
+        --sector)
+            shift
+            if [[ $# -lt 1 || "$1" == -* ]]; then
+                echo "error: --sector requires a value (emily, rama, or none)" >&2
+                exit 2
+            fi
+            SECTOR="$1"
+            shift
             ;;
         -h|--help)
             usage; exit 0 ;;
@@ -144,6 +160,9 @@ if [[ ${#SYNTHETICS[@]} -gt 0 ]]; then
 fi
 if [[ ${#FIGS[@]} -gt 0 ]]; then
     PY_ARGS+=(--figs "${FIGS[@]}")
+fi
+if [[ -n "${SECTOR}" ]]; then
+    PY_ARGS+=(--sector "${SECTOR}")
 fi
 
 python scripts/render_figures.py "${PY_ARGS[@]}"

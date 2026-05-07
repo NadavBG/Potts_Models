@@ -28,6 +28,7 @@ module from sys.path-hacking into ``scripts/``.
 import logging
 
 import numpy as np  # type: ignore
+import matplotlib as mpl  # type: ignore
 import matplotlib.pyplot as plt  # type: ignore
 import SBM.utils.utils as ut
 from matplotlib.colors import Normalize  # type: ignore
@@ -35,6 +36,23 @@ from scipy.stats import gaussian_kde  # type: ignore
 from matplotlib import cm  # type: ignore
 
 log = logging.getLogger(__name__)
+
+
+def _pt_to_in(pt: float) -> float:
+    """Convert points to inches (1 pt = 1/72 in)."""
+    return float(pt) / 72.0
+
+
+def _resolve_font_pt(spec) -> float:
+    """Resolve a matplotlib font-size rcParam (number or alias like
+    ``"medium"``/``"large"``) to absolute points using the active
+    ``font.size`` and the standard scaling table.
+    """
+    if isinstance(spec, (int, float)):
+        return float(spec)
+    base = float(mpl.rcParams["font.size"])
+    return base * mpl.font_manager.font_scalings.get(spec, 1.0)
+
 
 ##########################################################
 
@@ -217,7 +235,14 @@ def _flatten_for(key, arr, ind_pair):
     return arr.flatten()
 
 
-def plot_stats(output, plot="Correlations", *, artificial=None, natural_colors=None):
+def plot_stats(
+    output,
+    plot="Correlations",
+    *,
+    artificial=None,
+    natural_colors=None,
+    sector_positions=None,
+):
     """Render one figure for the requested plot mode.
 
     Parameters
@@ -227,7 +252,8 @@ def plot_stats(output, plot="Correlations", *, artificial=None, natural_colors=N
         ``h``, ``J``, ``J_norm``, ``options``).
     plot
         Mode name. One of ``Correlations``, ``PCA``, ``Energy``,
-        ``Coupling_evol``, ``Similarity``, ``Diversity``, ``Length``.
+        ``Coupling_evol``, ``Params``, ``Similarity``, ``Diversity``,
+        ``Length``.
     artificial
         List of dicts, one per sampling temperature, each with keys
         ``temperature`` (float | None), ``align_mod`` (ndarray, required
@@ -235,11 +261,15 @@ def plot_stats(output, plot="Correlations", *, artificial=None, natural_colors=N
         required for Correlations), and ``color`` (str, required for
         align-needing modes — stamp it via
         ``lab_plotting.color_for_artificial`` in the renderer). Empty
-        / None for ``Coupling_evol``.
+        / None for ``Coupling_evol`` and ``Params``.
     natural_colors
         Required for align-needing modes: dict with keys ``"Train"``,
         ``"Test"``, ``"Random"`` mapping to color strings. The renderer
         sources these from ``lab_plotting.color_for_natural``.
+    sector_positions
+        Used only by ``Params``: iterable of MSA column indices to mark
+        as a sector strip above the heatmaps. ``None`` / empty hides
+        the strip — non-CM runs simply omit it.
     """
     # The signature changed in this refactor (removed positional ``Stats``,
     # ``ma``, ``temperature``; added kw-only ``artificial``). Catch the
@@ -253,8 +283,8 @@ def plot_stats(output, plot="Correlations", *, artificial=None, natural_colors=N
         )
     artificial = list(artificial) if artificial else []
     has_test = output.get("Test") is not None
-    # Coupling_evol doesn't touch group colors; everything else does.
-    needs_colors = plot != "Coupling_evol"
+    # Coupling_evol and Params are model-only; they don't read group colors.
+    needs_colors = plot not in ("Coupling_evol", "Params")
     if needs_colors:
         natural_colors = _resolve_natural_colors(natural_colors)
 
@@ -470,10 +500,7 @@ def plot_stats(output, plot="Correlations", *, artificial=None, natural_colors=N
             **common,
         )
         ax.legend()
-        # Energy is unitless in the model's natural scale (T=1 by
-        # convention; J and h are in the same arbitrary units), so
-        # label as "(a.u.)" rather than fabricating a kT label.
-        ax.set_xlabel("Statistical energy −(Σh + ½ΣJ)  (a.u.)")
+        ax.set_xlabel("Statistical energy −(Σh + ½ΣJ)")
         ax.set_ylabel("Probability density")
 
     if plot == "Similarity":
@@ -617,6 +644,247 @@ def plot_stats(output, plot="Correlations", *, artificial=None, natural_colors=N
             f"N_chains={output['options']['n_states']} "
             f"m={output['options']['m']}"
         )
+
+    if plot == "Params":
+        h_in = output.get("h")
+        J_in = output.get("J")
+        if h_in is None or J_in is None:
+            raise ValueError(
+                "Params plot needs both 'h' and 'J' in the model dict; "
+                f"got h={'present' if h_in is not None else 'None'}, "
+                f"J={'present' if J_in is not None else 'None'}. Profile-"
+                "only runs (Zero Couplings=True) write J as zeros after "
+                "Zero_Sum_Gauge — re-train with couplings enabled or "
+                "pass --figs without 'params'."
+            )
+        h_in = np.asarray(h_in)
+        J_in = np.asarray(J_in)
+        if (
+            h_in.ndim != 2
+            or J_in.ndim != 4
+            or J_in.shape[:2] != (h_in.shape[0], h_in.shape[0])
+        ):
+            raise ValueError(
+                "Params plot expects h shape (L, q) and J shape (L, L, q, q); "
+                f"got h={h_in.shape}, J={J_in.shape}"
+            )
+        # Project onto zero-sum gauge defensively. ``Zero_Sum_Gauge`` is
+        # idempotent, so this is a no-op for runs from train_sbm.py
+        # (which already gauges before saving) and a correctness fix
+        # for any hand-built model dict. Keeping it here makes the
+        # "(zero-sum gauge)" colorbar label load-bearing rather than
+        # a comment that hopes the inputs were gauged upstream.
+        J, h = ut.Zero_Sum_Gauge(J_in, h_in)
+        L, q = h.shape
+
+        # Frobenius norm of each pairwise coupling block. The diagonal
+        # is zero by construction (Jw never writes J[i,i]) and reads as
+        # the bottom of the colormap.
+        J_norm = np.linalg.norm(J, axis=(2, 3))
+
+        sectors = sorted({int(i) for i in (sector_positions or [])})
+        if sectors and (min(sectors) < 0 or max(sectors) >= L):
+            raise ValueError(
+                f"sector_positions out of range for L={L}: "
+                f"min={min(sectors)}, max={max(sectors)}"
+            )
+
+        # Standard 1-letter alphabet used everywhere else in the package.
+        # Catch q != 21 loudly so a non-protein alphabet doesn't render
+        # silently mislabelled.
+        alphabet = "-ACDEFGHIKLMNPQRSTVWY"
+        if q != len(alphabet):
+            raise ValueError(
+                f"Params plot expects q={len(alphabet)} (gap + 20 AAs); got q={q}"
+            )
+
+        # Inch-budget layout. Cell dimensions follow the data
+        # (panel_w * q/L for h, panel_w for J) so cells render as
+        # visual squares under aspect="auto"; the inter-panel gap is
+        # sized from rcParams so it tracks J's top decorations under
+        # any matplotlib style. Each component names what it covers —
+        # fig_w / fig_h are sums, not eyeballed totals. The character-
+        # width factors (2.0/2.5 × ytick_pt) and the colorbar width
+        # (13 pt) are still hardcoded — they're estimates that work for
+        # lab-paper-sized fonts (≈9–10 pt) and would need a small bump
+        # for much larger fonts.
+        sector_y_axes = 1.06  # axes-fraction y for sector dots above h
+        breathing = _pt_to_in(4.0)  # ~4pt visual padding allowance
+
+        panel_w = 6.5
+        h_panel_h = panel_w * q / L  # square cells: h is q × L
+        J_panel_h = panel_w  # square cells: J is L × L
+
+        # Inter-panel gap: J's top tick mark + tick-pad + tick-label +
+        # axes.labelpad + xlabel font height + breathing. Pulled from
+        # rcParams so the gap matches whatever style is active.
+        ticklabel_pt = _resolve_font_pt(mpl.rcParams["xtick.labelsize"])
+        xlabel_pt = _resolve_font_pt(mpl.rcParams["axes.labelsize"])
+        tick_pad_pt = mpl.rcParams["xtick.major.pad"]
+        tick_size_pt = mpl.rcParams["xtick.major.size"]
+        labelpad_pt = mpl.rcParams.get("axes.labelpad", 4.0)
+        hgap = (
+            _pt_to_in(
+                tick_size_pt + tick_pad_pt + ticklabel_pt + labelpad_pt + xlabel_pt
+            )
+            + breathing
+        )
+
+        # Top margin above h panel: dot-row offset (sector_y_axes − 1
+        # in axes fraction × panel inches) + sector label height +
+        # breathing. The label sits at the same y as the dots.
+        sector_offset_in = (sector_y_axes - 1.0) * h_panel_h
+        sector_label_pt = _resolve_font_pt(mpl.rcParams["axes.labelsize"])
+        top_pad = sector_offset_in + _pt_to_in(sector_label_pt) + breathing
+
+        # Bottom margin: just figure breathing — J's xlabel rides on top.
+        bottom_pad = _pt_to_in(8.0)
+
+        # Horizontal margins. Left: y-axis label + tick labels (single
+        # AA chars or 1–2-digit position numbers) + paddings. Right:
+        # colorbar tick labels (e.g. "2.00", ~4 chars) + label.
+        ytick_pt = _resolve_font_pt(mpl.rcParams["ytick.labelsize"])
+        ytick_pad_pt = mpl.rcParams["ytick.major.pad"]
+        ytick_size_pt = mpl.rcParams["ytick.major.size"]
+        left_pad = (
+            _pt_to_in(
+                xlabel_pt
+                + labelpad_pt
+                + ytick_size_pt
+                + ytick_pad_pt
+                + 2.0 * ytick_pt  # ≈ width of two chars (e.g. "60")
+            )
+            + breathing
+        )
+        cb_gap = _pt_to_in(6.0)
+        cb_w = _pt_to_in(13.0)
+        right_pad = (
+            _pt_to_in(
+                ytick_size_pt
+                + ytick_pad_pt
+                + 2.5 * ytick_pt  # ≈ width of "2.00"
+                + labelpad_pt
+                + xlabel_pt
+            )
+            + breathing
+        )
+
+        fig_w = left_pad + panel_w + cb_gap + cb_w + right_pad
+        fig_h = top_pad + h_panel_h + hgap + J_panel_h + bottom_pad
+
+        # Manual inch-precise layout: opt out of constrained_layout
+        # (on by default in lab-paper) so it can't override our
+        # positioning, and so savefig doesn't warn about missing
+        # layoutgrids.
+        fig = plt.figure(figsize=(fig_w, fig_h))
+        fig.set_layout_engine("none")
+
+        # Place axes by inch coords, normalized to fig dimensions.
+        def _rect(left_in, bottom_in, w_in, h_in):
+            return [
+                left_in / fig_w,
+                bottom_in / fig_h,
+                w_in / fig_w,
+                h_in / fig_h,
+            ]
+
+        y_J = bottom_pad
+        y_h = bottom_pad + J_panel_h + hgap
+        x_panel = left_pad
+        x_cb = left_pad + panel_w + cb_gap
+
+        ax_h = fig.add_axes(_rect(x_panel, y_h, panel_w, h_panel_h))
+        ax_J = fig.add_axes(
+            _rect(x_panel, y_J, panel_w, J_panel_h),
+            sharex=ax_h,
+        )
+        cax_h = fig.add_axes(_rect(x_cb, y_h, cb_w, h_panel_h))
+        cax_J = fig.add_axes(_rect(x_cb, y_J, cb_w, J_panel_h))
+
+        # Fields panel: q × L heatmap, diverging cmap centered at 0
+        # (h after Zero_Sum_Gauge has zero mean across a, so symmetric
+        # vmin/vmax frames the data correctly).
+        # Symmetric vmin/vmax. Floor h_max so an identically-zero h
+        # (untrained / hand-built model) doesn't collapse the diverging
+        # cmap to a single color band.
+        h_max = max(float(np.max(np.abs(h))) if h.size else 1.0, 1e-12)
+        im_h = ax_h.imshow(
+            h.T,
+            aspect="auto",
+            cmap="RdBu_r",
+            vmin=-h_max,
+            vmax=h_max,
+            interpolation="nearest",
+            extent=(-0.5, L - 0.5, q - 0.5, -0.5),
+        )
+        ax_h.set_yticks(range(q))
+        ax_h.set_yticklabels(list(alphabet))
+        ax_h.set_ylabel("Amino acid $a$")
+        # No x-ticks on h: the position axis is shared with J, which
+        # carries its labels at its top edge (matrix convention: origin
+        # in the top-left).
+        ax_h.tick_params(
+            axis="x",
+            which="both",
+            bottom=False,
+            top=False,
+            labelbottom=False,
+            labeltop=False,
+        )
+        # lab-paper sets axes.grid: True, which would draw a faint grid
+        # over the heatmap cells. Disable on heatmap axes only.
+        ax_h.grid(False)
+        fig.colorbar(im_h, cax=cax_h, label=r"Field $h_i(a)$ (zero-sum gauge)")
+
+        # Couplings panel: L × L Frobenius-norm heatmap. Origin is in the
+        # top-left (origin="upper" + flipped y-extent), so the x-axis
+        # ticks and label belong on top to mirror that.
+        im_J = ax_J.imshow(
+            J_norm,
+            aspect="auto",
+            cmap="viridis",
+            vmin=0.0,
+            interpolation="nearest",
+            extent=(-0.5, L - 0.5, L - 0.5, -0.5),
+        )
+        ax_J.xaxis.tick_top()
+        ax_J.xaxis.set_label_position("top")
+        ax_J.set_xlabel("Sequence position $i$")
+        ax_J.set_ylabel("Sequence position $j$")
+        ax_J.grid(False)
+        fig.colorbar(
+            im_J,
+            cax=cax_J,
+            label=r"Coupling norm $\Vert J_{ij}\Vert_F$ (zero-sum gauge)",
+        )
+
+        # Sector marks: black dots tucked just above the top edge of the
+        # h panel, sharing x positions with both heatmaps. The mixed
+        # transform (data x, axes y) lets us pin y to a small offset
+        # above the panel regardless of figure size or row aspect.
+        if sectors:
+            ax_h.scatter(
+                sectors,
+                [sector_y_axes] * len(sectors),
+                transform=ax_h.get_xaxis_transform(),
+                s=12,
+                color="black",
+                marker="o",
+                clip_on=False,
+                zorder=3,
+            )
+            # "Sector" label sits just to the left of the panel,
+            # vertically aligned with the dot row. Fully axes-fraction
+            # so its position doesn't depend on data extent or font
+            # metrics that left_pad already accounts for.
+            ax_h.text(
+                -0.005,
+                sector_y_axes,
+                "Sector",
+                transform=ax_h.transAxes,
+                ha="right",
+                va="center",
+            )
 
 
 def density_scatter(x, y, Max, *, ax=None, fig=None, markersize=10, add_colorbar=True):

@@ -6,7 +6,11 @@ Re-running rebuilds everything inside ``figs/``.
 By default this renders every figure whose required data is present in
 the run:
 
-* ``coupling_evol`` is always rendered (depends only on ``model.npy``).
+* ``coupling_evol`` and ``params`` are always rendered (both depend
+  only on ``model.npy``). ``params`` is a two-panel field/coupling
+  heatmap: the L×q ``h`` matrix on top and the L×L Frobenius norm of
+  ``J[i,j]`` below; CM runs (L=96) get a sector strip above the panels
+  using Emily's sector definition from ``CM_sector.py``.
 * ``correlations`` and ``pca`` are rendered if at least one synthetic
   alignment is available (auto-discovered under
   ``<run_dir>/synthetic/`` or supplied with ``--synthetic-alignment``).
@@ -31,7 +35,7 @@ Pass ``--figs NAME [NAME ...]`` to override the default — explicitly
 requesting a figure whose data is missing is an error rather than a
 silent skip.
 
-Reuses ``SBM.utils.utils_plot.plot_stats`` for the seven plot modes.
+Reuses ``SBM.utils.utils_plot.plot_stats`` for the eight plot modes.
 PDFs go through ``lab_plotting.save_figure`` (sibling script in
 ``scripts/``) so the git commit, calling-script path, and run id end up
 in the PDF metadata. ``figs/inputs/sources.json`` records the absolute
@@ -69,6 +73,20 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 import lab_plotting  # noqa: E402
 
+# CM_sector.py lives at the repo root and defines the catalytic-sector
+# residue positions used to annotate the params figure on CM runs.
+# Loaded by absolute path through importlib so we don't have to push
+# the repo root onto sys.path (which would risk shadowing same-named
+# modules from a sibling project).
+import importlib.util as _importlib_util  # noqa: E402
+
+_CM_SECTOR_PATH = _SCRIPT_DIR.parent / "CM_sector.py"
+_cm_spec = _importlib_util.spec_from_file_location("CM_sector", _CM_SECTOR_PATH)
+if _cm_spec is None or _cm_spec.loader is None:
+    raise ImportError(f"could not build module spec for {_CM_SECTOR_PATH}")
+CM_sector = _importlib_util.module_from_spec(_cm_spec)
+_cm_spec.loader.exec_module(CM_sector)
+
 log = logging.getLogger(__name__)
 
 #: All plot modes implemented in ``utils_plot.plot_stats``. Order is the
@@ -83,6 +101,7 @@ ALL_FIGS: tuple[str, ...] = (
     "pca",
     "energy",
     "coupling_evol",
+    "params",
     "similarity",
     "diversity",
     "length",
@@ -90,9 +109,9 @@ ALL_FIGS: tuple[str, ...] = (
 
 #: When ``--figs`` is omitted we try to render all of ``ALL_FIGS`` and
 #: drop figures whose required data isn't present in the run (no
-#: synthetic alignment, no test set). The single always-renderable
-#: figure is ``coupling_evol``.
-_ALWAYS_RENDERABLE: tuple[str, ...] = ("coupling_evol",)
+#: synthetic alignment, no test set). The always-renderable figures
+#: depend only on ``model.npy``.
+_ALWAYS_RENDERABLE: tuple[str, ...] = ("coupling_evol", "params")
 
 # ``utils_plot.plot_stats`` selects modes by string. Map our snake_case
 # figure names to the ``plot=...`` strings that file expects.
@@ -101,6 +120,7 @@ _PLOT_MODES: dict[str, str] = {
     "pca": "PCA",
     "energy": "Energy",
     "coupling_evol": "Coupling_evol",
+    "params": "Params",
     "similarity": "Similarity",
     "diversity": "Diversity",
     "length": "Length",
@@ -121,6 +141,73 @@ _NEEDS_ALIGN_MOD: frozenset[str] = frozenset(
 #: fall back to Train alone. ``length`` still reads ``output["Test"]``
 #: directly, so it's the only mode listed here.
 _NEEDS_TEST: frozenset[str] = frozenset({"length"})
+
+
+#: ``--sector`` choices wired through to ``_cm_sector_positions``.
+#: ``"emily"`` and ``"rama"`` pull the corresponding ATS lists from
+#: ``CM_sector``; ``"none"`` disables the sector strip on the params
+#: figure entirely.
+SECTOR_CHOICES: tuple[str, ...] = ("emily", "rama", "none")
+
+
+def _looks_like_cm_run(run_dir: Path) -> bool:
+    """``True`` iff the run directory looks like a CM run by layout.
+
+    Both ``results/<family>/<run>/`` (training) and
+    ``pruning/example_output/<family>/<run>/`` (worked example) put the
+    family name as the parent directory, so the CM check is simply
+    ``parent.name == "CM"`` (case-insensitive). L=96 alone is
+    insufficient — another protein might happen to share that length —
+    so the sector annotation is gated on the family marker too.
+    """
+    return run_dir.parent.name.lower() == "cm"
+
+
+def _cm_sector_positions(run_dir: Path, L: int, choice: str = "emily") -> list[int]:
+    """MSA-column indices for the requested CM catalytic-sector
+    definition on the 96-AA alignment.
+
+    ``choice`` is one of ``SECTOR_CHOICES``: ``"emily"`` (default,
+    ``CM_SECTOR_EMILY``), ``"rama"`` (``CM_SECTOR_RAMA``,
+    near-identical with a few differing residues), or ``"none"``.
+    Returns ``[]`` (and logs the reason) when annotation is suppressed:
+    ``choice == "none"``, ``L != 96``, or the run dir doesn't look like
+    a CM run. Pass ``--sector none`` to silence the suppression log.
+    """
+    if choice not in SECTOR_CHOICES:
+        raise ValueError(
+            f"unknown sector choice {choice!r}; expected one of {SECTOR_CHOICES}"
+        )
+    if choice == "none":
+        return []
+    if L != 96:
+        log.info(
+            "sector annotation suppressed: L=%d is not 96. "
+            "Pass --sector none to silence.",
+            L,
+        )
+        return []
+    if not _looks_like_cm_run(run_dir):
+        log.info(
+            "sector annotation suppressed: %s is not under a CM family "
+            "directory. Pass --sector none to silence, or move the run "
+            "under results/CM/ to enable.",
+            run_dir,
+        )
+        return []
+    ats_set = (
+        CM_sector.CM_SECTOR_EMILY if choice == "emily" else CM_sector.CM_SECTOR_RAMA
+    )
+    # Defensive: every ATS in the chosen sector must be addressable in
+    # the WT_ATS_96 → MSA-position map. Fails loudly if a future edit
+    # to CM_sector.py points at a sentinel (-1) position.
+    missing = [int(a) for a in ats_set if int(a) not in CM_sector.ATS_TO_POS_96]
+    if missing:
+        raise ValueError(
+            f"CM sector definition {choice!r} references ATS values not "
+            f"present in CM_sector.ATS_TO_POS_96: {missing}"
+        )
+    return sorted(CM_sector.ATS_TO_POS_96[int(ats)] for ats in ats_set)
 
 
 def _load_model(run_dir: Path) -> dict:
@@ -345,12 +432,14 @@ def _render_one(
     figs_dir: Path,
     *,
     run_id: str,
+    sector_positions: list[int],
 ) -> list[Path]:
     """Call ``plot_stats(plot=mode, artificial=...)`` and save the figure
     it created. ``artificial`` is the per-alignment list of dicts (with
     ``temperature``, ``align_mod``, ``stats``, ``color``); ignored by
-    Coupling_evol. ``natural_colors`` carries Train/Test/Random colors
-    sourced from ``lab_plotting.color_for_natural``.
+    Coupling_evol and Params. ``natural_colors`` carries Train/Test/
+    Random colors sourced from ``lab_plotting.color_for_natural``.
+    ``sector_positions`` is read only by the Params figure.
 
     Each mode is consolidated into one figure, so we expect a single new
     fignum per call. ``write_sidecar=False`` keeps render_figures.py
@@ -364,6 +453,7 @@ def _render_one(
         plot=mode,
         artificial=artificial,
         natural_colors=natural_colors,
+        sector_positions=sector_positions,
     )
     after = set(plt.get_fignums())
     new_fignums = sorted(after - before)
@@ -467,6 +557,20 @@ def main(argv: list[str] | None = None) -> int:
             "panel per temperature). Figures that depend on a synthetic "
             "alignment (" + ", ".join(sorted(_NEEDS_ALIGN_MOD)) + ") are "
             "skipped if none is available."
+        ),
+    )
+    parser.add_argument(
+        "--sector",
+        choices=SECTOR_CHOICES,
+        default="emily",
+        help=(
+            "which CM catalytic-sector definition to mark on the "
+            "params figure: 'emily' (default, CM_SECTOR_EMILY), 'rama' "
+            "(CM_SECTOR_RAMA — near-identical, differs by a few "
+            "residues), or 'none' to disable the sector strip. The "
+            "annotation is auto-suppressed when L != 96 or when the "
+            "run dir isn't under a CM family directory; pass 'none' "
+            "to silence the info-log explaining why."
         ),
     )
     parser.add_argument(
@@ -586,11 +690,25 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
     # Natural-group colors (Train/Test/Random) come from lab_plotting
-    # too. Pass-through to plot_stats; Coupling_evol ignores them.
+    # too. Pass-through to plot_stats; Coupling_evol and Params ignore
+    # them.
     natural_colors = {
         name: lab_plotting.color_for_natural(name)
         for name in ("Train", "Test", "Random")
     }
+
+    # Sector positions for the Params figure. ``--sector`` selects
+    # which CM definition to use (default: Emily's); the helper returns
+    # an empty list (with a logged reason) when the run isn't a CM run
+    # or the user passed ``--sector none``.
+    L_run = int(np.asarray(model["h"]).shape[0])
+    sector_positions = _cm_sector_positions(run_dir, L_run, args.sector)
+    if sector_positions:
+        log.info(
+            "marking %d CM sector position(s) on params figure (--sector=%s)",
+            len(sector_positions),
+            args.sector,
+        )
 
     # One canonical copy of the rendering script next to the other
     # provenance under figs/inputs/, instead of one .source.py per PDF.
@@ -611,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
                 natural_colors,
                 figs_dir,
                 run_id=run_id,
+                sector_positions=sector_positions,
             )
             if paths:
                 rendered_names.append(name)
