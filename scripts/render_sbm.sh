@@ -19,10 +19,12 @@ IFS=$'\n\t'
 #
 # By default, render every figure whose data is present in the run:
 #   * coupling_evol always (depends only on model.npy)
-#   * correlations, pca if at least one synthetic alignment exists
-#     (auto-discovered: every .npy under <RUN_DIR>/synthetic/)
-#   * energy, similarity, diversity, length additionally if the run was
-#     trained with Test/Train > 0
+#   * correlations, pca, energy, similarity, diversity if at least
+#     one synthetic alignment exists (auto-discovered: every .npy
+#     under <RUN_DIR>/synthetic/). similarity and diversity are
+#     violin plots; energy is an overlaid histogram. All three
+#     include Test as an extra group iff Test/Train > 0.
+#   * length additionally if the run was trained with Test/Train > 0
 # Pass --figs NAME [NAME ...] to render an explicit subset; in that
 # mode, requesting a figure whose data is missing is an error.
 # ─────────────────────────────────────────────────────────────────────────

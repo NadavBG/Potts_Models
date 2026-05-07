@@ -7,8 +7,20 @@ temperature) and emit consolidated multi-panel figures: a single
 ``Correlations`` figure with rows=temperatures × cols=orders replaces
 the legacy ``Freq`` / ``Pair_freq`` / ``Corr3`` triplet, and PCA
 becomes a ``1 × (1 + N_temps)`` grid (natural + each artificial).
-Energy / similarity / diversity / length overlay all temperatures in
-one panel.
+``Similarity`` and ``Diversity`` are violin plots (one violin per
+group: Train, optionally Test, and one per artificial T). ``Energy``
+overlays histograms (Natural Train, optionally Test, each artificial
+T, and a Random baseline). ``Length`` overlays length histograms
+(still requires a Test split).
+
+**Colors** are wired in by the caller (``scripts/render_figures.py``),
+which pulls the canonical mapping from ``scripts/lab_plotting.py``.
+``plot_stats`` accepts a ``natural_colors`` dict and reads
+``item["color"]`` off each artificial alignment's dict; if either is
+missing it raises rather than guessing. Keeping the canonical palette
+in ``lab_plotting`` (alongside ``WONG_PALETTE`` and ``LAB_COLORS``)
+avoids drift if the lab updates the palette and prevents this package
+module from sys.path-hacking into ``scripts/``.
 """
 
 ####################### MODULES #######################
@@ -37,6 +49,113 @@ def _art_label(base, temperature=None):
     if temperature is None:
         return base
     return f"{base} (T={float(temperature):g})"
+
+
+_REQUIRED_NATURAL_COLOR_KEYS: tuple[str, ...] = ("Train", "Test", "Random")
+
+
+def _resolve_natural_colors(natural_colors):
+    """Validate the natural-group color dict supplied by the caller.
+
+    Required because the package shouldn't carry its own copy of the
+    palette (single source of truth lives in
+    ``scripts/lab_plotting.py``). Missing keys raise rather than
+    silently defaulting, so a typo doesn't quietly produce a figure
+    with the wrong color.
+    """
+    if natural_colors is None:
+        raise ValueError(
+            "plot_stats: natural_colors is required. The canonical mapping "
+            "lives in scripts/lab_plotting.py (RUN_GROUP_COLORS); pass "
+            "{name: lab_plotting.color_for_natural(name) for name in "
+            "('Train', 'Test', 'Random')} from your renderer."
+        )
+    missing = [k for k in _REQUIRED_NATURAL_COLOR_KEYS if k not in natural_colors]
+    if missing:
+        raise ValueError(
+            f"plot_stats: natural_colors missing keys {missing}; "
+            f"need {list(_REQUIRED_NATURAL_COLOR_KEYS)}"
+        )
+    return natural_colors
+
+
+def _color_for_artificial_item(item):
+    """Pull the pre-stamped color off an artificial dict, raising if
+    the renderer forgot to set it."""
+    color = item.get("color")
+    if not color:
+        raise ValueError(
+            "plot_stats: each artificial item needs a 'color' key. Stamp "
+            "it in the renderer using lab_plotting.color_for_artificial("
+            "item['temperature'], index)."
+        )
+    return color
+
+
+def _drop_non_finite(arr, label):
+    """Filter NaN/Inf from a 1-D distance array and log how many were
+    dropped. Both ``compute_similarities`` and ``compute_diversity``
+    can produce NaN when a sequence pair has zero non-gap-overlap
+    positions (the gap-aware norm is zero, so ``1 − matches/norm``
+    becomes ``1 − 0/0``). Filtering keeps the violin/histogram from
+    silently inheriting NaN; the warning surfaces the dropped count
+    so a sudden spike is visible rather than hidden.
+    """
+    arr = np.asarray(arr)
+    finite = np.isfinite(arr)
+    n_drop = int(arr.size - finite.sum())
+    if n_drop:
+        log.warning(
+            "%s: dropped %d non-finite value(s) (likely all-gap rows). "
+            "Inspect the alignment if the count is large.",
+            label,
+            n_drop,
+        )
+    return arr[finite]
+
+
+def _violin_panel(groups, labels, colors, *, ylabel, ylim=None):
+    """Draw one violin per group. Used by Similarity and Diversity.
+    ``colors`` is one color string per group, in the same order as
+    ``groups`` / ``labels``. Median + extrema markers stay on so the
+    eye can compare central tendency without reading the violin shape
+    alone. Returns ``(fig, ax)``.
+    """
+    if not (len(groups) == len(labels) == len(colors)):
+        raise ValueError(
+            f"_violin_panel: groups/labels/colors length mismatch "
+            f"({len(groups)}/{len(labels)}/{len(colors)})"
+        )
+    empty = [name for g, name in zip(groups, labels) if len(g) == 0]
+    if empty:
+        # matplotlib's ``violinplot`` raises an opaque error on empty
+        # input. Surface the named group(s) instead.
+        raise ValueError(
+            f"_violin_panel: empty group(s) {empty}. After non-finite "
+            "filtering, every group must have at least one value."
+        )
+    fig, ax = plt.subplots(figsize=(0.7 * max(len(groups), 4) + 1.5, 2.8))
+    positions = list(range(len(groups)))
+    parts = ax.violinplot(
+        groups,
+        positions=positions,
+        showmedians=True,
+        showextrema=True,
+    )
+    for body, color in zip(parts["bodies"], colors):
+        body.set_facecolor(color)
+        body.set_edgecolor("black")
+        body.set_alpha(0.75)
+    for key in ("cmedians", "cmins", "cmaxes", "cbars"):
+        if key in parts:
+            parts[key].set_color("black")
+            parts[key].set_linewidth(0.8)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.set_ylabel(ylabel)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    return fig, ax
 
 
 def _scatter_panel(ax, x, y, *, label_pearson, xlabel, ylabel, title, diag_xy):
@@ -98,7 +217,7 @@ def _flatten_for(key, arr, ind_pair):
     return arr.flatten()
 
 
-def plot_stats(output, plot="Correlations", *, artificial=None):
+def plot_stats(output, plot="Correlations", *, artificial=None, natural_colors=None):
     """Render one figure for the requested plot mode.
 
     Parameters
@@ -113,7 +232,14 @@ def plot_stats(output, plot="Correlations", *, artificial=None):
         List of dicts, one per sampling temperature, each with keys
         ``temperature`` (float | None), ``align_mod`` (ndarray, required
         for align-needing modes), ``stats`` (dict from compute_stats,
-        required for Correlations). Empty / None for ``Coupling_evol``.
+        required for Correlations), and ``color`` (str, required for
+        align-needing modes — stamp it via
+        ``lab_plotting.color_for_artificial`` in the renderer). Empty
+        / None for ``Coupling_evol``.
+    natural_colors
+        Required for align-needing modes: dict with keys ``"Train"``,
+        ``"Test"``, ``"Random"`` mapping to color strings. The renderer
+        sources these from ``lab_plotting.color_for_natural``.
     """
     # The signature changed in this refactor (removed positional ``Stats``,
     # ``ma``, ``temperature``; added kw-only ``artificial``). Catch the
@@ -127,6 +253,10 @@ def plot_stats(output, plot="Correlations", *, artificial=None):
         )
     artificial = list(artificial) if artificial else []
     has_test = output.get("Test") is not None
+    # Coupling_evol doesn't touch group colors; everything else does.
+    needs_colors = plot != "Coupling_evol"
+    if needs_colors:
+        natural_colors = _resolve_natural_colors(natural_colors)
 
     if plot == "Correlations":
         if not artificial:
@@ -241,20 +371,28 @@ def plot_stats(output, plot="Correlations", *, artificial=None):
             squeeze=False,
         )
         axes = axes[0]
-        panels = [(axes[0], X_nat, "Natural sequences")]
+        # Title color matches each group's color in the violin/energy
+        # figures so the same alignment reads as the same color
+        # everywhere.
+        panels = [(axes[0], X_nat, "Natural sequences", natural_colors["Train"])]
         for ax, item, X_a in zip(axes[1:], artificial, art_Xs):
             panels.append(
-                (ax, X_a, _art_label("Artificial sequences", item["temperature"]))
+                (
+                    ax,
+                    X_a,
+                    _art_label("Artificial sequences", item["temperature"]),
+                    _color_for_artificial_item(item),
+                )
             )
         # density_scatter draws the points with vmin=0, vmax=Max so the
         # color mapping is identical across panels. We add a single
         # shared colorbar after the loop instead of one per panel.
-        for ax, pts, title in panels:
+        for ax, pts, title, title_color in panels:
             density_scatter(pts[:, 0], pts[:, 1], Max=Max, ax=ax, add_colorbar=False)
             ax.set_xlim(mi1, ma1)
             ax.set_ylim(mi2, ma2)
             ax.set_xlabel("PC 1")
-            ax.set_title(title)
+            ax.set_title(title, color=title_color)
         axes[0].set_ylabel("PC 2")
         norm = Normalize(vmin=0, vmax=Max)
         fig.colorbar(
@@ -267,7 +405,7 @@ def plot_stats(output, plot="Correlations", *, artificial=None):
     if plot == "Energy":
         if not artificial:
             raise ValueError("Energy plot requires at least one artificial set")
-        fig, ax = plt.subplots(figsize=(3.5, 2.6))
+        fig, ax = plt.subplots(figsize=(4.0, 2.8))
         Bins = 60
         # A random alignment as a worst-case baseline. Shape from the
         # first artificial set; all share L (validated upstream).
@@ -275,8 +413,16 @@ def plot_stats(output, plot="Correlations", *, artificial=None):
             "int32"
         )
 
-        Etest = ut.compute_energies(output["Test"], output["h"], output["J"])
+        # ut.compute_energies returns -(Σh + ½ΣJ); lower = more probable
+        # under the Potts model (utils.py:561). Plot raw values — no
+        # z-score — so the x-axis is in the model's native units and
+        # the absolute energy scale is preserved across runs.
         Etrain = ut.compute_energies(output["Train"], output["h"], output["J"])
+        Etest = (
+            ut.compute_energies(output["Test"], output["h"], output["J"])
+            if has_test
+            else None
+        )
         Erand = ut.compute_energies(rand, output["h"], output["J"])
         Emods = [
             (
@@ -285,64 +431,135 @@ def plot_stats(output, plot="Correlations", *, artificial=None):
             )
             for item in artificial
         ]
-        mu, sd = float(np.mean(Etrain)), float(np.std(Etrain))
-        Etest = (Etest - mu) / sd
-        Etrain = (Etrain - mu) / sd
-        Erand = (Erand - mu) / sd
-        Emods = [(T, (e - mu) / sd) for T, e in Emods]
 
-        all_e = [Etest, Etrain, Erand] + [e for _, e in Emods]
+        all_e = [Etrain, Erand] + [e for _, e in Emods]
+        if Etest is not None:
+            all_e.append(Etest)
         mi = float(np.amin(np.concatenate(all_e)))
         ma = float(np.amax(np.concatenate(all_e)))
-        common = dict(bins=Bins, range=(mi - 0.5, ma + 0.5), alpha=0.5, density=True)
-        ax.hist(Etest, label="Test", **common)
-        ax.hist(Etrain, label="Train", **common)
-        for T, e in Emods:
-            ax.hist(e, label=_art_label("Artificial", T), **common)
-        ax.hist(Erand, label="Random", color="0.6", **common)
+        # Pad 2% of the data range, but force a non-zero span if every
+        # group collapsed onto the same value (matplotlib raises on a
+        # zero-width hist range).
+        span = ma - mi
+        pad = 0.02 * span if span > 0 else 0.5
+        common = dict(bins=Bins, range=(mi - pad, ma + pad), alpha=0.55, density=True)
+        ax.hist(
+            Etrain,
+            label="Natural (Train)",
+            color=natural_colors["Train"],
+            **common,
+        )
+        if Etest is not None:
+            ax.hist(
+                Etest,
+                label="Natural (Test)",
+                color=natural_colors["Test"],
+                **common,
+            )
+        for item, (T, e) in zip(artificial, Emods):
+            ax.hist(
+                e,
+                label=_art_label("Artificial", T),
+                color=_color_for_artificial_item(item),
+                **common,
+            )
+        ax.hist(
+            Erand,
+            label="Random",
+            color=natural_colors["Random"],
+            **common,
+        )
         ax.legend()
-        ax.set_xlabel("Statistical energy (z-score)")
+        # Energy is unitless in the model's natural scale (T=1 by
+        # convention; J and h are in the same arbitrary units), so
+        # label as "(a.u.)" rather than fabricating a kT label.
+        ax.set_xlabel("Statistical energy −(Σh + ½ΣJ)  (a.u.)")
         ax.set_ylabel("Probability density")
 
     if plot == "Similarity":
         if not artificial:
             raise ValueError("Similarity plot requires at least one artificial set")
-        fig, ax = plt.subplots(figsize=(3.5, 2.6))
-        Bins = 80
-        common = dict(bins=Bins, range=(0, 1), alpha=0.5, density=True)
-        ax.hist(
-            ut.compute_similarities(output["Test"], output["Train"]),
-            label="Test",
-            **common,
-        )
-        ax.hist(ut.compute_similarities(output["Train"]), label="Train", **common)
-        for item in artificial:
-            ax.hist(
-                ut.compute_similarities(item["align_mod"], output["Train"]),
-                label=_art_label("Artificial", item["temperature"]),
-                **common,
+        groups, labels, colors = [], [], []
+        # compute_similarities returns distance d ∈ [0,1] (utils.py:564);
+        # plot identity = 1 − d so higher = more similar to a natural.
+        # Train is compared against itself with self excluded (utils.py:577).
+        groups.append(
+            _drop_non_finite(
+                1.0 - ut.compute_similarities(output["Train"]),
+                label="Similarity[Train]",
             )
-        ax.set_xlabel("Distance to closest natural seq")
-        ax.set_ylabel("Probability density")
-        ax.legend()
+        )
+        labels.append("Train")
+        colors.append(natural_colors["Train"])
+        if has_test:
+            groups.append(
+                _drop_non_finite(
+                    1.0 - ut.compute_similarities(output["Test"], output["Train"]),
+                    label="Similarity[Test]",
+                )
+            )
+            labels.append("Test")
+            colors.append(natural_colors["Test"])
+        for item in artificial:
+            T = item["temperature"]
+            groups.append(
+                _drop_non_finite(
+                    1.0 - ut.compute_similarities(item["align_mod"], output["Train"]),
+                    label=f"Similarity[Artificial T={T}]",
+                )
+            )
+            labels.append(_art_label("Artificial", T))
+            colors.append(_color_for_artificial_item(item))
+        fig, ax = _violin_panel(
+            groups,
+            labels,
+            colors,
+            ylabel="Identity to closest natural sequence",
+            ylim=(0, 1),
+        )
 
     if plot == "Diversity":
         if not artificial:
             raise ValueError("Diversity plot requires at least one artificial set")
-        fig, ax = plt.subplots(figsize=(3.5, 2.6))
-        Bins = 60
-        common = dict(bins=Bins, range=(0, 1), alpha=0.5, density=True)
-        ax.hist(ut.compute_diversity(output["Train"]), label="Train", **common)
-        ax.hist(ut.compute_diversity(output["Test"]), label="Test", **common)
-        for item in artificial:
-            ax.hist(
-                ut.compute_diversity(item["align_mod"]),
-                label=_art_label("Artificial", item["temperature"]),
-                **common,
+        groups, labels, colors = [], [], []
+        # compute_diversity returns all N(N−1)/2 pairwise distances using
+        # the same gap-aware Hamming metric (utils.py:591). Higher =
+        # more internally diverse alignment. Plotted as distance (not
+        # flipped), so the y-axis name matches "Diversity".
+        groups.append(
+            _drop_non_finite(
+                ut.compute_diversity(output["Train"]),
+                label="Diversity[Train]",
             )
-        ax.legend()
-        ax.set_xlabel("Diversity")
-        ax.set_ylabel("Probability density")
+        )
+        labels.append("Train")
+        colors.append(natural_colors["Train"])
+        if has_test:
+            groups.append(
+                _drop_non_finite(
+                    ut.compute_diversity(output["Test"]),
+                    label="Diversity[Test]",
+                )
+            )
+            labels.append("Test")
+            colors.append(natural_colors["Test"])
+        for item in artificial:
+            T = item["temperature"]
+            groups.append(
+                _drop_non_finite(
+                    ut.compute_diversity(item["align_mod"]),
+                    label=f"Diversity[Artificial T={T}]",
+                )
+            )
+            labels.append(_art_label("Artificial", T))
+            colors.append(_color_for_artificial_item(item))
+        fig, ax = _violin_panel(
+            groups,
+            labels,
+            colors,
+            ylabel="Pairwise distance within set",
+            ylim=(0, 1),
+        )
 
     if plot == "Length":
         if not artificial:
@@ -359,11 +576,16 @@ def plot_stats(output, plot="Correlations", *, artificial=None):
         all_l = [Length_train, Length_test] + [L for _, L in Length_arts]
         mi = float(np.amin(np.concatenate(all_l)))
         ma = float(np.amax(np.concatenate(all_l)))
-        common = dict(bins=Bins, range=(mi, ma), alpha=0.5, density=True)
-        ax.hist(Length_train, label="Train", **common)
-        ax.hist(Length_test, label="Test", **common)
-        for T, L in Length_arts:
-            ax.hist(L, label=_art_label("Artificial", T), **common)
+        common = dict(bins=Bins, range=(mi, ma), alpha=0.55, density=True)
+        ax.hist(Length_train, label="Train", color=natural_colors["Train"], **common)
+        ax.hist(Length_test, label="Test", color=natural_colors["Test"], **common)
+        for item, (T, L) in zip(artificial, Length_arts):
+            ax.hist(
+                L,
+                label=_art_label("Artificial", T),
+                color=_color_for_artificial_item(item),
+                **common,
+            )
         ax.legend()
         ax.set_xlabel("Genome length")
         ax.set_ylabel("Probability density")

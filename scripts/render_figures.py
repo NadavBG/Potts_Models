@@ -14,10 +14,17 @@ the run:
   ``correlations`` becomes a (rows = temperatures) × (cols = 1st/2nd/
   3rd order) grid and ``pca`` becomes a 1×(1+N) grid (natural + each
   artificial).
-* ``energy``, ``similarity``, ``diversity``, ``length`` additionally
-  require that the run was trained with ``Test/Train > 0`` (i.e. the
-  model has a held-out test set saved under ``model["Test"]``); each
-  one figure overlays the histograms of every available temperature.
+* ``energy``, ``similarity``, ``diversity`` are rendered when at
+  least one synthetic alignment is available. ``similarity`` and
+  ``diversity`` are violin plots (one violin per group: Train,
+  optionally Test, and one per artificial T); ``energy`` is an
+  overlaid histogram (Natural Train, optionally Test, each artificial
+  T, plus a Random worst-case baseline). All three include Test as
+  an extra group if the run has ``Test/Train > 0``, otherwise fall
+  back to Train alone.
+* ``length`` additionally requires that the run was trained with
+  ``Test/Train > 0`` (i.e. ``model["Test"]`` is not None) since the
+  histogram reads Test directly.
 
 Figures whose data is missing are skipped with an info log message.
 Pass ``--figs NAME [NAME ...]`` to override the default — explicitly
@@ -108,9 +115,12 @@ _NEEDS_ALIGN_MOD: frozenset[str] = frozenset(
 )
 
 #: Figures that need a real test set (i.e. ``Test/Train>0`` at training).
-#: ``correlations`` adapts to no-test by comparing against Train; the
-#: modes listed here read ``output["Test"]`` directly and would crash.
-_NEEDS_TEST: frozenset[str] = frozenset({"energy", "similarity", "diversity", "length"})
+#: ``correlations`` adapts to no-test by comparing against Train.
+#: ``energy``, ``similarity``, and ``diversity`` now also adapt: they
+#: include Test as an extra histogram / violin if present, otherwise
+#: fall back to Train alone. ``length`` still reads ``output["Test"]``
+#: directly, so it's the only mode listed here.
+_NEEDS_TEST: frozenset[str] = frozenset({"length"})
 
 
 def _load_model(run_dir: Path) -> dict:
@@ -331,13 +341,16 @@ def _render_one(
     name: str,
     model: dict,
     artificial: list[dict],
+    natural_colors: dict[str, str],
     figs_dir: Path,
     *,
     run_id: str,
 ) -> list[Path]:
     """Call ``plot_stats(plot=mode, artificial=...)`` and save the figure
     it created. ``artificial`` is the per-alignment list of dicts (with
-    ``temperature``, ``align_mod``, ``stats``); ignored by Coupling_evol.
+    ``temperature``, ``align_mod``, ``stats``, ``color``); ignored by
+    Coupling_evol. ``natural_colors`` carries Train/Test/Random colors
+    sourced from ``lab_plotting.color_for_natural``.
 
     Each mode is consolidated into one figure, so we expect a single new
     fignum per call. ``write_sidecar=False`` keeps render_figures.py
@@ -346,7 +359,12 @@ def _render_one(
     """
     mode = _PLOT_MODES[name]
     before = set(plt.get_fignums())
-    up.plot_stats(model, plot=mode, artificial=artificial)
+    up.plot_stats(
+        model,
+        plot=mode,
+        artificial=artificial,
+        natural_colors=natural_colors,
+    )
     after = set(plt.get_fignums())
     new_fignums = sorted(after - before)
     if not new_fignums:
@@ -535,7 +553,9 @@ def main(argv: list[str] | None = None) -> int:
         log.info("'lab-paper' stylesheet not available; using matplotlib defaults")
 
     # Build per-alignment dicts: each carries its path, sampling
-    # temperature, alignment array, and (lazily) computed stats.
+    # temperature, alignment array, (lazily) computed stats, and the
+    # color used for this alignment in every figure (sourced from
+    # lab_plotting so the lab palette stays the single source of truth).
     artificial: list[dict] = []
     if needs_align:
         if not align_paths:
@@ -543,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:
                 "internal error: align-needing figure survived filtering "
                 "without any synthetic alignment paths"
             )
-        for p in align_paths:
+        for k, p in enumerate(align_paths):
             align_mod = _load_align_mod(p, model)
             T = _read_sampling_temperature(p)
             artificial.append(
@@ -552,6 +572,7 @@ def main(argv: list[str] | None = None) -> int:
                     "temperature": T,
                     "align_mod": align_mod,
                     "stats": None,
+                    "color": lab_plotting.color_for_artificial(T, k),
                 }
             )
         if needs_stats:
@@ -563,6 +584,13 @@ def main(argv: list[str] | None = None) -> int:
                     figs_inputs_dir,
                     rng_seed=seed,
                 )
+
+    # Natural-group colors (Train/Test/Random) come from lab_plotting
+    # too. Pass-through to plot_stats; Coupling_evol ignores them.
+    natural_colors = {
+        name: lab_plotting.color_for_natural(name)
+        for name in ("Train", "Test", "Random")
+    }
 
     # One canonical copy of the rendering script next to the other
     # provenance under figs/inputs/, instead of one .source.py per PDF.
@@ -580,6 +608,7 @@ def main(argv: list[str] | None = None) -> int:
                 name,
                 model,
                 artificial,
+                natural_colors,
                 figs_dir,
                 run_id=run_id,
             )

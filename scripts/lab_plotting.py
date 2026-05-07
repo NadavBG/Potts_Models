@@ -94,6 +94,76 @@ LAB_COLORS: dict[str, str] = {
 }
 
 
+# ── Run-group colors for SBM/BM figures ─────────────────────────────────
+#
+# A trained run produces several alignments that show up across many
+# figures (similarity, diversity, energy, PCA). Pinning a color per
+# group here means a given group reads as the same color in every
+# figure. Naturals are green per the user's preference; the warm side
+# of the Wong palette covers artificials.
+
+#: Naturals get distinct greens (Train darker so it reads as the
+#: primary). #117733 is from Paul Tol's "Bright" qualitative palette
+#: (also colorblind-safe); WONG_PALETTE doesn't include a second green
+#: distinguishable from #009E73, so we mix sources rather than pick
+#: two near-identical greens. Random is the worst-case anchor.
+RUN_GROUP_COLORS: dict[str, str] = {
+    "Train": "#117733",  # Tol Bright dark green — primary natural
+    "Test": WONG_PALETTE[3],  # bluish green #009E73 — secondary natural
+    "Random": "#888888",  # gray — worst-case anchor
+}
+
+#: Default-run sampling temperatures get fixed colors so figures from
+#: the canonical workflow look the same every time. Other Ts cycle
+#: through ``ART_FALLBACK_PALETTE``.
+ART_COLOR_BY_T: dict[float, str] = {
+    0.75: WONG_PALETTE[1],  # orange #E69F00
+    1.0: WONG_PALETTE[6],  # vermillion #D55E00
+}
+
+#: Cycle for non-default temperatures. Order chosen so adjacent Ts
+#: visually separate well on a typical figure.
+ART_FALLBACK_PALETTE: tuple[str, ...] = (
+    WONG_PALETTE[7],  # reddish purple
+    WONG_PALETTE[5],  # blue
+    WONG_PALETTE[4],  # yellow
+    WONG_PALETTE[2],  # sky blue
+)
+
+
+def color_for_natural(name: str) -> str:
+    """Color for a named natural-alignment group (``"Train"``, ``"Test"``,
+    ``"Random"``). Raises ``KeyError`` for unknown names — those should
+    be added to ``RUN_GROUP_COLORS`` deliberately, not silently fallbacked.
+    """
+    return RUN_GROUP_COLORS[name]
+
+
+def color_for_artificial(temperature: float | None, fallback_index: int) -> str:
+    """Color for an artificial alignment, keyed on its sampling
+    temperature when possible.
+
+    ``temperature`` may be ``None`` (sidecar JSON missing); in that
+    case we fall back to ``ART_FALLBACK_PALETTE[fallback_index]``.
+    ``fallback_index`` is the artificial's position in the run's
+    artificial list — passed in (rather than hashed off T) because
+    Python's hash randomization would otherwise give the same T a
+    different color on every interpreter restart.
+
+    Match against ``ART_COLOR_BY_T`` uses ``math.isclose`` so a
+    sidecar JSON written as ``0.7500001`` still resolves to the
+    canonical T=0.75 color rather than silently slipping into the
+    fallback palette.
+    """
+    import math
+
+    if temperature is not None:
+        for fixed_T, color in ART_COLOR_BY_T.items():
+            if math.isclose(temperature, fixed_T, rel_tol=1e-6, abs_tol=1e-9):
+                return color
+    return ART_FALLBACK_PALETTE[fallback_index % len(ART_FALLBACK_PALETTE)]
+
+
 # ── Panel labels ────────────────────────────────────────────────────────
 
 
