@@ -91,6 +91,10 @@ LAB_COLORS: dict[str, str] = {
     "data": "#000000",  # black, the default for raw points
     "fit": "#D62728",  # red, for fit overlays
     "highlight": "#E69F00",  # orange, for callouts
+    # Chrome / plumbing: separators, secondary annotations, axis-adjacent
+    # marks. Matplotlib grayscale spec; reads as muted dark gray on both
+    # the lab-paper and lab-slides stylesheets.
+    "chrome": "0.4",
 }
 
 

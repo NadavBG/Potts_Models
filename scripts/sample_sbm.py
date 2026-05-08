@@ -24,12 +24,21 @@ import argparse
 import datetime as dt
 import json
 import logging
+import sys
 from pathlib import Path
 
 import numpy as np
 
 import SBM.provenance as provenance
 import SBM.utils.utils as ut
+
+# scripts/mpnn_sweep.py is a sibling, not a package module. Add this
+# script's directory to sys.path so the plain `import mpnn_sweep` works
+# regardless of the cwd from which sample_sbm.py is invoked. Mirrors the
+# pattern in scripts/render_figures.py for `lab_plotting`.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
 
 log = logging.getLogger(__name__)
 
@@ -160,7 +169,161 @@ def main(argv: list[str] | None = None) -> int:
             "destroy a prior sample."
         ),
     )
+
+    # ── ProteinMPNN foldability-sweep mode ─────────────────────────────
+    # An alternate code path (orchestrated by scripts/mpnn_sweep.py) that
+    # samples N sequences at each of a temperature ladder, builds
+    # interpretability controls (WT, random, shuffled WT, natural MSA
+    # bootstrap), and (optionally) scores all of them with the upstream
+    # ProteinMPNN repository. Outputs land under
+    # <run_dir>/synthetic/mpnn_sweep_seed<seed>/. Disabled unless
+    # --mpnn-sweep is set; mixing with the standard sampling flags is a
+    # hard error to avoid surprising clobbers.
+    mpnn_group = parser.add_argument_group("ProteinMPNN sweep (alternate mode)")
+    mpnn_group.add_argument(
+        "--mpnn-sweep",
+        action="store_true",
+        help=(
+            "Sample N sequences at each --mpnn-temperature, build "
+            "interpretability controls, and score everything against a "
+            "PDB with ProteinMPNN. Mutually exclusive with the standard "
+            "--temperature/--N/--output/--label sampling flags."
+        ),
+    )
+    mpnn_group.add_argument(
+        "--mpnn-temperatures",
+        type=float,
+        nargs="+",
+        default=None,
+        metavar="T",
+        help="temperature ladder for the sweep (default: 0.1 0.2 ... 1.0)",
+    )
+    mpnn_group.add_argument(
+        "--mpnn-N-per-T",
+        type=int,
+        default=100,
+        help="sequences per temperature and per control group (default: 100)",
+    )
+    mpnn_group.add_argument(
+        "--mpnn-controls",
+        nargs="+",
+        choices=["wt", "random", "shuffled", "natural", "none"],
+        default=["wt", "random", "shuffled", "natural"],
+        help=(
+            "interpretability controls to score alongside the temperature "
+            "ladder. 'none' disables all controls. (default: all four)"
+        ),
+    )
+    mpnn_group.add_argument(
+        "--mpnn-pdb",
+        type=Path,
+        default=None,
+        help="PDB to score against (default: data/structures/1ECM.pdb)",
+    )
+    mpnn_group.add_argument(
+        "--mpnn-chain",
+        type=str,
+        default="A",
+        help="PDB chain id to score (default: A)",
+    )
+    mpnn_group.add_argument(
+        "--mpnn-wt-fasta",
+        type=Path,
+        default=None,
+        help=(
+            "FASTA whose first record is the WT MSA-aligned reference "
+            "sequence (default: data/fasta/CM.fasta — its first record "
+            "is the 1ECM reference)"
+        ),
+    )
+    mpnn_group.add_argument(
+        "--mpnn-path",
+        type=Path,
+        default=None,
+        help=(
+            "path to a clone of github.com/dauparas/ProteinMPNN. "
+            "Defaults to the PROTEINMPNN_PATH environment variable. "
+            "Ignored under --mpnn-skip-scoring."
+        ),
+    )
+    mpnn_group.add_argument(
+        "--mpnn-python",
+        type=Path,
+        default=None,
+        help=(
+            "Python interpreter used to invoke ProteinMPNN's "
+            "protein_mpnn_run.py (the env where torch is installed). "
+            "Defaults to the PROTEINMPNN_PYTHON environment variable, "
+            "else sys.executable. Set this to point at a separate "
+            "conda/venv env so torch does not need to live in the "
+            "Potts_Models env. Ignored under --mpnn-skip-scoring."
+        ),
+    )
+    mpnn_group.add_argument(
+        "--mpnn-model-name",
+        type=str,
+        default="v_48_020",
+        help=(
+            "ProteinMPNN weights basename in vanilla_model_weights/ "
+            "(default: v_48_020 — the soluble model with 0.20 Å noise)"
+        ),
+    )
+    mpnn_group.add_argument(
+        "--mpnn-device",
+        choices=["cpu", "cuda", "mps"],
+        default=None,
+        help=(
+            "torch device for ProteinMPNN. Default: auto-detect " "(cuda → mps → cpu)."
+        ),
+    )
+    mpnn_group.add_argument(
+        "--mpnn-backbone-noise",
+        type=float,
+        default=0.0,
+        help=(
+            "augmentation epsilon passed to ProteinMPNN at scoring time. "
+            "0.0 reproduces the deterministic-backbone score; nonzero "
+            "values match a noise-augmented training regime."
+        ),
+    )
+    mpnn_group.add_argument(
+        "--mpnn-skip-scoring",
+        action="store_true",
+        help=(
+            "produce sample alignments + controls + manifest without "
+            "running ProteinMPNN. Useful for smoke tests or hosts "
+            "without an MPNN clone."
+        ),
+    )
+
     args = parser.parse_args(argv)
+
+    # Dispatch into the MPNN sweep before any of the standard-sampling
+    # validation runs, so the standard flags' defaults don't trigger
+    # spurious errors. Mixing modes is rejected up front because the
+    # two paths write to different locations and have non-overlapping
+    # parameter semantics.
+    if args.mpnn_sweep:
+        conflicts = [
+            name
+            for name, val in (
+                ("--N", args.N),
+                ("--temperature", args.temperature),
+                ("--output", args.output),
+                ("--label", args.label),
+            )
+            if val is not None
+        ]
+        if conflicts:
+            parser.error(
+                "--mpnn-sweep is mutually exclusive with "
+                f"{', '.join(conflicts)}. Use --mpnn-temperatures and "
+                "--mpnn-N-per-T to control the sweep, and --mpnn-pdb / "
+                "--mpnn-path / --mpnn-skip-scoring to configure scoring."
+            )
+        import mpnn_sweep  # noqa: E402  (sibling script; sys.path set above)
+
+        return mpnn_sweep.run(args)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 

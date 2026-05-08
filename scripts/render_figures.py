@@ -63,6 +63,7 @@ import numpy as np
 
 import SBM.provenance as provenance
 import SBM.utils.utils as ut
+import SBM.utils.utils_mpnn_plot as ump
 import SBM.utils.utils_plot as up
 
 # scripts/lab_plotting.py is a sibling, not a package module. Add this
@@ -105,6 +106,7 @@ ALL_FIGS: tuple[str, ...] = (
     "similarity",
     "diversity",
     "length",
+    "mpnn",
 )
 
 #: When ``--figs`` is omitted we try to render all of ``ALL_FIGS`` and
@@ -141,6 +143,10 @@ _NEEDS_ALIGN_MOD: frozenset[str] = frozenset(
 #: fall back to Train alone. ``length`` still reads ``output["Test"]``
 #: directly, so it's the only mode listed here.
 _NEEDS_TEST: frozenset[str] = frozenset({"length"})
+
+#: Figures whose data needs a ProteinMPNN sweep subdir under
+#: ``<run_dir>/synthetic/mpnn_sweep_*/`` containing ``mpnn_scores.json``.
+_NEEDS_MPNN_SWEEP: frozenset[str] = frozenset({"mpnn"})
 
 
 #: ``--sector`` choices wired through to ``_cm_sector_positions``.
@@ -245,11 +251,39 @@ def _autodiscover_synthetic(run_dir: Path) -> list[Path]:
     sorted by filename. The default sampling workflow writes one file
     per temperature, and the renderer fans them out into multi-panel
     figures (one panel per T).
+
+    Restricted to direct children of ``synthetic/`` (``glob`` not
+    ``rglob``) so artifacts from a ProteinMPNN sweep, which live in a
+    ``mpnn_sweep_*/`` subdir, don't leak into the energy / similarity
+    / diversity / pca / correlations figures (those are designed for
+    the standard 2-T compare, not the 10-T foldability ladder).
     """
     syn_dir = run_dir / "synthetic"
     if not syn_dir.is_dir():
         return []
     return sorted(syn_dir.glob("*.npy"))
+
+
+def _autodiscover_mpnn_sweep(run_dir: Path) -> Path | None:
+    """Return the path to a sweep's ``mpnn_scores.json``, if any.
+
+    Looks for ``<run_dir>/synthetic/mpnn_sweep_*/mpnn_scores.json``. If
+    multiple sweeps exist, picks the lexicographically last (newest by
+    convention since the dir name embeds the master seed) and warns.
+    """
+    syn_dir = run_dir / "synthetic"
+    if not syn_dir.is_dir():
+        return None
+    candidates = sorted(syn_dir.glob("mpnn_sweep_*/mpnn_scores.json"))
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        log.warning(
+            "found %d mpnn_sweep dirs; using %s (latest by sort order)",
+            len(candidates),
+            candidates[-1].parent.name,
+        )
+    return candidates[-1]
 
 
 def _read_sampling_temperature(align_path: Path) -> float | None:
@@ -433,19 +467,43 @@ def _render_one(
     *,
     run_id: str,
     sector_positions: list[int],
+    mpnn_scores_path: Path | None = None,
 ) -> list[Path]:
-    """Call ``plot_stats(plot=mode, artificial=...)`` and save the figure
-    it created. ``artificial`` is the per-alignment list of dicts (with
-    ``temperature``, ``align_mod``, ``stats``, ``color``); ignored by
-    Coupling_evol and Params. ``natural_colors`` carries Train/Test/
-    Random colors sourced from ``lab_plotting.color_for_natural``.
-    ``sector_positions`` is read only by the Params figure.
+    """Render one named figure and save the result(s) under ``figs_dir``.
 
-    Each mode is consolidated into one figure, so we expect a single new
-    fignum per call. ``write_sidecar=False`` keeps render_figures.py
-    from being copied once per PDF; one canonical copy lives in
-    ``figs/inputs/``.
+    Most figures are dispatched to ``plot_stats(plot=mode, artificial=...)``,
+    which draws into figures it creates internally; we diff
+    ``plt.get_fignums()`` to capture them. The ``mpnn`` figure breaks
+    that pattern — it reads ``mpnn_scores.json`` from the sweep subdir
+    and is recipe-shaped (returns a Figure directly), so it's branched
+    here rather than threaded through ``plot_stats``.
+
+    ``artificial`` is the per-alignment list of dicts (with
+    ``temperature``, ``align_mod``, ``stats``, ``color``); ignored by
+    Coupling_evol, Params, and the mpnn branch. ``natural_colors``
+    carries Train/Test/Random colors. ``sector_positions`` is read only
+    by the Params figure. ``mpnn_scores_path`` is read only by ``mpnn``.
+
+    ``write_sidecar=False`` on every save keeps the renderer from being
+    copied once per PDF; one canonical copy lives in ``figs/inputs/``.
     """
+    figs_dir.mkdir(parents=True, exist_ok=True)
+    if name == "mpnn":
+        if mpnn_scores_path is None:
+            log.warning("mpnn figure requested without scores path; skipping")
+            return []
+        fig = ump.plot_mpnn_foldability(mpnn_scores_path)
+        path = figs_dir / "mpnn.pdf"
+        lab_plotting.save_figure(
+            fig,
+            path,
+            script_path=Path(__file__),
+            write_sidecar=False,
+            extra_metadata={"Keywords": f"sbm_run_id={run_id}"},
+        )
+        plt.close(fig)
+        return [path]
+
     mode = _PLOT_MODES[name]
     before = set(plt.get_fignums())
     up.plot_stats(
@@ -467,7 +525,6 @@ def _render_one(
             mode,
             len(new_fignums),
         )
-    figs_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     multi = len(new_fignums) > 1
     for i, n in enumerate(new_fignums):
@@ -492,15 +549,18 @@ def _filter_renderable(
     requested: list[str],
     *,
     have_align: bool,
+    have_mpnn_sweep: bool,
     strict: bool,
 ) -> list[str]:
     """Drop figures whose required data isn't present in this run.
 
-    Two reasons a figure may not be renderable:
+    Three reasons a figure may not be renderable:
       * no synthetic alignment available (anything in ``_NEEDS_ALIGN_MOD``);
       * no held-out test set on the run, i.e. ``Test/Train=0`` at
         training time so ``model["Test"]`` is None (anything in
         ``_NEEDS_TEST``).
+      * no ProteinMPNN sweep dir under ``<run_dir>/synthetic/`` (anything
+        in ``_NEEDS_MPNN_SWEEP``).
 
     ``strict`` controls how a missing requirement is reported. When the
     user explicitly listed figures via ``--figs`` we treat *any* missing
@@ -529,6 +589,20 @@ def _filter_renderable(
                 )
             log.info(
                 "skipping %r: no synthetic alignment under <run_dir>/synthetic/",
+                name,
+            )
+            continue
+        if name in _NEEDS_MPNN_SWEEP and not have_mpnn_sweep:
+            if strict:
+                raise SystemExit(
+                    f"error: {name!r} requires a ProteinMPNN sweep but no "
+                    "mpnn_sweep_*/mpnn_scores.json was found under "
+                    "<run_dir>/synthetic/. Run "
+                    "`bash scripts/sample_sbm.sh <run_dir> --mpnn-sweep` first."
+                )
+            log.info(
+                "skipping %r: no mpnn_sweep_*/mpnn_scores.json under "
+                "<run_dir>/synthetic/",
                 name,
             )
             continue
@@ -633,12 +707,17 @@ def main(argv: list[str] | None = None) -> int:
                 ", ".join(p.name for p in align_paths),
             )
 
+    mpnn_scores_path = _autodiscover_mpnn_sweep(run_dir)
+    if mpnn_scores_path is not None:
+        log.info("auto-detected ProteinMPNN sweep: %s", mpnn_scores_path.parent.name)
+
     explicit_figs = args.figs is not None
     requested_initial = list(args.figs) if explicit_figs else list(ALL_FIGS)
     requested = _filter_renderable(
         model,
         requested_initial,
         have_align=bool(align_paths),
+        have_mpnn_sweep=mpnn_scores_path is not None,
         strict=explicit_figs,
     )
     if not requested:
@@ -730,6 +809,7 @@ def main(argv: list[str] | None = None) -> int:
                 figs_dir,
                 run_id=run_id,
                 sector_positions=sector_positions,
+                mpnn_scores_path=mpnn_scores_path,
             )
             if paths:
                 rendered_names.append(name)

@@ -30,7 +30,8 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | The packed-vector encoding | `src/SBM/utils/utils.py:Wj` / `Jw` |
 | The zero-sum gauge transform | `src/SBM/utils/utils.py:Zero_Sum_Gauge` |
 | Statistics / reweighting | `src/SBM/utils/utils.py:CalcWeights`, `CalcStatsWeighted`, `CalcThreeCorrWeighted` |
-| Plot recipes (used by `render_figures.py`) | `src/SBM/utils/utils_plot.py:plot_stats` (7 modes; `correlations` is rows=temperatures × cols=1st/2nd/3rd order, `pca` is 1×(1+N_temps)) |
+| Plot recipes (used by `render_figures.py`) | `src/SBM/utils/utils_plot.py:plot_stats` (7 modes; `correlations` is rows=temperatures × cols=1st/2nd/3rd order, `pca` is 1×(1+N_temps)). The `mpnn` figure is separate: `src/SBM/utils/utils_mpnn_plot.py:plot_mpnn_foldability` reads `mpnn_scores.json` directly. |
+| The ProteinMPNN foldability sweep | `scripts/mpnn_sweep.py` (orchestrator; called by `sample_sbm.py --mpnn-sweep`) and `src/SBM/utils/mpnn_score.py` (subprocess driver for upstream `protein_mpnn_run.py --score_only`). See `docs/MPNN_FOLDABILITY.md`. |
 | Run-level provenance helpers | `src/SBM/provenance.py` |
 | The pruning CLI | `pruning/build_mask.py` |
 | The figure-save helpers | `scripts/lab_plotting.py` (`save_figure`, `panel_label`, `LAB_COLORS`) |
@@ -139,6 +140,10 @@ The figure-side equivalent is `lab_plotting.save_figure()` (in `scripts/lab_plot
 - Per-replicate seeds are spawned with `np.random.SeedSequence(S).spawn(N_av)`.
 - The C++ ABI is `MC(w, states, tburn, Q, seed)` — the seed is mandatory.
 - Reproducibility under fixed `--seed` requires fixing `OMP_NUM_THREADS` and `N_chains` too. The manifest records both.
+
+### ProteinMPNN foldability sweep
+
+`bash scripts/sample_sbm.sh <run_dir> --mpnn-sweep` is an alternate sampling mode that produces a temperature ladder (default 0.1..1.0 step 0.1, 100 seqs/T) plus interpretability controls (WT, uniform random, shuffled WT, natural-MSA bootstrap) and scores them against `data/structures/1ECM.pdb` via the upstream `dauparas/ProteinMPNN` repo. Outputs land in `<run_dir>/synthetic/mpnn_sweep_seed<seed>/` (a subdir, so existing figure auto-discovery is unaffected). The figure name is `mpnn`; `render_figures.py` auto-detects the sweep dir. ProteinMPNN is not pip-installable: the user clones it next to this repo and sets `PROTEINMPNN_PATH` (or passes `--mpnn-path`); scoring is delegated via subprocess so this codebase doesn't import torch. See `docs/MPNN_FOLDABILITY.md` for setup, score interpretation, and benchmark table.
 
 ## Gotchas
 

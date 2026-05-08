@@ -1,6 +1,9 @@
 # ── Claude Code local settings ───────────────────────────────────────────
 .claude/
 
+# ── Machine-specific shell config sourced by scripts/sample_sbm.sh ───────
+scripts/sample_sbm.local.sh
+
 # ── Python bytecode / caches ─────────────────────────────────────────────
 __pycache__/
 *.py[cod]
