@@ -46,7 +46,8 @@ python build_mask.py \
     --ext ".npy" \
     --label "CM" \
     --path "$(pwd)/prune_output" \
-    --percent 98 \
+    --percent-J 98 \
+    --percent-h 98 \
     | tee "${MASK_LOG}"
 
 MASK_RUN_DIR="$(grep '^Run dir: ' "${MASK_LOG}" | tail -n 1 | sed 's/^Run dir: //')"

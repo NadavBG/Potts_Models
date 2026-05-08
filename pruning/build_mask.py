@@ -191,7 +191,8 @@ def main(
     output_type=".npy",
     output_label="CM",
     outfile_path=".",  # parent dir; a per-run subdir is created under it
-    pct=[95],
+    pct_J=[95],
+    pct_h=[95],
     Dia_prior="gap-corrected",
 ):
     started_at = _dt.datetime.now(_dt.timezone.utc)
@@ -226,9 +227,14 @@ def main(
         }
 
     # process inputs
-    if not isinstance(pct, list):
-        pct = [pct]
-    if 100 in pct:
+    if not isinstance(pct_J, list):
+        pct_J = [pct_J]
+    if not isinstance(pct_h, list):
+        pct_h = [pct_h]
+    # 100% short-circuit: write a single all-zero J mask without computing
+    # weights. Only meaningful for couplings — for fields, partition_fields_params
+    # naturally produces an all-zero mask at pct=100, so no special case needed.
+    if 100 in pct_J:
         prune_mat = np.zeros((alg.shape[1], alg.shape[1], 21, 21), dtype="int")
         outfile = "%s/%.2fp_%s_%s_SeqW_%.1f%s" % (
             outfile_path,
@@ -240,9 +246,9 @@ def main(
         )
         write_file(outfile, prune_mat)
         write_mask_manifest(outfile, pct=100.0, **_meta("Fij"))
-        pct.remove(100)
+        pct_J.remove(100)
 
-    if len(pct) == 0:
+    if len(pct_J) == 0 and len(pct_h) == 0:
         return
 
         # get sequence weights; necessary for all pruning types
@@ -269,7 +275,7 @@ def main(
         )
         partition_params(
             prune_vals,
-            pct,
+            pct_J,
             "%s_%s" % ("Cij", outfile_base),
             outfile_path,
             manifest_meta=_meta("Cij"),
@@ -281,7 +287,7 @@ def main(
         )
         partition_params(
             prune_vals,
-            pct,
+            pct_J,
             "%s_%s" % ("Fij", outfile_base),
             outfile_path,
             manifest_meta=_meta("Fij"),
@@ -292,7 +298,7 @@ def main(
         )
         partition_params(
             prune_vals,
-            pct,
+            pct_J,
             "%s_%s" % ("SCA", outfile_base),
             outfile_path,
             manifest_meta=_meta("SCA"),
@@ -303,7 +309,7 @@ def main(
         prune_vals = f1.reshape(alg.shape[1], 21)
         partition_fields_params(
             prune_vals,
-            pct,
+            pct_h,
             "%s_%s" % ("Fia", outfile_base_fields),
             outfile_path,
             manifest_meta=_meta("Fia"),
@@ -322,7 +328,7 @@ def main(
         prune_vals = Dia.reshape(alg.shape[1], 21)
         partition_fields_params(
             prune_vals,
-            pct,
+            pct_h,
             "%s_%s" % ("Dia", outfile_base_fields),
             outfile_path,
             manifest_meta=_meta("Dia"),
@@ -400,12 +406,28 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "-c",
-        "--percent",
+        "--percent-J",
+        dest="percent_J",
         nargs="+",
         type=float,
-        default=95.0,
-        help="set of percents of parameters to remove",
+        default=[95.0],
+        help=(
+            "set of percents of couplings (J) to remove. Used by the "
+            "'fij', 'cij', and 'sca' strategies. Multiple values produce "
+            "one mask per percent."
+        ),
+    )
+    parser.add_argument(
+        "--percent-h",
+        dest="percent_h",
+        nargs="+",
+        type=float,
+        default=[95.0],
+        help=(
+            "set of percents of fields (h) to remove. Used by the "
+            "'fia' and 'dia' strategies. Multiple values produce one "
+            "mask per percent."
+        ),
     )
 
     args = parser.parse_args()
@@ -417,6 +439,7 @@ if __name__ == "__main__":
         output_type=args.ext,
         output_label=args.label,
         outfile_path=args.path,
-        pct=args.percent,
+        pct_J=args.percent_J,
+        pct_h=args.percent_h,
         Dia_prior=args.Dia_prior,
     )

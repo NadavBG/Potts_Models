@@ -42,7 +42,8 @@ This is passed in with the `--alg` flag. File format is inferred.
 |`--ext`| File format to save output matrices in. Options are `.npy` or `.mat`. Applies to J masks only; h masks are always saved as `.npy`. | `.npy`
 |`--label`| Any unique identifier or information to include in the name of the output file, for example the protein family name. | `CM`
 |`--path`| Parent directory under which a per-run subdir (`<YYYY-MM-DD>_<label>_<idx>/`) is created. All masks + manifest sidecars from one invocation land in that subdir. | `pruning/masks/` (resolved relative to `build_mask.py`)
-|`--percent`| What proportion of parameters to exclude (as a percent). Multiple values can be included in a single run. | `95`
+|`--percent-J`| Proportion of **couplings** to exclude (as a percent). Used by the `fij`, `cij`, and `sca` strategies. Multiple values produce one J mask per percent. | `95`
+|`--percent-h`| Proportion of **fields** to exclude (as a percent). Used by the `fia` and `dia` strategies. Multiple values produce one h mask per percent. | `95`
 
 ### Usage
 
@@ -51,9 +52,10 @@ The mask generation script can be run from the command line (with all optional p
 ```
 > python build_mask.py --alg $FULL_CM_ALG \
         --theta 0.7 --lbda 0.03 \
-        --strategies "fij" "cij" "sca" \
+        --strategies "fij" "cij" "sca" "fia" "dia" \
         --ext ".npy" --label "CM" \
-        --path "./prune_output" --percent 95 98
+        --path "./prune_output" \
+        --percent-J 95 98 --percent-h 95 98
 ```
 
 The script prints `Run dir: <abs path>` to stdout; downstream scripts scrape that line to locate the generated masks (see `CM_example.sh` for the pattern).
