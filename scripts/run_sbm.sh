@@ -17,8 +17,10 @@ IFS=$'\n\t'
 #
 # Two important inputs:
 #   <MSA_NPY>      a numerical alignment (NumPy .npy, shape N×L, int)
-#   --prune PATH   optional pruning mask
+#   --prune-J PATH optional couplings (J) pruning mask
+#   --prune-h PATH optional fields (h) pruning mask
 #
+# Either, both, or neither pruning mask may be supplied.
 # Everything else has a default. See `bash run_sbm.sh --help`.
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -34,8 +36,10 @@ Required positional:
     <MSA_NPY>             path to the numerical MSA (.npy)
 
 Optional:
-    --prune PATH          path to a pruning mask .npy (the second
-                          important input; off by default)
+    --prune-J PATH        path to a J coupling pruning mask .npy
+                          (shape (L, L, q, q); off by default)
+    --prune-h PATH        path to an h fields pruning mask .npy
+                          (shape (L, q); off by default)
     --label NAME          label embedded in the run dir name
                           (default: family name derived from MSA filename)
     --seed N              master RNG seed (default: 42)
@@ -79,7 +83,7 @@ Examples:
     bash scripts/run_sbm.sh SBM data/MSA_array/MSA_CM.npy --label CM-sbm
     bash scripts/run_sbm.sh BM  data/MSA_array/MSA_CM.npy --label CM-bm
     bash scripts/run_sbm.sh BM  data/MSA_array/MSA_CM.npy \
-        --prune ./mask.npy --label CM-bm-pruned
+        --prune-J ./J_mask.npy --prune-h ./h_mask.npy --label CM-bm-pruned
 EOF
 }
 
@@ -108,7 +112,8 @@ M=""
 LAMBD_J=""
 LAMBD_H=""
 
-PRUNE=""
+PRUNE_J=""
+PRUNE_H=""
 LABEL=""
 RESULTS_PATH=""
 FAM=""
@@ -171,7 +176,8 @@ esac
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --prune)         PRUNE="$2"; shift 2 ;;
+        --prune-J)       PRUNE_J="$2"; shift 2 ;;
+        --prune-h)       PRUNE_H="$2"; shift 2 ;;
         --label)         LABEL="$2"; shift 2 ;;
         --seed)          SEED="$2"; shift 2 ;;
         --results-path)  RESULTS_PATH="$2"; shift 2 ;;
@@ -201,8 +207,12 @@ if [[ ! -f "${MSA}" ]]; then
     echo "error: MSA not found at '${MSA}'" >&2
     exit 1
 fi
-if [[ -n "${PRUNE}" && ! -f "${PRUNE}" ]]; then
-    echo "error: --prune mask not found at '${PRUNE}'" >&2
+if [[ -n "${PRUNE_J}" && ! -f "${PRUNE_J}" ]]; then
+    echo "error: --prune-J mask not found at '${PRUNE_J}'" >&2
+    exit 1
+fi
+if [[ -n "${PRUNE_H}" && ! -f "${PRUNE_H}" ]]; then
+    echo "error: --prune-h mask not found at '${PRUNE_H}'" >&2
     exit 1
 fi
 
@@ -238,8 +248,11 @@ TRAIN_ARGS=(
     --label "${LABEL}"
 )
 
-if [[ -n "${PRUNE}" ]]; then
-    TRAIN_ARGS+=(--prune "${PRUNE}")
+if [[ -n "${PRUNE_J}" ]]; then
+    TRAIN_ARGS+=(--prune-J "${PRUNE_J}")
+fi
+if [[ -n "${PRUNE_H}" ]]; then
+    TRAIN_ARGS+=(--prune-h "${PRUNE_H}")
 fi
 if [[ -n "${RESULTS_PATH}" ]]; then
     TRAIN_ARGS+=(--results_path "${RESULTS_PATH}")
@@ -252,7 +265,8 @@ fi
 
 echo "── Training (${MODE} mode) ──────────────────────────────────────────"
 echo "MSA:    ${MSA}"
-[[ -n "${PRUNE}" ]] && echo "Prune:  ${PRUNE}"
+[[ -n "${PRUNE_J}" ]] && echo "Prune J: ${PRUNE_J}"
+[[ -n "${PRUNE_H}" ]] && echo "Prune h: ${PRUNE_H}"
 echo "Label:  ${LABEL}"
 echo "Seed:   ${SEED}"
 echo "OMP_NUM_THREADS: ${OMP_NUM_THREADS:-<unset; OpenMP picks default>}"

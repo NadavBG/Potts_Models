@@ -42,7 +42,7 @@ notebook = [
 ]
 # Pruning via the SCA strategy depends on pySCA, which isn't on PyPI.
 sca = [
-    "pysca @ git+https://github.com/ranganathanlab/pySCA",
+    "pysca @ git+https://github.com/ranganathanlab/pySCA@v7.0",
 ]
 dev = [
     "pre-commit>=3.6",

@@ -81,7 +81,8 @@ def run_SBM(
     lambdh,
     theta,
     ignore_gaps,
-    prune_file,
+    prune_J_file,
+    prune_h_file,
     results_path,
     seed,
     label,
@@ -96,7 +97,8 @@ def run_SBM(
 
     msa_entry = _hash_input_array(Input_MSA)
     train_entry = _hash_input_array(train_file)
-    prune_entry = _hash_input_array(prune_file)
+    prune_J_entry = _hash_input_array(prune_J_file)
+    prune_h_entry = _hash_input_array(prune_h_file)
 
     for rep in range(Nb_rep):
         for N_chains in N_chains_list:
@@ -136,8 +138,10 @@ def run_SBM(
                         ("Record_every", record_every),
                         ("lambda_h", lambdh),
                         ("lambda_J", lambdJ),
-                        ("Pruning", prune_file is not None),
-                        ("Pruning Mask Couplings", prune_file),
+                        ("Pruning", prune_J_file is not None),
+                        ("Pruning Mask Couplings", prune_J_file),
+                        ("Pruning Fields", prune_h_file is not None),
+                        ("Pruning Mask Fields", prune_h_file),
                         ("Param_init", ParamInit),
                         ("Test/Train", TestTrain == 1),
                         ("Train sequences", ind_train),
@@ -233,16 +237,18 @@ def run_SBM(
             # dropped from options0/options1) plus per-replicate seeds and
             # exec times, plus input file hashes and library versions.
             full_options = dict(output["options"])
-            # Restore the user-supplied mask path (Init_Pruning materializes
-            # the mask in-place, then stashes the source under a new key).
-            mask_source = full_options.pop("Pruning Mask Couplings Source", None)
+            # Restore the user-supplied mask paths (Init_Pruning materializes
+            # each mask in-place, then stashes the source under a new key).
+            mask_J_source = full_options.pop("Pruning Mask Couplings Source", None)
+            mask_h_source = full_options.pop("Pruning Mask Fields Source", None)
             manifest = provenance.build_run_manifest(
                 run_id=run_id,
                 command_line=sys.argv,
                 inputs={
                     "msa": Input_MSA,
                     "train_indices": train_file,
-                    "pruning_mask": mask_source,
+                    "pruning_mask_couplings": mask_J_source,
+                    "pruning_mask_fields": mask_h_source,
                 },
                 options=full_options,
                 seed=seed,
@@ -263,7 +269,8 @@ def run_SBM(
                     "inputs_detail": {
                         "msa": msa_entry,
                         "train_indices": train_entry,
-                        "pruning_mask": prune_entry,
+                        "pruning_mask_couplings": prune_J_entry,
+                        "pruning_mask_fields": prune_h_entry,
                     },
                 },
             )
@@ -371,7 +378,18 @@ if __name__ == "__main__":
         action="store_true",
     )
     parser.add_argument(
-        "--prune", type=str, default=None, help="prune parameters based on input mask"
+        "--prune-J",
+        dest="prune_J",
+        type=str,
+        default=None,
+        help="path to a J coupling pruning mask (.npy, shape (L, L, q, q))",
+    )
+    parser.add_argument(
+        "--prune-h",
+        dest="prune_h",
+        type=str,
+        default=None,
+        help="path to an h fields pruning mask (.npy, shape (L, q))",
     )
     parser.add_argument(
         "--results_path",
@@ -411,7 +429,8 @@ if __name__ == "__main__":
         args.lambdh,
         args.theta,
         args.ignore_gaps,
-        args.prune,
+        args.prune_J,
+        args.prune_h,
         args.results_path,
         args.seed,
         args.label,

@@ -294,7 +294,8 @@ def build_run_manifest(
     """Assemble a manifest dict ready to be JSON-dumped.
 
     ``inputs`` maps a label (e.g. ``"msa"``, ``"train_indices"``,
-    ``"pruning_mask"``) to a file path or None. Each is hashed.
+    ``"pruning_mask_couplings"``, ``"pruning_mask_fields"``) to a file
+    path or None. Each is hashed.
 
     ``output_path``, if given and existing, is also hashed so a run's
     manifest commits to the bytes it produced.

@@ -10,6 +10,8 @@ import scipy.io as sio
 from SBM import provenance
 from SBM.utils.utils import CalcWeights
 
+DEFAULT_OUTFILE_PARENT = Path(__file__).resolve().parent / "masks"
+
 BACKGROUND_FREQS_GAPLESS = np.array(
     [
         0.073,
@@ -99,13 +101,16 @@ def write_file(outfile, prune_mat, verbose=False):
     return
 
 
-def write_mask_manifest(outfile, *, alg_file, strategy, pct, theta, lbda, started_at):
+def write_mask_manifest(
+    outfile, *, alg_file, strategy, pct, theta, lbda, Dia_prior, started_at
+):
     """Write `<outfile>.manifest.json` with mask provenance.
 
     Captures the input MSA (path + sha256 + shape), the strategy / theta /
-    lbda / percent that drove this mask, git state, package versions, and
-    timestamps. The output mask file itself is hashed too, so a manifest
-    commits to the bytes it sits next to.
+    lbda / percent that drove this mask, the Dia prior (only meaningful
+    for ``strategy="Dia"`` but recorded uniformly), git state, package
+    versions, and timestamps. The output mask file itself is hashed too,
+    so a manifest commits to the bytes it sits next to.
     """
     finished_at = _dt.datetime.now(_dt.timezone.utc)
     manifest = provenance.build_run_manifest(
@@ -117,6 +122,7 @@ def write_mask_manifest(outfile, *, alg_file, strategy, pct, theta, lbda, starte
             "percent": pct,
             "theta": theta,
             "lbda": lbda,
+            "Dia_prior": Dia_prior,
         },
         seed=None,  # mask generation is deterministic from inputs
         started_at=started_at,
@@ -155,6 +161,28 @@ def partition_params(
             write_mask_manifest(outfile, pct=pct, **manifest_meta)
 
 
+def partition_fields_params(
+    prune_vals, pcts, partial_outfile, outfile_path, *, manifest_meta=None
+):
+    """Generate one binary (L, q) field mask per requested percent and write it.
+
+    Mirrors :func:`partition_params` but for fields: there is no symmetry
+    constraint and no diagonal to ignore, so all (i, a) entries are
+    ranked together. Output is always ``.npy`` (no ``.mat`` route is
+    needed for fields).
+    """
+    idx = np.argsort(np.abs(prune_vals).flatten())[::-1]  # descending order
+    for pct in pcts:
+        tokeep_idx = int(prune_vals.size * (1 - pct / 100))
+        bin_mask = np.zeros(prune_vals.size, dtype="int")
+        bin_mask[idx[:tokeep_idx]] = 1
+        bin_mask = bin_mask.reshape(prune_vals.shape)
+        outfile = "%s/%.2f_%s" % (outfile_path, pct, partial_outfile)
+        np.save(outfile, bin_mask)
+        if manifest_meta is not None:
+            write_mask_manifest(outfile, pct=pct, **manifest_meta)
+
+
 def main(
     alg_file,
     theta=0.7,
@@ -162,10 +190,19 @@ def main(
     strategies=["fij", "cij", "sca"],
     output_type=".npy",
     output_label="CM",
-    outfile_path=".",  # folder to save files to
+    outfile_path=".",  # parent dir; a per-run subdir is created under it
     pct=[95],
+    Dia_prior="gap-corrected",
 ):
     started_at = _dt.datetime.now(_dt.timezone.utc)
+    parent_dir = Path(outfile_path)
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = parent_dir / provenance.make_run_id(
+        when=started_at, label=output_label, parent_dir=parent_dir
+    )
+    run_dir.mkdir(parents=True, exist_ok=False)
+    print(f"Run dir: {run_dir.resolve()}")
+    outfile_path = str(run_dir)
     # read in the file
     alg = None
     if alg_file[-4:] == ".npy":
@@ -184,6 +221,7 @@ def main(
             "strategy": strategy,
             "theta": theta,
             "lbda": lbda,
+            "Dia_prior": Dia_prior,
             "started_at": started_at,
         }
 
@@ -218,6 +256,9 @@ def main(
 
     strategies = set(strategies)
     outfile_base = "%s_SeqW_%.1f%s" % (output_label, theta, output_type)
+    # Field masks are always saved as .npy; the .mat route is J-only and
+    # exists for legacy MATLAB consumers that don't read field masks.
+    outfile_base_fields = "%s_SeqW_%.1f.npy" % (output_label, theta)
     if "cij" in strategies:
         f1, f2, _ = sca.freq(
             alg + 1, seqw=seqw, lbda=lbda, freq0=freqs0, Naa=freqs0.size
@@ -256,6 +297,36 @@ def main(
             outfile_path,
             manifest_meta=_meta("SCA"),
         )
+    if "fia" in strategies:
+        # First-order frequency-based fields mask (parallel to "fij" for J).
+        f1, _, _ = sca.freq(alg + 1, seqw=seqw, Naa=21, lbda=0)
+        prune_vals = f1.reshape(alg.shape[1], 21)
+        partition_fields_params(
+            prune_vals,
+            pct,
+            "%s_%s" % ("Fia", outfile_base_fields),
+            outfile_path,
+            manifest_meta=_meta("Fia"),
+        )
+    if "dia" in strategies:
+        # Per-site KL-divergence fields mask (parallel to "sca" for J).
+        # By default uses the gap-corrected background `freqs0` so the
+        # divergence reflects deviation from the natural amino-acid
+        # distribution at the alignment's gap rate; --Dia-prior=uniform
+        # selects np.ones(21)/21 instead.
+        if Dia_prior == "uniform":
+            Dia_freq0 = np.ones(21) / 21
+        else:
+            Dia_freq0 = freqs0
+        _, Dia, _ = sca.posWeights(alg + 1, seqw, lbda, 21, Dia_freq0)
+        prune_vals = Dia.reshape(alg.shape[1], 21)
+        partition_fields_params(
+            prune_vals,
+            pct,
+            "%s_%s" % ("Dia", outfile_base_fields),
+            outfile_path,
+            manifest_meta=_meta("Dia"),
+        )
     return
 
 
@@ -285,7 +356,24 @@ if __name__ == "__main__":
         "--strategies",
         nargs="+",
         type=str,
-        help="types of pruning files to generate. any combination of 'fij', 'cij', or 'sca'",
+        default=["sca"],
+        help=(
+            "types of pruning files to generate. Couplings (J): any of "
+            "'fij', 'cij', 'sca'. Fields (h): any of 'fia', 'dia'. "
+            "Strategies are independent — mix and match freely."
+        ),
+    )
+    parser.add_argument(
+        "--Dia-prior",
+        type=str,
+        default="gap-corrected",
+        choices=["gap-corrected", "uniform"],
+        help=(
+            "Background distribution for the Dia (KL-divergence) fields "
+            "strategy. 'gap-corrected' (default) uses the alignment's "
+            "estimated gap rate plus standard 20-AA frequencies; "
+            "'uniform' uses np.ones(21)/21."
+        ),
     )
     parser.add_argument(
         "-x",
@@ -302,7 +390,14 @@ if __name__ == "__main__":
         help="Label for output file (e.g. protein name)",
     )
     parser.add_argument(
-        "-p", "--path", type=str, default=".", help="path to output directory"
+        "-p",
+        "--path",
+        type=str,
+        default=str(DEFAULT_OUTFILE_PARENT),
+        help=(
+            "parent directory under which a per-run subdir is created. "
+            "Default: pruning/masks/ (resolved relative to this script)."
+        ),
     )
     parser.add_argument(
         "-c",
@@ -323,4 +418,5 @@ if __name__ == "__main__":
         output_label=args.label,
         outfile_path=args.path,
         pct=args.percent,
+        Dia_prior=args.Dia_prior,
     )

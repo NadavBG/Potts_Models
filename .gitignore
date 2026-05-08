@@ -27,9 +27,10 @@ src/SBM/**/*.so
 src/SBM/**/*.dylib
 src/SBM/**/*.pyd
 
-# Run output ──────────────────────────────────────────────────────────────
+# Run outputs ─────────────────────────────────────────────────────────────
 
 results/
+pruning/masks/
 
 # ── Test / lint / type-check caches ──────────────────────────────────────
 .pytest_cache/

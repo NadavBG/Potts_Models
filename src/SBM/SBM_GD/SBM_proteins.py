@@ -43,6 +43,8 @@ def ParseOptions(options):
         ("Pruning", False),
         ("Pruning_perc", 0.9),
         ("Pruning Mask Couplings", None),
+        ("Pruning Fields", False),
+        ("Pruning Mask Fields", None),
         ("Infinite Mask Fields", None),  # To forbid certain a.a at certain positions
         ("Param_init", "profile"),  # Zero, Profile, Custom
         (
@@ -179,12 +181,47 @@ def Init_Pruning(options, fij):
             Mask = np.ones(fij.size, dtype=int)
             Mask[flat_indices] = 0
             Mask = Mask.reshape(fij.shape)
-        else:
+        elif isinstance(options["Pruning Mask Couplings"], str):
             Mask = np.load(options["Pruning Mask Couplings"])
+        else:
+            Mask = options["Pruning Mask Couplings"]
 
+        expected_J_shape = (options["L"], options["L"], options["q"], options["q"])
+        if Mask.shape != expected_J_shape:
+            raise ValueError(
+                f"Pruning Mask Couplings has shape {Mask.shape}; "
+                f"expected (L, L, q, q) = {expected_J_shape}. "
+                "Did you swap --prune-J and --prune-h?"
+            )
         options["Pruning Mask Couplings"] = Mask.astype("int")
         options["Pruning_perc"] = 1 - np.sum(Mask) / Mask.size
         print("Pruning pct: ", 1 - np.sum(Mask) / Mask.size)
+
+    if options["Pruning Fields"]:
+        # Mirror of the J-side block: stash the source path before the
+        # in-place materialization, then load (or accept) the (L, q) mask.
+        # Unlike J, there is no auto-generation path for fields; the mask
+        # must be supplied explicitly.
+        if options["Pruning Mask Fields"] is None:
+            raise ValueError(
+                "options['Pruning Fields'] is True but "
+                "options['Pruning Mask Fields'] is None. Fields pruning has "
+                "no auto-generation fallback; supply a path or (L, q) array."
+            )
+        options.setdefault("Pruning Mask Fields Source", options["Pruning Mask Fields"])
+        if isinstance(options["Pruning Mask Fields"], str):
+            Mask_h = np.load(options["Pruning Mask Fields"])
+        else:
+            Mask_h = options["Pruning Mask Fields"]
+        if Mask_h.shape != (options["L"], options["q"]):
+            raise ValueError(
+                f"Pruning Mask Fields has shape {Mask_h.shape}; "
+                f"expected (L, q) = ({options['L']}, {options['q']}). "
+                "Did you swap --prune-J and --prune-h?"
+            )
+        options["Pruning Mask Fields"] = Mask_h.astype("int")
+        options["Pruning_perc_fields"] = 1 - np.sum(Mask_h) / Mask_h.size
+        print("Pruning pct (fields): ", options["Pruning_perc_fields"])
 
 
 def Init_Param(options, J0, h0, N_eff, fi):
@@ -215,6 +252,8 @@ def Init_Param(options, J0, h0, N_eff, fi):
     ################################
     if options["Pruning"]:
         Jinit *= options["Pruning Mask Couplings"]
+    if options["Pruning Fields"]:
+        hinit *= options["Pruning Mask Fields"]
     if options["Infinite Mask Fields"] is not None:
         hinit[~options["Infinite Mask Fields"]] = -1e4
     if options["Zero Fields"]:
@@ -337,6 +376,8 @@ def GradLogLike(w, lambdaJ, lambdah, fi, fij, options, align_subsamp=None):
 
     if options["Pruning"]:
         gradJ *= options["Pruning Mask Couplings"]
+    if options["Pruning Fields"]:
+        gradh *= options["Pruning Mask Fields"]
     if options["Infinite Mask Fields"] is not None:
         gradh *= options["Infinite Mask Fields"]
     if options["Zero Fields"]:

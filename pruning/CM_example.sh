@@ -2,11 +2,16 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# Worked example: build a pruning mask for the CM family, then train a
-# BM positive control that respects it, then sample a synthetic
-# alignment from the trained model and render figures.
+# Worked example: build couplings (J) and fields (h) pruning masks for
+# the CM family, then train a BM positive control that respects both,
+# then sample a synthetic alignment from the trained model and render
+# figures.
 #
 # Output lands at:
+#   prune_output/<YYYY-MM-DD>_CM_<idx>/
+#       <pct>_{Fij,Cij,SCA}_CM_SeqW_<theta>.npy        (J masks)
+#       <pct>_{Fia,Dia}_CM_SeqW_<theta>.npy            (h masks)
+#           + .manifest.json sidecars                  (from build_mask.py)
 #   example_output/CM/<YYYY-MM-DD>_CM-bm-pruned_<idx>/
 #       model.npy, manifest.json, command.sh           (from run_sbm.sh)
 #       synthetic/align_T{0.75,1}_seed42.{npy,json}    (from sample_sbm.sh)
@@ -24,28 +29,42 @@ FULL_CM_ALG="${REPO_ROOT}/data/MSA_array/MSA_CM.npy"
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-# 1. Build a pruning mask from the full alignment (98% of couplings zeroed).
+# 1. Build pruning masks from the full alignment (98% of params zeroed
+#    per kind). Couplings: SCA (the conserved-correlation strategy);
+#    fields: Dia (the per-site KL-divergence strategy). build_mask.py
+#    creates "<path>/<run-id>/" and prints "Run dir: <abs path>" to
+#    stdout; we scrape that to find the mask files.
+MASK_LOG="$(mktemp -t cm_example_mask.XXXXXX)"
+TRAIN_LOG="$(mktemp -t cm_example_train.XXXXXX)"
+trap 'rm -f "${MASK_LOG}" "${TRAIN_LOG}"' EXIT
+
 python build_mask.py \
     --alg "${FULL_CM_ALG}" \
     --theta 0.7 \
     --lbda 0.03 \
-    --strategies "fij" "cij" "sca" \
+    --strategies "fij" "cij" "sca" "fia" "dia" \
     --ext ".npy" \
     --label "CM" \
-    --path "./prune_output" \
-    --percent 98
+    --path "$(pwd)/prune_output" \
+    --percent 98 \
+    | tee "${MASK_LOG}"
 
-# 2. Train a BM model that uses the SCA-derived mask. The BM defaults
-#    in run_sbm.sh (m=20, lambda=0.01, N_chains=100) are appropriate
-#    when most couplings are constrained to zero. We tee stdout so we
-#    can pull the run-dir path out of the "Run dir:" lines it prints
-#    (mirrors the same pattern run_sbm.sh uses internally).
-TRAIN_LOG="$(mktemp -t cm_example_train.XXXXXX)"
-trap 'rm -f "${TRAIN_LOG}"' EXIT
+MASK_RUN_DIR="$(grep '^Run dir: ' "${MASK_LOG}" | tail -n 1 | sed 's/^Run dir: //')"
+if [[ -z "${MASK_RUN_DIR}" || ! -d "${MASK_RUN_DIR}" ]]; then
+    echo "error: could not locate mask run dir from build_mask.py output" >&2
+    exit 1
+fi
 
+# 2. Train a BM model that uses the SCA-derived J mask and the
+#    Dia-derived h mask. The BM defaults in run_sbm.sh (m=20,
+#    lambda=0.01, N_chains=100) are appropriate when most parameters
+#    are constrained to zero. We tee stdout so we can pull the run-dir
+#    path out of the "Run dir:" lines it prints (mirrors the same
+#    pattern run_sbm.sh uses internally).
 bash "${REPO_ROOT}/scripts/run_sbm.sh" \
     BM "${FULL_CM_ALG}" \
-    --prune "$(pwd)/prune_output/98.00_SCA_CM_SeqW_0.7.npy" \
+    --prune-J "${MASK_RUN_DIR}/98.00_SCA_CM_SeqW_0.7.npy" \
+    --prune-h "${MASK_RUN_DIR}/98.00_Dia_CM_SeqW_0.7.npy" \
     --label CM-bm-pruned \
     --results-path "$(pwd)/example_output" \
     | tee "${TRAIN_LOG}"

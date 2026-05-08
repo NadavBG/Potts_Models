@@ -35,7 +35,7 @@ bash scripts/render_sbm.sh "$RUN"
 
 Run training again and `_idx` increments to `_1`. The CM-with-pruning worked example is `bash pruning/CM_example.sh`.
 
-The two inputs you'll usually care about for training are the **MSA path** and `--prune <mask.npy>`. Everything else has a default; see `bash scripts/run_sbm.sh --help`.
+The two inputs you'll usually care about for training are the **MSA path** and the optional pruning masks (`--prune-J <J_mask.npy>`, `--prune-h <h_mask.npy>`). Everything else has a default; see `bash scripts/run_sbm.sh --help`.
 
 > **Heads-up: avoid conda-forge / miniforge Python.** Its `python@3.12` build has a libpython ABI quirk that segfaults during numpy's `import_array()` when our C++ extension is loaded. Use `uv python install` (above) or Homebrew's `python@3.12`.
 
@@ -75,7 +75,7 @@ The recommended entry point is `scripts/run_sbm.sh`. It trains the model and wri
 bash scripts/run_sbm.sh <MODE> <MSA_NPY> [options] [-- <train_sbm.py overrides>]
 ```
 
-`<MODE>` is **`BM`** (vanilla gradient descent) or **`SBM`** (L-BFGS-style). The two important inputs are `<MSA_NPY>` and `--prune <mask>`; everything else has a default.
+`<MODE>` is **`BM`** or **`SBM`** (Both L-BFGS, different values for m, N_chains, L2 regularizers). The two important inputs are `<MSA_NPY>` and the optional pruning masks (`--prune-J`, `--prune-h`); everything else has a default.
 
 The options most users will touch:
 
@@ -83,7 +83,8 @@ The options most users will touch:
 |---|---|---|
 | `--label NAME` | Label embedded in the run dir name (`<date>_<label>_<idx>`) | family name |
 | `--seed N` | Master RNG seed | `42` |
-| `--prune PATH` | Restrict couplings to a binary mask (see [Pruning](#pruning-workflow)) | none |
+| `--prune-J PATH` | Restrict couplings to a binary `(L, L, q, q)` mask (see [Pruning](#pruning-workflow)) | none |
+| `--prune-h PATH` | Restrict fields to a binary `(L, q)` mask (see [Pruning](#pruning-workflow)) | none |
 | `--results-path DIR` | Output root | `<repo>/results` |
 | `--N_iter N` | Gradient-descent iterations | 400 |
 | `--N_chains N` | MCMC chains used to estimate model statistics each step | BM=100, SBM=50 |
@@ -178,21 +179,22 @@ For ad-hoc Python use, `SBM.utils.utils.Create_modAlign(model_dict, N, delta_t=.
 
 ## Pruning workflow
 
-For larger families, restricting couplings to a small fraction of position-pairs (chosen by a data-derived statistic) regularizes the model and speeds up training. See `pruning/README.md` for details. End-to-end:
+For larger families, restricting parameters to a small fraction (chosen by a data-derived statistic) regularizes the model and speeds up training. Couplings $J$ and fields $h$ have independent strategies and can be pruned together or separately. See `pruning/README.md` for details. End-to-end:
 
 ```sh
 python pruning/build_mask.py --alg data/MSA_array/MSA_CM.npy \
-    --strategies "sca" \
+    --strategies "sca" "dia" \
     --percent 98 \
     --label CM --path ./prune_output
 
 python scripts/train_sbm.py SCAPruned_CM data/MSA_array/MSA_CM.npy \
-    --prune ./prune_output/98.00_SCA_CM_SeqW_0.7.npy \
+    --prune-J ./prune_output/<run_id>/98.00_SCA_CM_SeqW_0.7.npy \
+    --prune-h ./prune_output/<run_id>/98.00_Dia_CM_SeqW_0.7.npy \
     --N_iter 400 --N_chains 100 --m 20 \
     --lambdJ 0.01 --lambdh 0.01 --seed 42
 ```
 
-The mask supports three strategies — `fij` (pairwise frequencies), `cij` (pairwise correlations), `sca` (conserved correlations, requires `pip install -e ".[sca]"` for pySCA). Each generated mask gets a `<mask>.manifest.json` recording the inputs and parameters.
+Strategies — couplings: `fij` (pairwise frequencies), `cij` (pairwise correlations), `sca` (conserved correlations); fields: `fia` (per-site frequencies), `dia` (per-site KL divergence). The `sca` and `dia` strategies require `pip install -e ".[sca]"` for pySCA. Each generated mask gets a `<mask>.manifest.json` recording the inputs and parameters.
 
 ## Reproducibility
 
@@ -228,7 +230,8 @@ The lock file (`requirements.lock`) was generated against `cpython-3.12.13-macos
             "package_versions": {"numpy": "...", "scipy": "...", ...}},
   "inputs":  {"msa": {"path": "...", "sha256": "..."},
               "train_indices": {"path": null, "sha256": null},
-              "pruning_mask":  {"path": "...", "sha256": "..."}},
+              "pruning_mask_couplings": {"path": "...", "sha256": "..."},
+              "pruning_mask_fields":    {"path": null, "sha256": null}},
   "options": { /* full options dict; ndarrays summarised as
                   {"_kind": "ndarray", "shape": [...], "dtype": "...", "sha256": "..."} */ },
   "seed": 42,
