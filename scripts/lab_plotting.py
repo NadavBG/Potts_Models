@@ -457,16 +457,13 @@ def save_figure(
     path: str | Path,
     *,
     script_path: str | Path | None = None,
-    write_sidecar: bool = True,
     extra_metadata: dict[str, str] | None = None,
 ) -> Path:
-    """Save a figure with provenance baked in.
+    """Save a figure with provenance baked into its PDF metadata.
 
-    Reproducibility corollary to Sandve et al. 2013 rule 6 ("for every
-    result, keep track of how it was produced"): every saved figure
-    records the git commit, the script that made it, the timestamp,
-    and the matplotlib version, both in PDF metadata and (optionally)
-    as a sidecar copy of the script next to the figure file.
+    Records the git commit, the script that made it, the timestamp, and
+    the matplotlib version in the PDF metadata (a few bytes — no copy of
+    the script is written to disk).
 
     Parameters
     ----------
@@ -475,12 +472,8 @@ def save_figure(
     path
         Output path. Format is inferred from the suffix.
     script_path
-        Path to the calling script. Auto-detected for plain Python; pass
-        explicitly from notebooks.
-    write_sidecar
-        If True (default) and the script is available, copy it next to
-        the figure file as ``<figure>.source.py`` so the recipe lives
-        with the result.
+        Path to the calling script, embedded in the PDF ``Author`` field.
+        Auto-detected for plain Python; pass explicitly from notebooks.
     extra_metadata
         Additional ``key: value`` strings to embed in the PDF metadata
         dict. Keys should be ASCII; values get coerced to ``str``.
@@ -519,11 +512,6 @@ def save_figure(
     # Only PDF and SVG support arbitrary metadata via savefig; for other
     # formats the metadata kwarg is silently ignored. Pass it anyway.
     fig.savefig(path, metadata=metadata)
-
-    if write_sidecar and script_path_resolved is not None:
-        sidecar = path.with_suffix(path.suffix + ".source.py")
-        # Use copy2 to preserve mtime so it's clear when the script ran.
-        _shutil.copy2(script_path_resolved, sidecar)
 
     return path
 

@@ -88,12 +88,21 @@ def run_SBM(
     label,
     optimizer,
     record_every,
+    explicit_run_dir=None,
 ):
     if results_path is None:
         results_path = results_dir
     else:
         results_path = Path(results_path)
     fam = str(fam)
+
+    # An explicit run dir is only coherent for a single run; otherwise the
+    # rep × N_chains loop would write every model to the same directory.
+    if explicit_run_dir is not None and Nb_rep * len(N_chains_list) > 1:
+        raise ValueError(
+            "explicit_run_dir requires a single run "
+            f"(got Nb_rep={Nb_rep} and {len(N_chains_list)} N_chains value(s))"
+        )
 
     msa_entry = _hash_input_array(Input_MSA)
     train_entry = _hash_input_array(train_file)
@@ -220,16 +229,23 @@ def run_SBM(
             }
 
             # ── Per-run directory + provenance ──────────────────────────
-            # Run-id format is <YYYY-MM-DD>_<label>_<idx>; label defaults to
-            # the family name. The legacy timestamp+random format is still
-            # available via make_run_id(label=None) for non-CLI callers.
-            fam_dir = results_path / fam
-            fam_dir.mkdir(parents=True, exist_ok=True)
-            run_id = provenance.make_run_id(
-                run_started, label=label or fam, parent_dir=fam_dir
-            )
-            run_dir = fam_dir / run_id
-            run_dir.mkdir(parents=True, exist_ok=True)
+            # With an explicit run dir (the Snakemake pipeline path), use it
+            # verbatim so output paths are deterministic for the DAG. The
+            # caller guarantees a single run (rep=1, one N_chains) in this
+            # mode. Otherwise fall back to the auto-incrementing run-id:
+            # <YYYY-MM-DD>_<label>_<idx>, label defaulting to the family name.
+            if explicit_run_dir is not None:
+                run_dir = Path(explicit_run_dir)
+                run_dir.mkdir(parents=True, exist_ok=True)
+                run_id = run_dir.name
+            else:
+                fam_dir = results_path / fam
+                fam_dir.mkdir(parents=True, exist_ok=True)
+                run_id = provenance.make_run_id(
+                    run_started, label=label or fam, parent_dir=fam_dir
+                )
+                run_dir = fam_dir / run_id
+                run_dir.mkdir(parents=True, exist_ok=True)
             model_path = run_dir / "model.npy"
             np.save(model_path, output_av)
 
@@ -409,9 +425,27 @@ if __name__ == "__main__":
         default=None,
         help="label embedded in the run dir name (default: family name)",
     )
+    parser.add_argument(
+        "--run-dir",
+        dest="run_dir",
+        type=str,
+        default=None,
+        help=(
+            "explicit output run directory, used verbatim instead of the "
+            "auto-incrementing <date>_<label>_<idx> naming. Requires a single "
+            "run (--rep 1 and exactly one --N_chains). Used by the Snakemake "
+            "pipeline so the DAG knows the output path up front."
+        ),
+    )
     parser.add_argument("Input_MSA")
 
     args = parser.parse_args()
+    if args.run_dir is not None and args.rep * len(args.N_chains) > 1:
+        parser.error(
+            "--run-dir is only valid for a single run; got "
+            f"rep={args.rep} and {len(args.N_chains)} N_chains value(s). "
+            "Drop --run-dir to use auto-named per-run directories."
+        )
     run_SBM(
         args.Input_MSA,
         args.fam,
@@ -436,4 +470,5 @@ if __name__ == "__main__":
         args.label,
         args.optimizer,
         args.record_every,
+        explicit_run_dir=args.run_dir,
     )

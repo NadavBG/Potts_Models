@@ -2,42 +2,195 @@
 
 A Potts-model inference tool for protein multiple-sequence alignments (MSAs).
 
-Given an MSA, SBM learns the fields `h_i(a)` and pairwise couplings `J_ij(a,b)` of a Potts model whose single- and pairwise-residue frequencies match the data. The optimizer is L-BFGS-style gradient descent against statistics estimated from a parallel C++/OpenMP MCMC sampler. Every trained model is reproducible from a `manifest.json` written next to it (git commit, RNG seed, input hashes, package versions, full options).
+Given an MSA, SBM learns the fields `h_i(a)` and pairwise couplings `J_ij(a,b)` of a Potts model whose single- and pairwise-residue frequencies match the data. The optimizer is L-BFGS against statistics estimated from a parallel C++/OpenMP MCMC sampler.
+
+The whole workflow — MSA statistics figure, optional pruning masks, inference, synthetic sampling, figures, and an optional ProteinMPNN foldability sweep — is driven by **one Snakemake pipeline** from **one YAML config file**. Each run lands in its own directory carrying everything needed to know exactly which parameters produced which figure.
+
+---
 
 ## Quick start
 
 ```sh
-# 1. system tools (macOS — Linux equivalents below)
+# 1. system tools (macOS; Linux equivalents in "System dependencies" below)
 brew install uv llvm libomp ninja cmake
 
-# 2. environment
+# 2. environment (NOT conda — see the heads-up below)
 uv python install 3.12
 uv venv --python=3.12
 source .venv/bin/activate
-uv pip install -e ".[plotting,analysis,dev]"
+uv pip install -e ".[plotting,analysis,dev,workflow]"
 
-# 3. train, then sample, then render — three independent steps
-RUN=results/CM/2026-05-05_CM-example_0
-OMP_NUM_THREADS=4 bash scripts/run_sbm.sh SBM data/MSA_array/MSA_CM.npy --label CM-example
-bash scripts/sample_sbm.sh "$RUN"
-bash scripts/render_sbm.sh "$RUN"
+# 3. run the whole pipeline from a config file
+python scripts/iter.py run CM-bm-pruned "first-try"
 ```
 
-`run_sbm.sh` writes `results/CM/2026-05-05_CM-example_0/` with:
+That last command reads `config/params_CM-bm-pruned.yaml`, creates a fresh run directory `results/CM-bm-pruned/iter-001-first-try/`, and builds everything into it: the MSA-statistics figure, the pruning masks, the trained model, synthetic alignments, all the figures, the ProteinMPNN sweep, and a provenance manifest.
 
-- `model.npy` — trained `J`, `h`, train/test splits, etc.
-- `manifest.json` — git commit, RNG seed, input hashes, package versions
-- `command.sh` — self-contained re-runner
+To try the fast smoke-test config first (5 iterations, tiny everything — finishes in well under a minute):
 
-`sample_sbm.sh` adds `synthetic/align_T<T>_seed<seed>.npy` (+ a JSON sidecar) for every requested temperature. By default it samples both T=0.75 and T=1.0 (N=2000 each); pass `--temperature T1 [T2 ...]` to override.
+```sh
+snakemake --configfile config/params_tiny.yaml --cores 8 all
+```
 
-`render_sbm.sh` regenerates `figs/`: PDFs at the top level plus `figs/inputs/{stats_<align_stem>.npy, sources.json}` (one stats cache per alignment plus a pointer file recording the sha256 of the model and every synthetic alignment that fed the figures). With multiple alignments under `synthetic/`, `correlations.pdf` becomes a (rows = temperatures × cols = 1st/2nd/3rd order) grid and `pca.pdf` a 1×(1+N_temps) layout. Re-running blows away `figs/` and rebuilds.
+> **Heads-up: avoid conda-forge / miniforge Python.** Its `python@3.12` build has a libpython ABI quirk that segfaults during numpy's `import_array()` when our C++ extension is loaded. Use `uv python install` (above) or Homebrew's `python@3.12`. The pipeline runs inside this uv venv; the Snakefile deliberately has no `conda:` directive.
 
-Run training again and `_idx` increments to `_1`. The CM-with-pruning worked example is `bash pruning/CM_example.sh`.
+---
 
-The two inputs you'll usually care about for training are the **MSA path** and the optional pruning masks (`--prune-J <J_mask.npy>`, `--prune-h <h_mask.npy>`). Everything else has a default; see `bash scripts/run_sbm.sh --help`.
+## How the pipeline works
 
-> **Heads-up: avoid conda-forge / miniforge Python.** Its `python@3.12` build has a libpython ABI quirk that segfaults during numpy's `import_array()` when our C++ extension is loaded. Use `uv python install` (above) or Homebrew's `python@3.12`.
+**One config = one run.** You write (or copy) a `config/params_<run_name>.yaml`, and the pipeline turns it into a run directory. The config is validated up front — unknown keys are an error — so a typo fails loudly instead of being silently ignored.
+
+**Two ways to launch:**
+
+```sh
+# Recommended: mint a new iteration directory and run it in one step.
+python scripts/iter.py run <run_name> "<short tag>"
+
+# Or do it in two steps (mint, then run Snakemake yourself):
+python scripts/iter.py new <run_name> "<short tag>"     # prints the exact command
+snakemake --configfile config/params_<run_name>.yaml \
+          --config run_root=results/<run_name>/iter-NNN-<tag> --cores 8 all
+```
+
+`scripts/iter.py` also has `list <run_name>` and `latest <run_name>`. By default the config is `config/params_<run_name>.yaml`; override with `--config PATH`.
+
+**Run directories preserve history.** Each launch mints `results/<run_name>/iter-NNN-<tag>/` (the index `NNN` auto-increments) and updates a `latest` symlink. Re-running Snakemake against the *same* `run_root` overwrites in place and only re-runs stages whose inputs changed; start a new iteration to keep the previous one.
+
+**The DAG** (run `snakemake --configfile <cfg> -n` to preview it):
+
+```text
+MSA ──┬─► msa_stats ─────────────────────────► msa_stats.pdf      (independent: no model needed)
+      ├─► build_mask_J ─► masks/J_mask.npy ─┐
+      ├─► build_mask_h ─► masks/h_mask.npy ─┤
+      └──────────────────────────────────────┴─► train ─► model.npy + manifest.json
+                                                    │
+                                                    ├─► sample(T=0.75) ─► synthetic/align_T0.75.npy
+                                                    ├─► sample(T=1.0)  ─► synthetic/align_T1.npy
+                                                    ├─► mpnn_sweep ─► synthetic/mpnn_sweep_seed<seed>/
+                                                    └─► render ─► figs/
+                                                            │
+   config_snapshot + every stage ──────────────────────────┴─► run_manifest.json
+```
+
+The `msa_stats` figure depends **only on the MSA** — you can make it without training a model:
+
+```sh
+snakemake --configfile config/params_<run_name>.yaml --config run_root=<dir> --cores 8 msa_stats_only
+```
+
+`build_mask_*` exist only when `pruning.enabled`, and `mpnn_sweep` only when `mpnn.enabled`.
+
+### What a run directory contains
+
+```text
+results/<run_name>/iter-NNN-<tag>/
+├── config_snapshot.yaml   # the exact, validated parameters for this run
+├── iteration_note.md      # YAML front-matter (git commit, timestamp) + your hypothesis
+├── msa_stats.pdf          # MSA-only statistics figure (no model needed)
+├── masks/                 # only if pruning.enabled
+│   ├── J_mask.npy   J_mask.manifest.json
+│   └── h_mask.npy   h_mask.manifest.json
+├── model.npy              # trained J, h, train/test splits, etc. (pickled dict)
+├── manifest.json          # training provenance: git, seed, input hashes, options, versions
+├── command.sh             # self-contained re-runner for the training step
+├── train_meta.json        # small inter-stage summary
+├── synthetic/
+│   ├── align_T0.75.npy   align_T0.75.json     # one alignment + sidecar per temperature
+│   ├── align_T1.npy      align_T1.json
+│   └── mpnn_sweep_seed42/                      # only if mpnn.enabled
+│       ├── align_T*.npy   control_*.npy   mpnn_scores.json   manifest.json
+├── figs/                  # regenerated wholesale by every render
+│   ├── coupling_evol.pdf  params.pdf  correlations.pdf  pca.pdf  (energy/similarity/diversity/length/mpnn as data allows)
+│   └── inputs/
+│       ├── stats_align_T*.npy   # cache of the (slow) 3-point-correlation stats, one per alignment
+│       └── sources.json         # paths + sha256 of model.npy and every synthetic alignment that fed the figures
+├── run_manifest.json      # one-file aggregate: config + git + per-stage timings + artifact hashes
+└── logs/                  # one log per stage + logs/timings/<stage>.json
+```
+
+The MSA figure lives at the run-dir top level (`msa_stats.pdf`), **not** under `figs/`, because `render` deletes and regenerates `figs/` on every call.
+
+### Knowing which parameters produced which figure
+
+The provenance chain is end-to-end and needs no extra bookkeeping from you:
+
+`config_snapshot.yaml` (exact validated params) → `manifest.json` (training: git commit, seed, input + mask sha256s, full options) → `figs/inputs/sources.json` (sha256 of the model and each synthetic alignment that fed the figures) + each PDF's metadata (git commit, timestamp, and a `sbm_run_id` keyword) → `run_manifest.json` (aggregates it all, with per-stage timings). `iteration_note.md` carries your human-written hypothesis.
+
+---
+
+## Writing a config
+
+Start from `config/params_CM-bm-pruned.yaml` (a full BM run with pruning + MPNN) or the minimal `config/params_tiny.yaml`. The schema is defined and validated in `src/SBM/workflow_config.py`. Fields, with defaults:
+
+```yaml
+run_name: CM-bm-pruned          # required; names results/<run_name>/...
+msa: data/MSA_array/MSA_CM.npy  # required; numerical alignment (see "Inputs")
+description: ""                 # free text, copied into manifests
+family: CM                      # enables CM catalytic-sector annotation in figures
+seed: 42                        # master RNG seed (training + sampling)
+omp_num_threads: null           # pin (e.g. 8) for bit-identical re-runs; null = OpenMP default
+
+msa_stats:                      # the MSA-only statistics figure
+  enabled: true
+  theta: 0.7                    # sequence-reweighting similarity threshold
+  lbda: 0.03                    # pseudocount
+  Dia_prior: gap-corrected      # gap-corrected | uniform
+  sector: emily                 # emily | rama | none
+
+pruning:                        # optional; omit or enabled:false to skip
+  enabled: true
+  theta: 0.7
+  lbda: 0.03
+  label: CM
+  Dia_prior: gap-corrected
+  couplings: { strategy: sca, percent: 98.0 }   # J mask: strategy fij|cij|sca
+  fields:    { strategy: dia, percent: 98.0 }   # h mask: strategy fia|dia
+
+train:
+  mode: BM                      # BM | SBM (see table below)
+  optimizer: LBFGS              # LBFGS | GD (GD rarely needed)
+  N_iter: 400
+  N_chains: 100                 # BM=100, SBM=50
+  m: 20                         # L-BFGS memory: BM=20, SBM=1
+  lambda_J: 0.01                # L2 on couplings: BM=0.01, SBM=0
+  lambda_h: 0.01                # L2 on fields:    BM=0.01, SBM=0
+  theta: 0.3                    # reweighting threshold for training
+  k_MCMC: 100000                # Metropolis sweeps per chain per gradient step
+  TestTrain: 0                  # 1 holds out 20% as a test set (unlocks energy/length figures)
+  record_every: 5               # record ‖J‖ every N iterations
+  ignore_gaps: false
+
+sample:
+  N: 2000                       # synthetic sequences per temperature
+  temperatures: [0.75, 1.0]     # one sampling job per temperature
+
+figures:
+  which: null                   # null = every figure whose data is present; or a list e.g. [coupling_evol, params]
+  sector: emily
+
+mpnn:                           # ProteinMPNN foldability sweep; on by default
+  enabled: true
+  pdb: data/structures/1ECM.pdb
+  chain: A
+  seed: null                    # null = inherit the run's master seed
+  temperatures: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  N_per_T: 100
+  controls: [wt, random, shuffled, natural]
+  model_name: v_48_020
+  skip_scoring: false           # true samples + writes controls but skips scoring (no torch/PROTEINMPNN_PATH needed)
+```
+
+**BM vs SBM** are the same L-BFGS algorithm with different knobs (per Summary Note 3):
+
+| Parameter | BM (positive control) | SBM (stochastic regularization) |
+| --- | --- | --- |
+| `m` (L-BFGS memory) | 20 | 1 |
+| `lambda_J`, `lambda_h` | 0.01 | 0 |
+| `N_chains` | 100 | 50 |
+
+The `sca` (couplings) and `dia` (fields) pruning strategies require pySCA: `uv pip install -e ".[sca]"`. The ProteinMPNN sweep with `skip_scoring: false` needs a clone of [`dauparas/ProteinMPNN`](https://github.com/dauparas/ProteinMPNN) on `PROTEINMPNN_PATH`; set `skip_scoring: true` (as the tiny config does) to exercise sampling without it. See `docs/MPNN_FOLDABILITY.md`.
+
+---
 
 ## Inputs
 
@@ -58,182 +211,92 @@ MSA = ut.load_fasta("data/fasta/CM.fasta")    # silently drops non-canonical-res
 np.save("data/MSA_array/MSA_CM.npy", MSA)
 ```
 
-Conventional layout (paths are conventional, not enforced — every script takes a path argument):
+Conventional layout (paths are conventional, not enforced — the config's `msa:` field takes any path):
 
 ```text
 data/
 ├── fasta/                         # raw inputs
 ├── MSA_array/MSA_<fam>.npy        # numerical alignments
-└── Ind_train/Ind_train_<fam>.npy  # optional pre-split train indices
+└── structures/<pdb>.pdb           # PDBs for the ProteinMPNN sweep
 ```
 
-## Training
-
-The recommended entry point is `scripts/run_sbm.sh`. It trains the model and writes a self-describing run directory; sampling and figure rendering are separate scripts so each step can be re-run independently.
-
-```sh
-bash scripts/run_sbm.sh <MODE> <MSA_NPY> [options] [-- <train_sbm.py overrides>]
-```
-
-`<MODE>` is **`BM`** or **`SBM`** (Both L-BFGS, different values for m, N_chains, L2 regularizers). The two important inputs are `<MSA_NPY>` and the optional pruning masks (`--prune-J`, `--prune-h`); everything else has a default.
-
-The options most users will touch:
-
-| Flag | What it does | Default |
-|---|---|---|
-| `--label NAME` | Label embedded in the run dir name (`<date>_<label>_<idx>`) | family name |
-| `--seed N` | Master RNG seed | `42` |
-| `--prune-J PATH` | Restrict couplings to a binary `(L, L, q, q)` mask (see [Pruning](#pruning-workflow)) | none |
-| `--prune-h PATH` | Restrict fields to a binary `(L, q)` mask (see [Pruning](#pruning-workflow)) | none |
-| `--results-path DIR` | Output root | `<repo>/results` |
-| `--N_iter N` | Gradient-descent iterations | 400 |
-| `--N_chains N` | MCMC chains used to estimate model statistics each step | BM=100, SBM=50 |
-| `--k_MCMC N` | Metropolis sweeps per chain per step | 100 000 |
-| `--TestTrain 0\|1` | Hold out 20% of the MSA as a test set | 0 |
-| `--theta X` | Similarity threshold for sequence reweighting | 0.3 |
-| `--rep N` | Independent replicate runs | 1 |
-| `--N_av N` | Models averaged per replicate | 1 |
-
-Anything after `--` is forwarded verbatim to `scripts/train_sbm.py`, so the long-tail flags (`--m`, `--lambdJ`, `--ParamInit`, `--ignore_gaps`, `--record_every`, …) are reachable without bloating the bash CLI. Run `bash scripts/run_sbm.sh --help` for the short list and `python scripts/train_sbm.py --help` for the long list.
-
-A few `options` keys (`SGD`, `Zero Fields`, `Zero Couplings`, `Precomputed_Stats`, `Infinite Mask Fields`) are only reachable by calling `SBM.SBM_GD.SBM_proteins.SBM(align, options)` directly from Python.
-
-If you prefer to drive training yourself, call `scripts/train_sbm.py` directly:
-
-```sh
-python scripts/train_sbm.py <fam> <MSA.npy> --mod SBM --label CM-example --seed 42 [...]
-```
-
-To re-render figures on an already-trained run (e.g. after editing plot code) without retraining:
-
-```sh
-bash scripts/render_sbm.sh results/CM/2026-05-05_CM-example_0
-```
-
-`render_sbm.sh` deletes and regenerates `figs/` each call. By default it renders every figure whose data is present: `coupling_evol` always; `correlations` (a single rows=temperatures × cols=1st/2nd/3rd-order grid) and `pca` (a 1×(1+N_temps) layout) if at least one synthetic alignment is available (auto-discovered under `<run_dir>/synthetic/`, or pass `--synthetic-alignment PATH ...`); `energy`, `similarity`, `diversity`, `length` additionally if the run has `Test/Train>0` (each overlays every available temperature in one panel). Pass `--figs NAME [NAME ...]` to render an explicit subset.
-
-## What you get
-
-```text
-results/<fam>/<YYYY-MM-DD>_<label>_<idx>/
-├── model.npy        # pickled dict (see below)            ─┐  from
-├── manifest.json    # full provenance — schema in src/SBM/provenance.py │  run_sbm.sh
-├── command.sh       # self-contained shell script that re-invokes this run ─┘
-├── synthetic/       # synthetic alignments (one per temperature)
-│   ├── align_T0.75_seed42.npy
-│   ├── align_T0.75_seed42.json    # sampling parameters + sha256s
-│   ├── align_T1_seed42.npy
-│   └── align_T1_seed42.json
-└── figs/            # regenerated by every render_sbm.sh call
-    ├── inputs/
-    │   ├── render_figures.py        # canonical copy of the renderer
-    │   ├── stats_align_T0.75_seed42.npy   # cache of compute_stats per alignment
-    │   ├── stats_align_T1_seed42.npy
-    │   └── sources.json             # paths + sha256 of model.npy and every
-    │                                # synthetic alignment that fed these figures
-    ├── coupling_evol.pdf    # ‖J‖ over training iterations (no alignment needed)
-    ├── correlations.pdf     # one figure: rows = temperatures × cols = 1st/2nd/3rd order
-    ├── pca.pdf              # 1×(1+N_temps) panels: natural + each artificial T
-    └── (energy, similarity, diversity, length — only when --TestTrain 1;
-         each overlays every available temperature in one panel)
-```
-
-Each PDF embeds the git commit, run id, and timestamp in its metadata. A single canonical copy of `render_figures.py` lives at `figs/inputs/render_figures.py`; we don't write a per-figure source sidecar. `figs/inputs/sources.json` records pointers to model + synthetic-alignment paths and their sha256s without duplicating the bytes.
-
-Loading the model:
+Loading a trained model:
 
 ```python
 import numpy as np
 
-m = np.load("results/CM/<run_id>/model.npy", allow_pickle=True).item()
-
-m["J"]           # (L, L, q, q) — averaged couplings, zero-sum gauged
-m["h"]           # (L, q)       — averaged fields, zero-sum gauged
-m["W_all"]       # (N_av, L*q + L*(L-1)/2*q*q) — packed weights per replicate
-m["Seeds"]       # per-replicate seeds (uint32)
-m["Train"]       # the training-set rows used
-m["Test"]        # the held-out rows (or None if --TestTrain 0)
-m["J_norm"]      # Frobenius norm of J over training iterations
-m["options0"]    # subset of options (kept for back-compat; full set is in manifest.json)
+m = np.load("results/<run_name>/iter-001-<tag>/model.npy", allow_pickle=True).item()
+m["J"]        # (L, L, q, q) — averaged couplings, zero-sum gauged
+m["h"]        # (L, q)       — averaged fields, zero-sum gauged
+m["Train"]    # training-set rows used;  m["Test"] — held-out rows (or None if TestTrain 0)
+m["options0"] # subset of options (full set is in manifest.json)
 ```
 
-To re-run a result exactly: `bash results/<fam>/<run_id>/command.sh` from the repo root.
+---
 
-## Sampling synthetic sequences from a trained model
+## Running the steps by hand
 
-The supported workflow is `scripts/sample_sbm.sh`:
+The pipeline calls a set of standalone CLIs; you can also drive them directly (this is what the old workflow did, and it still works). Each writes its own provenance.
 
 ```sh
-# Default: N=2000 sequences per temperature, T = {0.75, 1.0},
-# delta_t = options0.k_MCMC, seed = manifest's master seed.
-bash scripts/sample_sbm.sh results/CM/<run_id>
+# MSA statistics figure (MSA only — no model):
+python scripts/render_msa_stats.py --msa data/MSA_array/MSA_CM.npy --out msa_stats.pdf
 
-# Override anything:
-bash scripts/sample_sbm.sh results/CM/<run_id> \
-    --N 5000 --temperature 0.5 1.5 --label highT --seed 7
+# Train -> auto-named results/<fam>/<YYYY-MM-DD>_<label>_<idx>/ (use --run-dir to fix the path):
+bash scripts/run_sbm.sh BM data/MSA_array/MSA_CM.npy --label CM-example --prune-J <J_mask.npy> --prune-h <h_mask.npy>
+
+# Sample synthetic alignments from a run:
+bash scripts/sample_sbm.sh results/CM/<run_id> --N 2000 --temperature 0.75 1.0
+
+# Render figures for a run:
+bash scripts/render_sbm.sh results/CM/<run_id>
+
+# Build pruning masks:
+python pruning/build_mask.py --alg data/MSA_array/MSA_CM.npy --strategies sca dia --percent-J 98 --percent-h 98 --label CM --path ./prune_output
 ```
 
-Each invocation writes one `synthetic/align_T<T>_seed<seed>[_<label>].npy` per temperature plus a JSON sidecar carrying the sampling parameters, the run-dir path, and sha256s of both the model and the alignment. `sample_sbm.sh` refuses to overwrite an existing file at the target path; pass `--force` if you mean it, or use `--label` / `--output` to write somewhere else.
+`run_sbm.sh` writes `model.npy`, `manifest.json`, and `command.sh`. `<MODE>` is `BM` or `SBM`; the two inputs you usually care about are the MSA path and the optional `--prune-J` / `--prune-h` masks. Anything after `--` is forwarded to `scripts/train_sbm.py` (run `python scripts/train_sbm.py --help` for the full flag list). `sample_sbm.sh` refuses to overwrite existing samples unless you pass `--force`. The legacy worked example `bash pruning/CM_example.sh` chains these together; it is superseded by `config/params_CM-bm-pruned.yaml`.
 
-For ad-hoc Python use, `SBM.utils.utils.Create_modAlign(model_dict, N, delta_t=..., temperature=..., seed=...)` is the underlying primitive (returns an `(N, L)` `int64` array). `seed=None` falls back to numpy's global RNG.
-
-## Pruning workflow
-
-For larger families, restricting parameters to a small fraction (chosen by a data-derived statistic) regularizes the model and speeds up training. Couplings $J$ and fields $h$ have independent strategies and can be pruned together or separately. See `pruning/README.md` for details. End-to-end:
-
-```sh
-python pruning/build_mask.py --alg data/MSA_array/MSA_CM.npy \
-    --strategies "sca" "dia" \
-    --percent 98 \
-    --label CM --path ./prune_output
-
-python scripts/train_sbm.py SCAPruned_CM data/MSA_array/MSA_CM.npy \
-    --prune-J ./prune_output/<run_id>/98.00_SCA_CM_SeqW_0.7.npy \
-    --prune-h ./prune_output/<run_id>/98.00_Dia_CM_SeqW_0.7.npy \
-    --N_iter 400 --N_chains 100 --m 20 \
-    --lambdJ 0.01 --lambdh 0.01 --seed 42
-```
-
-Strategies — couplings: `fij` (pairwise frequencies), `cij` (pairwise correlations), `sca` (conserved correlations); fields: `fia` (per-site frequencies), `dia` (per-site KL divergence). The `sca` and `dia` strategies require `pip install -e ".[sca]"` for pySCA. Each generated mask gets a `<mask>.manifest.json` recording the inputs and parameters.
+---
 
 ## Reproducibility
 
-- **`--seed S`** seeds the Python global RNG (controls test/train split, parameter init) **and** the C++ MCMC kernel (per-thread seed = `S + thread_id`). Per-replicate seeds are derived via `np.random.SeedSequence(S).spawn(N_av)`.
-- Bit-identical reproduction requires fixing `OMP_NUM_THREADS` and `--N_chains` too; the manifest records both the requested and actual thread count.
-- The model's `J`, `h`, `W_all`, `Seeds` arrays are bit-identical across runs with the same seed; the saved `model.npy` bytes still differ because the dict includes wall-clock `Execution times`. Compare arrays, not pickles.
-- **Figures** must go through `lab_plotting.save_figure(fig, path)` (in `scripts/lab_plotting.py`); it embeds git commit + timestamp into PDF metadata and copies the calling script as a `<figure>.source.py` sidecar. Bare `fig.savefig()` loses provenance.
+- **`seed`** seeds the Python global RNG (test/train split, parameter init) **and** the C++ MCMC kernel (per-thread seed = `seed + thread_id`). Per-replicate seeds are derived via `np.random.SeedSequence(seed).spawn(N_av)`. The pipeline's per-temperature sampling uses `seed + temperature_index`.
+- **Bit-identical** training arrays require fixing the thread count too. The shipped configs leave `omp_num_threads: null`, so default runs are **not** bit-reproducible; set `omp_num_threads` to a fixed integer (the pipeline then pins `OMP_NUM_THREADS` before the kernel loads) and keep `N_chains` fixed. Both are recorded in `manifest.json`.
+- The model's `J`, `h`, `W_all`, `Seeds` arrays are bit-identical across runs with the same seed + thread count; the `model.npy` *bytes* still differ because the dict embeds wall-clock execution times. **Compare the arrays (or the manifest's array sha256s), not the pickle.**
+- **Figures** go through `lab_plotting.save_figure(fig, path)`, which embeds the git commit, script path, and timestamp into the PDF metadata. (It no longer writes a copy of the source script next to each figure.) Don't use bare `fig.savefig()` — it loses the provenance metadata.
+
+---
 
 ## Reference
 
 ### Optional dependency groups
 
 | Group | Adds |
-|---|---|
+| --- | --- |
+| `workflow` | `snakemake`, `pyyaml` (the pipeline) |
 | `plotting` | `seaborn`, `plotly`, `POT`, `PyGSP` |
 | `analysis` | `scikit-learn` |
 | `notebook` | `ipykernel`, `notebook` |
-| `sca` | `pysca` (only needed for SCA pruning) |
-| `dev` | `pre-commit`, `ruff`, `pytest` |
+| `sca` | `pysca` (only for SCA/Dia pruning) |
+| `dev` | `ruff`, `pytest` |
 
-The lock file (`requirements.lock`) was generated against `cpython-3.12.13-macos-aarch64-none` with `[plotting,analysis]`. Use `uv pip sync requirements.lock` for a deterministic install (then `uv pip install -e . --no-deps`).
+`requirements.lock` pins exact versions (generated with `[plotting,analysis,sca,workflow]`). For a deterministic install: `uv pip sync requirements.lock` then `uv pip install -e . --no-deps`.
 
 ### Run manifest schema (v1)
 
 ```jsonc
 {
-  "run_id": "20260504T143012Z-7af3b",
+  "run_id": "<run dir name>",
   "schema_version": 1,
   "command_line": ["python", "scripts/train_sbm.py", "CM", "..."],
   "code":  {"git_commit": "...", "git_dirty": false, "git_branch": "main"},
   "env":   {"python": "...", "platform": "...", "hostname": "...",
-            "omp_num_threads_env": "8", "omp_num_threads_requested": 8,
-            "package_versions": {"numpy": "...", "scipy": "...", ...}},
+            "omp_num_threads_requested": 8, "package_versions": {"numpy": "...", ...}},
   "inputs":  {"msa": {"path": "...", "sha256": "..."},
-              "train_indices": {"path": null, "sha256": null},
               "pruning_mask_couplings": {"path": "...", "sha256": "..."},
-              "pruning_mask_fields":    {"path": null, "sha256": null}},
-  "options": { /* full options dict; ndarrays summarised as
-                  {"_kind": "ndarray", "shape": [...], "dtype": "...", "sha256": "..."} */ },
+              "pruning_mask_fields":    {"path": "...", "sha256": "..."}},
+  "options": { /* full options dict; ndarrays summarised as {shape, dtype, sha256} */ },
   "seed": 42,
   "started_at": "...", "finished_at": "...", "wall_seconds": 1101.4,
   "outputs": {"model": {"path": "...", "sha256": "..."}}
@@ -260,8 +323,6 @@ uv pip install -e . --force-reinstall --no-deps
 uv pip install -e ".[notebook]"
 python -m ipykernel install --user --name SBM --display-name "Python (SBM)"
 ```
-
-Pick `Python (SBM)` as the kernel.
 
 ## Citation
 

@@ -54,7 +54,6 @@ import argparse
 import datetime as dt
 import json
 import logging
-import shutil
 import sys
 from pathlib import Path
 
@@ -156,20 +155,26 @@ _NEEDS_MPNN_SWEEP: frozenset[str] = frozenset({"mpnn"})
 SECTOR_CHOICES: tuple[str, ...] = ("emily", "rama", "none")
 
 
-def _looks_like_cm_run(run_dir: Path) -> bool:
-    """``True`` iff the run directory looks like a CM run by layout.
+def _looks_like_cm_run(run_dir: Path, family: str | None = None) -> bool:
+    """``True`` iff the run is a CM run.
 
-    Both ``results/<family>/<run>/`` (training) and
-    ``pruning/example_output/<family>/<run>/`` (worked example) put the
-    family name as the parent directory, so the CM check is simply
-    ``parent.name == "CM"`` (case-insensitive). L=96 alone is
-    insufficient — another protein might happen to share that length —
-    so the sector annotation is gated on the family marker too.
+    The pipeline passes ``family`` explicitly (from the config), so an
+    iteration dir like ``results/CM-bm-pruned/iter-001-x/`` is still
+    recognized. The manual scripts pass ``family=None`` and fall back to
+    the legacy layout heuristic: ``results/<family>/<run>/`` and
+    ``pruning/example_output/<family>/<run>/`` put the family name as the
+    parent directory, so ``parent.name == "CM"`` (case-insensitive). L=96
+    alone is insufficient — another protein might share that length — so
+    the sector annotation is gated on the family marker either way.
     """
+    if family is not None:
+        return family.strip().lower() == "cm"
     return run_dir.parent.name.lower() == "cm"
 
 
-def _cm_sector_positions(run_dir: Path, L: int, choice: str = "emily") -> list[int]:
+def _cm_sector_positions(
+    run_dir: Path, L: int, choice: str = "emily", *, family: str | None = None
+) -> list[int]:
     """MSA-column indices for the requested CM catalytic-sector
     definition on the 96-AA alignment.
 
@@ -193,11 +198,12 @@ def _cm_sector_positions(run_dir: Path, L: int, choice: str = "emily") -> list[i
             L,
         )
         return []
-    if not _looks_like_cm_run(run_dir):
+    if not _looks_like_cm_run(run_dir, family):
         log.info(
-            "sector annotation suppressed: %s is not under a CM family "
-            "directory. Pass --sector none to silence, or move the run "
-            "under results/CM/ to enable.",
+            "sector annotation suppressed: not a CM run (family=%r, run dir "
+            "%s). Set family: CM in the config (or place the run under "
+            "results/CM/), or pass --sector none to silence.",
+            family,
             run_dir,
         )
         return []
@@ -483,9 +489,6 @@ def _render_one(
     Coupling_evol, Params, and the mpnn branch. ``natural_colors``
     carries Train/Test/Random colors. ``sector_positions`` is read only
     by the Params figure. ``mpnn_scores_path`` is read only by ``mpnn``.
-
-    ``write_sidecar=False`` on every save keeps the renderer from being
-    copied once per PDF; one canonical copy lives in ``figs/inputs/``.
     """
     figs_dir.mkdir(parents=True, exist_ok=True)
     if name == "mpnn":
@@ -498,7 +501,6 @@ def _render_one(
             fig,
             path,
             script_path=Path(__file__),
-            write_sidecar=False,
             extra_metadata={"Keywords": f"sbm_run_id={run_id}"},
         )
         plt.close(fig)
@@ -536,7 +538,6 @@ def _render_one(
             fig,
             path,
             script_path=Path(__file__),
-            write_sidecar=False,
             extra_metadata={"Keywords": f"sbm_run_id={run_id}"},
         )
         plt.close(fig)
@@ -631,6 +632,16 @@ def main(argv: list[str] | None = None) -> int:
             "panel per temperature). Figures that depend on a synthetic "
             "alignment (" + ", ".join(sorted(_NEEDS_ALIGN_MOD)) + ") are "
             "skipped if none is available."
+        ),
+    )
+    parser.add_argument(
+        "--family",
+        default=None,
+        help=(
+            "protein family (e.g. CM). Enables the CM catalytic-sector "
+            "annotation regardless of the run-dir layout; the pipeline "
+            "passes this from the config. If omitted, CM detection falls "
+            "back to checking whether the run dir sits under results/CM/."
         ),
     )
     parser.add_argument(
@@ -781,7 +792,9 @@ def main(argv: list[str] | None = None) -> int:
     # an empty list (with a logged reason) when the run isn't a CM run
     # or the user passed ``--sector none``.
     L_run = int(np.asarray(model["h"]).shape[0])
-    sector_positions = _cm_sector_positions(run_dir, L_run, args.sector)
+    sector_positions = _cm_sector_positions(
+        run_dir, L_run, args.sector, family=args.family
+    )
     if sector_positions:
         log.info(
             "marking %d CM sector position(s) on params figure (--sector=%s)",
@@ -789,11 +802,10 @@ def main(argv: list[str] | None = None) -> int:
             args.sector,
         )
 
-    # One canonical copy of the rendering script next to the other
-    # provenance under figs/inputs/, instead of one .source.py per PDF.
+    # figs/inputs/ holds the stats cache + sources.json (pointers to the
+    # model and synthetic alignments that fed these figures); no copy of
+    # the renderer is written.
     figs_inputs_dir.mkdir(parents=True, exist_ok=True)
-    script_src = Path(__file__).resolve()
-    shutil.copy2(script_src, figs_inputs_dir / script_src.name)
 
     run_id = run_dir.name
     written: list[Path] = []

@@ -24,6 +24,9 @@ dependencies = [
     "more-itertools>=10",
     "pandas>=2.2",
     "matplotlib>=3.8",
+    # Used by src/SBM/workflow_config.py and src/SBM/iteration.py (config
+    # parsing + iteration notes), so it's a core dependency, not workflow-only.
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +39,12 @@ plotting = [
 analysis = [
     "scikit-learn>=1.4",
 ]
+# Snakemake workflow engine + YAML config parsing. Runs inside this same
+# uv venv (NOT conda — conda-forge Python segfaults on the compiled C++
+# extension); the Snakefile never uses Snakemake's `conda:` directive.
+workflow = [
+    "snakemake>=8,<9",
+]
 notebook = [
     "ipykernel",
     "notebook",
@@ -45,7 +54,6 @@ sca = [
     "pysca @ git+https://github.com/ranganathanlab/pySCA@v7.0",
 ]
 dev = [
-    "pre-commit>=3.6",
     "ruff>=0.8",
     "pytest>=8",
 ]

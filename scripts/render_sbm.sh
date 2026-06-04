@@ -8,7 +8,6 @@ IFS=$'\n\t'
 # Layout:
 #   <RUN_DIR>/figs/                  ← always regenerated
 #       inputs/
-#           render_figures.py             (canonical copy of the renderer)
 #           stats_<align_stem>.npy        (one cache per alignment)
 #           sources.json                  (paths + sha256 of model.npy
 #                                          and every synthetic alignment)

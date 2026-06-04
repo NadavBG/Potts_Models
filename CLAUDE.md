@@ -20,8 +20,12 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 
 | If you need… | Look at |
 |---|---|
-| The user-facing entry points (3 scripts, run in order) | `scripts/run_sbm.sh` (train), `scripts/sample_sbm.sh` (synthetic MSA), `scripts/render_sbm.sh` (figures) |
-| The training CLI | `scripts/train_sbm.py` (writes `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/`) |
+| The one-command pipeline (recommended) | `Snakefile` driven by `config/params_<run_name>.yaml`; mint+run an iteration with `python scripts/iter.py run <run_name> "<tag>"`. See "Snakemake pipeline" below. |
+| The pipeline config schema | `src/SBM/workflow_config.py` (`SBMRunConfig`, validated; `from_dict` rejects unknown keys) |
+| The per-stage Snakemake wrappers | `scripts/wf/run_*.py` (thin; call the CLIs below) + `scripts/wf/_common.py` |
+| The iteration helper | `scripts/iter.py` + `src/SBM/iteration.py` (mints `results/<run_name>/iter-NNN-<tag>/`) |
+| The manual entry points (still work; called by the Snakefile too) | `scripts/run_sbm.sh` (train), `scripts/sample_sbm.sh` (synthetic MSA), `scripts/render_sbm.sh` (figures), `scripts/render_msa_stats.py` (MSA-only figure) |
+| The training CLI | `scripts/train_sbm.py` (auto-names `results/<fam>/<YYYY-MM-DD>_<label>_<idx>/`; `--run-dir DIR` overrides with an exact path for the pipeline) |
 | The synthetic-sampling CLI | `scripts/sample_sbm.py` (writes one `<run_dir>/synthetic/align_T<T>_seed<seed>.npy` + JSON sidecar per requested temperature; default = both 0.75 and 1.0; default N=2000) |
 | The figure renderer | `scripts/render_figures.py` (writes `<run_dir>/figs/` and `<run_dir>/figs/inputs/`; the bash wrapper `render_sbm.sh` deletes `figs/` first so each call regenerates) |
 | The optimizer entry point | `src/SBM/SBM_GD/SBM_proteins.py:SBM(align, options)` |
@@ -33,9 +37,9 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | Plot recipes (used by `render_figures.py`) | `src/SBM/utils/utils_plot.py:plot_stats` (7 modes; `correlations` is rows=temperatures × cols=1st/2nd/3rd order, `pca` is 1×(1+N_temps)). The `mpnn` figure is separate: `src/SBM/utils/utils_mpnn_plot.py:plot_mpnn_foldability` reads `mpnn_scores.json` directly. |
 | The ProteinMPNN foldability sweep | `scripts/mpnn_sweep.py` (orchestrator; called by `sample_sbm.py --mpnn-sweep`) and `src/SBM/utils/mpnn_score.py` (subprocess driver for upstream `protein_mpnn_run.py --score_only`). See `docs/MPNN_FOLDABILITY.md`. |
 | Run-level provenance helpers | `src/SBM/provenance.py` |
-| The pruning CLI | `pruning/build_mask.py` |
+| The pruning CLI | `pruning/build_mask.py` (auto-names a per-run subdir; `--out-file PATH` writes a single mask to an exact path for the pipeline) |
 | The figure-save helpers | `scripts/lab_plotting.py` (`save_figure`, `panel_label`, `LAB_COLORS`) |
-| The CM worked example | `pruning/CM_example.sh` (chains `run_sbm.sh` → `sample_sbm.sh` → `render_sbm.sh`) |
+| The CM worked example (pipeline) | `config/params_CM-bm-pruned.yaml`; the legacy `pruning/CM_example.sh` (chains `run_sbm.sh` → `sample_sbm.sh` → `render_sbm.sh`) still works |
 
 `src/SBM/__init__.py` is empty by design — users import submodules directly (`SBM.SBM_GD.SBM_proteins`, `SBM.utils.utils`, `SBM.provenance`).
 
@@ -70,8 +74,10 @@ After training, parameters are zero-sum gauged before averaging across replicate
 uv python install 3.12
 uv venv --python=3.12
 source .venv/bin/activate
-uv pip install -e ".[plotting,analysis,dev]"
+uv pip install -e ".[plotting,analysis,dev,workflow]"
 ```
+
+The `workflow` extra adds Snakemake + PyYAML for the pipeline (below). It installs into this same uv venv — **not** conda — and the Snakefile deliberately has no `conda:` directive.
 
 `pip install -e .` works equivalently. Runtime deps are pinned in `pyproject.toml`; `requirements.lock` records exact pins for reproducible installs (`uv pip sync requirements.lock` then `uv pip install -e . --no-deps`).
 
@@ -83,15 +89,34 @@ uv pip install -e ".[plotting,analysis,dev]"
 
 **Python.** 3.11+ (`requires-python = ">=3.11"`).
 
-**Tests.** There is no test suite. After non-trivial changes, run the worked example as a smoke test:
+**Tests.** There is no unit-test suite. After non-trivial changes, run the pipeline smoke test (tiny config: 5 L-BFGS iters, 4 chains, N=50, MPNN with `skip_scoring`):
 
 ```
-bash pruning/CM_example.sh
+snakemake --configfile config/params_tiny.yaml --cores 8 all
 ```
 
-It expects `data/MSA_array/MSA_CM.npy` to exist, builds a pruning mask, trains a BM model, samples a synthetic MSA, and renders figures. Output lands under `pruning/example_output/CM/<run_id>/`.
+It exercises the whole DAG — mask → train → sample(×2) → mpnn → render → manifest, plus the independent `msa_stats` branch — and lands deterministic outputs under `results/tiny/` (assert on `model.npy`, `manifest.json`, `synthetic/align_T*.npy`, `figs/*.pdf`, `msa_stats.pdf`, `run_manifest.json`). The legacy `bash pruning/CM_example.sh` still works but is superseded by the pipeline.
 
 **Pruning workflow** lives in `pruning/` with its own `README.md` and `CM_example.sh`. The `"sca"` strategy depends on `pysca`, gated behind the `[sca]` optional-dependency group; `"fij"` and `"cij"` don't need it.
+
+## Snakemake pipeline
+
+One validated YAML config = one run. `config/params_<run_name>.yaml` drives the `Snakefile`; `src/SBM/workflow_config.py` validates it (unknown keys are an error) and the thin `scripts/wf/run_*.py` wrappers call the existing CLIs with deterministic output paths.
+
+```
+python scripts/iter.py run CM-bm-pruned "sca98-baseline"     # mint iter dir + run everything
+# equivalently, two steps:
+python scripts/iter.py new CM-bm-pruned "sca98-baseline"     # prints the snakemake command
+snakemake --configfile config/params_CM-bm-pruned.yaml \
+          --config run_root=results/CM-bm-pruned/iter-001-sca98-baseline --cores 8 all
+```
+
+- **Run dirs:** `RUN_ROOT = config.get("run_root") or results/<run_name>/`. The iteration helper mints `results/<run_name>/iter-NNN-<tag>/` (history-preserving) and updates a `latest` symlink. Re-running Snakemake against the same `run_root` overwrites in place (Snakemake re-runs only stages whose inputs changed); start a new iteration to keep the old one.
+- **Rules:** `snapshot_config`, `msa_stats` (MSA-only — no model dependency, the fix for "can't make the MSA figure without inference"), `build_mask_J`/`build_mask_h` (only when `pruning.enabled`), `train`, `sample` (one job per temperature → `synthetic/align_T<temp>.npy`), `mpnn_sweep` (only when `mpnn.enabled`), `render` (`figs/`), `run_manifest`. Target `msa_stats_only` renders just the MSA figure with no training.
+- **MSA figure lands at** `<run_dir>/msa_stats.pdf` (run-dir top level, NOT under `figs/`, because `render` deletes+regenerates `figs/` each call).
+- **Provenance chain:** `config_snapshot.yaml` (exact validated params) → `manifest.json` (training; input hashes incl. mask paths, options, seed, git) → `figs/inputs/sources.json` (model + synthetic sha256s per figure) + each PDF's `sbm_run_id` keyword → `run_manifest.json` (aggregate). `iteration_note.md` carries the human hypothesis.
+- **Determinism:** the `sample` rule passes `--seed (master_seed + temp_index)` to reproduce the old multi-T `t_seed = seed+i` offset. `run_train.py` pins `OMP_NUM_THREADS` before importing the MCMC kernel **only when `omp_num_threads` is set** in the config; the shipped configs leave it `null`, so default runs are not bit-identical (set it to a fixed int for reproducible arrays).
+- **Cluster:** every rule declares `threads` + `resources(mem_mb, runtime)`, so a Snakemake Slurm/Midway profile can be added later without touching rules. Not wired yet (runs locally).
 
 ## Architecture notes
 
@@ -132,7 +157,7 @@ Each gradient step in `GradLogLike`:
 
 Every training run and every pruning-mask invocation writes a `manifest.json` sidecar with: git commit + dirty flag + branch, full command line, input file paths and sha256s, the entire options dict (ndarrays summarised as `{shape, dtype, sha256}`), the master seed, OMP thread count, package versions, host/platform, and start/finish timestamps. Schema version 1, defined in `src/SBM/provenance.py`. The training driver also writes `command.sh` reproducing the invocation.
 
-The figure-side equivalent is `lab_plotting.save_figure()` (in `scripts/lab_plotting.py`), which embeds the same git/timestamp data into PDF metadata and copies the calling script as a `<figure>.source.py` sidecar. Don't bypass either: figures saved with bare `fig.savefig()` lose all provenance.
+The figure-side equivalent is `lab_plotting.save_figure()` (in `scripts/lab_plotting.py`), which embeds the same git/timestamp data (plus the script path and a `sbm_run_id` keyword) into the PDF metadata. It writes no copy of the source script. Don't bypass it: figures saved with bare `fig.savefig()` lose the provenance metadata.
 
 ### RNG seeding
 
@@ -172,8 +197,8 @@ plotting code:
   `plt.style.use("lab-slides")` for talks. Pick by destination, not by
   guess.
 - Save figures only via `lab_plotting.save_figure()`, never bare
-  `fig.savefig()`. The wrapper embeds git provenance and writes a
-  sidecar source script.
+  `fig.savefig()`. The wrapper embeds git provenance into the PDF
+  metadata (it does not write a copy of the source script).
 - For semantic colors (reference, negative control, fit, highlight),
   use the constants in `lab_plotting.LAB_COLORS`, not hex literals.
 - Panel labels go through `lab_plotting.panel_label()`. Do not place

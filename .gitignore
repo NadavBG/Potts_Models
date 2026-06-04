@@ -33,6 +33,9 @@ results/
 pruning/masks/
 data/figs/
 
+# ── Snakemake working metadata ───────────────────────────────────────────
+.snakemake/
+
 # ── Test / lint / type-check caches ──────────────────────────────────────
 .pytest_cache/
 .mypy_cache/

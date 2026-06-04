@@ -1,0 +1,62 @@
+# Worked example: CM, BM positive control, SCA-coupling + Dia-field pruning
+# at 98%. Reproduces the old pruning/CM_example.sh as a single pipeline run.
+#
+#   python scripts/iter.py run CM-bm-pruned "sca98-baseline"
+# or
+#   snakemake --configfile config/params_CM-bm-pruned.yaml --cores 8 all
+
+run_name: CM-bm-pruned
+description: CM BM positive control, SCA-J + Dia-h pruning at 98%
+family: CM
+msa: data/MSA_array/MSA_CM.npy
+seed: 42
+omp_num_threads: null          # pin (e.g. 8) for bit-identical re-runs
+
+msa_stats:                     # MSA-only figure; independent of training
+  enabled: true
+  theta: 0.7
+  lbda: 0.03
+  Dia_prior: gap-corrected
+  sector: emily
+
+pruning:
+  enabled: true
+  theta: 0.7
+  lbda: 0.03
+  label: CM
+  Dia_prior: gap-corrected
+  couplings: { strategy: sca, percent: 98.0 }
+  fields:    { strategy: dia, percent: 98.0 }
+
+train:                         # BM regime (Summary Note 3)
+  mode: BM
+  optimizer: LBFGS
+  N_iter: 400
+  N_chains: 100
+  m: 20
+  lambda_J: 0.01
+  lambda_h: 0.01
+  theta: 0.3
+  k_MCMC: 100000
+  TestTrain: 0
+  record_every: 5
+  ignore_gaps: false
+
+sample:
+  N: 2000
+  temperatures: [0.75, 1.0]
+
+figures:
+  which: null                  # null = every figure whose data is present
+  sector: emily
+
+mpnn:                          # on by default; needs PROTEINMPNN_PATH for scoring
+  enabled: true
+  pdb: data/structures/1ECM.pdb
+  chain: A
+  seed: null                   # null = inherit the run's master seed
+  temperatures: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  N_per_T: 100
+  controls: [wt, random, shuffled, natural]
+  model_name: v_48_020
+  skip_scoring: false

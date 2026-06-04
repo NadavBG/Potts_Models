@@ -134,14 +134,18 @@ def write_mask_manifest(
 
 
 def partition_params(
-    prune_vals, pcts, partial_outfile, outfile_path, *, manifest_meta=None
+    prune_vals, pcts, partial_outfile, outfile_path, *, manifest_meta=None, explicit_outfile=None
 ):
     """Generate one binary mask per requested percent and write it.
 
     ``manifest_meta`` is a dict with keys ``alg_file``, ``strategy``,
     ``theta``, ``lbda``, ``started_at``; if given, a manifest sidecar is
-    written next to each output file.
+    written next to each output file. ``explicit_outfile`` (Snakemake path)
+    overrides the computed ``<pct>_<label>...`` filename; it requires a
+    single percent so the masks don't collide.
     """
+    if explicit_outfile is not None and len(pcts) != 1:
+        raise ValueError("explicit_outfile requires exactly one percent")
     N_pos = prune_vals.shape[0]
     triu = np.triu_indices(N_pos, k=1)  # ignore diagonal
     prune_vals_triu = np.zeros(prune_vals.shape)
@@ -155,29 +159,38 @@ def partition_params(
         for ii in range(N_pos):
             for jj in range(ii + 1, N_pos):
                 bin_prune_mat[jj, ii] = bin_prune_mat[ii, jj].T
-        outfile = "%s/%.2f_%s" % (outfile_path, pct, partial_outfile)
+        if explicit_outfile is not None:
+            outfile = str(explicit_outfile)
+        else:
+            outfile = "%s/%.2f_%s" % (outfile_path, pct, partial_outfile)
         write_file(outfile, bin_prune_mat)
         if manifest_meta is not None:
             write_mask_manifest(outfile, pct=pct, **manifest_meta)
 
 
 def partition_fields_params(
-    prune_vals, pcts, partial_outfile, outfile_path, *, manifest_meta=None
+    prune_vals, pcts, partial_outfile, outfile_path, *, manifest_meta=None, explicit_outfile=None
 ):
     """Generate one binary (L, q) field mask per requested percent and write it.
 
     Mirrors :func:`partition_params` but for fields: there is no symmetry
     constraint and no diagonal to ignore, so all (i, a) entries are
     ranked together. Output is always ``.npy`` (no ``.mat`` route is
-    needed for fields).
+    needed for fields). ``explicit_outfile`` (Snakemake path) overrides the
+    computed filename and requires a single percent.
     """
+    if explicit_outfile is not None and len(pcts) != 1:
+        raise ValueError("explicit_outfile requires exactly one percent")
     idx = np.argsort(np.abs(prune_vals).flatten())[::-1]  # descending order
     for pct in pcts:
         tokeep_idx = int(prune_vals.size * (1 - pct / 100))
         bin_mask = np.zeros(prune_vals.size, dtype="int")
         bin_mask[idx[:tokeep_idx]] = 1
         bin_mask = bin_mask.reshape(prune_vals.shape)
-        outfile = "%s/%.2f_%s" % (outfile_path, pct, partial_outfile)
+        if explicit_outfile is not None:
+            outfile = str(explicit_outfile)
+        else:
+            outfile = "%s/%.2f_%s" % (outfile_path, pct, partial_outfile)
         np.save(outfile, bin_mask)
         if manifest_meta is not None:
             write_mask_manifest(outfile, pct=pct, **manifest_meta)
@@ -194,16 +207,36 @@ def main(
     pct_J=[95],
     pct_h=[95],
     Dia_prior="gap-corrected",
+    out_file=None,
 ):
     started_at = _dt.datetime.now(_dt.timezone.utc)
-    parent_dir = Path(outfile_path)
-    parent_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = parent_dir / provenance.make_run_id(
-        when=started_at, label=output_label, parent_dir=parent_dir
-    )
-    run_dir.mkdir(parents=True, exist_ok=False)
-    print(f"Run dir: {run_dir.resolve()}")
-    outfile_path = str(run_dir)
+    if not isinstance(pct_J, list):
+        pct_J = [pct_J]
+    if not isinstance(pct_h, list):
+        pct_h = [pct_h]
+    strategies = [s.lower() for s in strategies]
+
+    if out_file is not None:
+        # Explicit single-mask output path (Snakemake build_mask_{J,h}
+        # rules): write exactly one mask to `out_file`, bypassing the
+        # per-run subdir + computed <pct>_<label> filename.
+        if len(set(strategies)) != 1:
+            raise ValueError("out_file requires exactly one strategy")
+        is_field = strategies[0] in ("fia", "dia")
+        n_pct = len(pct_h) if is_field else len(pct_J)
+        if n_pct != 1:
+            raise ValueError("out_file requires a single percent for the chosen strategy")
+        outfile_path = str(Path(out_file).parent)
+        Path(outfile_path).mkdir(parents=True, exist_ok=True)
+    else:
+        parent_dir = Path(outfile_path)
+        parent_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = parent_dir / provenance.make_run_id(
+            when=started_at, label=output_label, parent_dir=parent_dir
+        )
+        run_dir.mkdir(parents=True, exist_ok=False)
+        print(f"Run dir: {run_dir.resolve()}")
+        outfile_path = str(run_dir)
     # read in the file
     alg = None
     if alg_file[-4:] == ".npy":
@@ -226,15 +259,13 @@ def main(
             "started_at": started_at,
         }
 
-    # process inputs
-    if not isinstance(pct_J, list):
-        pct_J = [pct_J]
-    if not isinstance(pct_h, list):
-        pct_h = [pct_h]
+    # process inputs (pct_J / pct_h already listified + strategies lowercased above)
     # 100% short-circuit: write a single all-zero J mask without computing
     # weights. Only meaningful for couplings — for fields, partition_fields_params
     # naturally produces an all-zero mask at pct=100, so no special case needed.
-    if 100 in pct_J:
+    # Skipped under an explicit out_file: there pct=100 flows through the normal
+    # partition path (tokeep_idx=0 → all-zero mask) so it lands at out_file.
+    if out_file is None and 100 in pct_J:
         prune_mat = np.zeros((alg.shape[1], alg.shape[1], 21, 21), dtype="int")
         outfile = "%s/%.2fp_%s_%s_SeqW_%.1f%s" % (
             outfile_path,
@@ -279,6 +310,7 @@ def main(
             "%s_%s" % ("Cij", outfile_base),
             outfile_path,
             manifest_meta=_meta("Cij"),
+            explicit_outfile=out_file,
         )
     if "fij" in strategies:
         _, prune_vals, _ = sca.freq(alg + 1, seqw=seqw, Naa=21, lbda=0)
@@ -291,8 +323,12 @@ def main(
             "%s_%s" % ("Fij", outfile_base),
             outfile_path,
             manifest_meta=_meta("Fij"),
+            explicit_outfile=out_file,
         )
-    if "sca" in strategies or "cij" in strategies:
+    # Selecting "cij" also emits an SCA mask (legacy behavior). Under an
+    # explicit out_file that would write two masks to one path, so the
+    # cij-implies-sca side effect is suppressed in that mode.
+    if "sca" in strategies or ("cij" in strategies and out_file is None):
         prune_vals = calcSCAMat(
             alg, seqw=seqw, lbda=lbda, freq0=freqs0, norm=None, include_gaps=True
         )
@@ -302,6 +338,7 @@ def main(
             "%s_%s" % ("SCA", outfile_base),
             outfile_path,
             manifest_meta=_meta("SCA"),
+            explicit_outfile=out_file,
         )
     if "fia" in strategies:
         # First-order frequency-based fields mask (parallel to "fij" for J).
@@ -313,6 +350,7 @@ def main(
             "%s_%s" % ("Fia", outfile_base_fields),
             outfile_path,
             manifest_meta=_meta("Fia"),
+            explicit_outfile=out_file,
         )
     if "dia" in strategies:
         # Per-site KL-divergence fields mask (parallel to "sca" for J).
@@ -332,6 +370,7 @@ def main(
             "%s_%s" % ("Dia", outfile_base_fields),
             outfile_path,
             manifest_meta=_meta("Dia"),
+            explicit_outfile=out_file,
         )
     return
 
@@ -429,6 +468,17 @@ if __name__ == "__main__":
             "mask per percent."
         ),
     )
+    parser.add_argument(
+        "--out-file",
+        dest="out_file",
+        type=str,
+        default=None,
+        help=(
+            "explicit output mask path (.npy). Requires exactly one strategy "
+            "and a single percent for that strategy; bypasses the per-run "
+            "subdir + computed filename. Used by the Snakemake pipeline."
+        ),
+    )
 
     args = parser.parse_args()
     main(
@@ -442,4 +492,5 @@ if __name__ == "__main__":
         pct_J=args.percent_J,
         pct_h=args.percent_h,
         Dia_prior=args.Dia_prior,
+        out_file=args.out_file,
     )

@@ -1,0 +1,63 @@
+# Fast end-to-end smoke test of the whole DAG (mask -> train -> sample x2 ->
+# mpnn -> render -> manifest, plus the independent msa_stats branch).
+# Tiny N_iter / N_chains / k_MCMC / N keep it to seconds. MPNN runs with
+# skip_scoring: true so it needs no torch / PROTEINMPNN_PATH (it still reads
+# the WT FASTA + PDB, both present in the repo).
+#
+#   snakemake --configfile config/params_tiny.yaml --cores 4 all
+
+run_name: tiny
+description: Fast smoke test of the full pipeline DAG
+family: CM
+msa: data/MSA_array/MSA_CM.npy
+seed: 42
+omp_num_threads: null
+
+msa_stats:
+  enabled: true
+  theta: 0.7
+  lbda: 0.03
+  Dia_prior: gap-corrected
+  sector: emily
+
+pruning:
+  enabled: true
+  theta: 0.7
+  lbda: 0.03
+  label: CM
+  Dia_prior: gap-corrected
+  couplings: { strategy: sca, percent: 98.0 }
+  fields:    { strategy: dia, percent: 98.0 }
+
+train:
+  mode: BM
+  optimizer: LBFGS
+  N_iter: 5
+  N_chains: 4
+  m: 20
+  lambda_J: 0.01
+  lambda_h: 0.01
+  theta: 0.3
+  k_MCMC: 200
+  TestTrain: 0
+  record_every: 1
+  ignore_gaps: false
+
+sample:
+  N: 50
+  temperatures: [0.75, 1.0]
+
+figures:
+  which: [coupling_evol, params, correlations, pca]
+  sector: emily
+
+mpnn:
+  enabled: true
+  pdb: data/structures/1ECM.pdb
+  chain: A
+  seed: null
+  temperatures: [0.5, 1.0]
+  N_per_T: 10
+  controls: [wt, natural]
+  model_name: v_48_020
+  skip_scoring: true
