@@ -288,8 +288,8 @@ def CalcWeights(align, theta, ignore_gaps=True):
     if ignore_gaps:
         counts = np.sum(squareform(compute_diversity(align)) < theta, axis=0)
         W = 1 / (counts + (counts == 0).astype("int"))
-    else:  # consistent with MATLAB code, SCA code
-        W = np.sum(squareform(pdist(align, "hamming")) < 0.3, axis=0)
+    else:  # gaps counted as a state (consistent with MATLAB code, SCA code)
+        W = np.sum(squareform(pdist(align, "hamming")) < theta, axis=0)
         W = 1 / np.array([max(1, x) for x in W])
     N_eff = sum(W)
     return W, N_eff

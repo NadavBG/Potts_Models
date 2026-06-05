@@ -1,0 +1,219 @@
+# Pipeline configuration (`config/*.yaml`)
+
+One YAML file describes **one pipeline run end-to-end**: input MSA → optional
+pruning masks → training → synthetic sampling → figures → optional ProteinMPNN
+sweep. The `Snakefile` loads it, `src/SBM/workflow_config.py` validates it, and
+the thin `scripts/wf/run_*.py` wrappers translate each section into a call to
+the underlying CLI.
+
+```bash
+# mint a fresh iteration dir and run everything
+python scripts/iter.py run <run_name> "<tag>"
+
+# or drive Snakemake directly
+snakemake --configfile config/params_<run_name>.yaml --cores 8 all
+```
+
+**How to read this doc.** Defaults below are the *schema* defaults from
+`workflow_config.py` (what you get if you omit the key). The values in the
+shipped configs (`params_CM-bm-pruned.yaml`, `params_tiny.yaml`) sometimes
+differ — those are the BM positive-control regime, not the schema default.
+
+**Validation is strict.** `from_dict` **rejects unknown keys** (a typo'd key is
+an error, not a silent no-op) and enforces the ranges/enums noted below. The
+exact validated config is round-tripped into each run's
+`config_snapshot.yaml`, so a run always carries the parameters that produced it.
+
+A few enum vocabularies are fixed in `workflow_config.py`:
+
+| Enum | Allowed values |
+|---|---|
+| coupling pruning `strategy` | `fij`, `cij`, `sca` |
+| field pruning `strategy` | `fia`, `dia` |
+| `Dia_prior` | `gap-corrected`, `uniform` |
+| `sector` | `emily`, `rama`, `none` |
+| `train.mode` | `BM`, `SBM` |
+| `train.optimizer` | `LBFGS`, `GD` |
+| `mpnn.controls` | `wt`, `random`, `shuffled`, `natural`, `none` |
+
+---
+
+## Top-level keys
+
+| Key | Default | Required | Description / notes |
+|---|---|---|---|
+| `run_name` | — | **yes** | Identifier for the run; also the default results subdir (`results/<run_name>/`). Must be non-empty. |
+| `msa` | — | **yes** | Path to the input MSA `.npy` (`int` array, shape `(N_seq, L)`, alphabet `-ACDEFGHIKLMNPQRSTVWY`, gap=0). Relative to the repo root. |
+| `description` | `""` | no | Free-text label carried into provenance. |
+| `family` | `""` | no | Protein family tag (e.g. `CM`); used only for organizing/labelling. |
+| `seed` | `42` | no | **Master seed.** Seeds the Python RNG and the C++ MCMC kernels (per-thread seed = `seed + thread_id`). The `sample` rule derives a per-temperature seed `seed + temperature_index`; `mpnn` inherits it unless `mpnn.seed` is set. |
+| `omp_num_threads` | `null` | no | OpenMP thread count, pinned **before** the MCMC kernel imports. **`null` ⇒ runs are *not* bit-reproducible** even with a fixed `seed` (thread count varies). Set to a fixed int (e.g. `8`) for bit-identical arrays. See "Reproducibility" below. |
+
+Then six nested sections: `msa_stats`, `pruning`, `train`, `sample`, `figures`,
+`mpnn`. Each may be omitted entirely (the schema default applies).
+
+---
+
+## `msa_stats` — the MSA-only figure
+
+Computes the data-side statistics figure (`<run_dir>/msa_stats.pdf`:
+`f_iᵃ`, `D_iᵃ`, `‖f_ij‖_F`, SCA heatmaps). **Independent of training** — it
+reads only the MSA, so it can be rendered without any model
+(`snakemake ... msa_stats_only`).
+
+| Key | Default | Description / notes |
+|---|---|---|
+| `enabled` | `true` | Set `false` to skip the MSA figure entirely. |
+| `theta` | `0.7` | Sequence-reweighting threshold (fractional Hamming distance): near-identical sequences are clustered so each cluster contributes ~1 effective sequence. |
+| `lbda` | `0.03` | Pseudocount for frequency/SCA estimation (additive smoothing toward the background). `0` = raw empirical frequencies. |
+| `Dia_prior` | `gap-corrected` | Background distribution for the `D_iᵃ` (KL-divergence) panel. `gap-corrected` uses the alignment's empirical gap rate + standard 20-AA frequencies; `uniform` uses `1/21` per state. |
+| `sector` | `emily` | Which CM sector to annotate. `emily` and `rama` are two nearly-identical hand-curated residue sets for chorismate mutase (defined in `CM_sector.py`); `none` draws no sector strip. **Only meaningful for the CM family (L=96)** — use `none` for other proteins. |
+
+---
+
+## `pruning` — coupling (J) and field (h) masks
+
+Builds binary masks that zero out selected `J`/`h` parameters during training
+(the gradient is multiplied by the mask each step). Masks are ranked by a
+per-strategy importance score; the strongest entries are kept.
+
+> **If `enabled: false`, the entire section is ignored** — no `build_mask_*`
+> rules run and `couplings`/`fields`/`theta`/`lbda`/etc. have no effect. You can
+> leave them in the file as documentation.
+
+| Key | Default | Description / notes |
+|---|---|---|
+| `enabled` | `false` | Master switch. When `true`, **at least one of `couplings`/`fields` must be set** (validated). |
+| `theta` | `0.7` | Reweighting threshold for mask construction, applied with **identity semantics**: the code passes `1 − theta` as the distance threshold (`build_mask.py:286`), so `0.7` clusters sequences sharing ≥70% identity. (Contrast `train.theta`, which is a *distance* threshold passed directly — the two sections express the same quantity differently.) Always uses the gaps-included weighting path. |
+| `lbda` | `0.03` | Pseudocount for the frequency/correlation/SCA matrices the strategies rank on. |
+| `label` | `"CM"` | String embedded in the auto-generated mask filename and manifest. Provenance only — no effect on mask values. |
+| `Dia_prior` | `gap-corrected` | Background for the `dia` field strategy (same meaning as in `msa_stats`). Irrelevant unless `fields.strategy: dia`. |
+| `couplings` | `null` | `{ strategy: <fij\|cij\|sca>, percent: <0–100> }` or omit/`null` to leave J unpruned. |
+| `fields` | `null` | `{ strategy: <fia\|dia>, percent: <0–100> }` or omit/`null` to leave h unpruned. |
+
+**Coupling strategies** (`couplings.strategy`) — rank pairs `(i,j)`:
+- `fij` — raw second-order frequencies `f_ij(a,b)`.
+- `cij` — covariance `f_ij − f_i·f_j`.
+- `sca` — Statistical Coupling Analysis matrix (weighted, SCA-positional). Needs `pysca` (the `[sca]` optional-dependency group); `fij`/`cij` do not.
+
+**Field strategies** (`fields.strategy`) — rank positions `(i,a)`:
+- `fia` — first-order frequencies `f_i(a)`.
+- `dia` — KL divergence `D_i(a)` of `f_i(a)` from `Dia_prior` (conservation/information content).
+
+> **`percent` is the percentage *pruned* (removed), not kept.** The mask keeps
+> the top-magnitude `(100 − percent)%` of parameters and zeros the rest
+> (`tokeep = total × (1 − percent/100)`, `build_mask.py:155,186`). So
+> `percent: 98.0` with `strategy: sca` keeps **the strongest 2%** of couplings
+> by SCA magnitude and prunes the other 98%. Higher `percent` ⇒ sparser model.
+
+---
+
+## `train` — the L-BFGS statistics-matching fit
+
+Both regimes share the L-BFGS algorithm and differ only in parameter values
+(Summary Note 3). `N_iter`, zero-initialized parameters, and inference
+temperature `T=1` are fixed; the schema **warns** (does not fail) if `mode` and
+the knobs disagree.
+
+| Parameter | BM (positive control) | SBM (stochastic regularization) |
+|---|---|---|
+| `m` (L-BFGS memory) | 20 | 1 |
+| `lambda_J`, `lambda_h` | 0.01 | 0 |
+| `N_chains` | 100 | 50 |
+
+| Key | Default (schema) | Description / notes |
+|---|---|---|
+| `mode` | `SBM` | `BM` or `SBM`. Selects the *intended regime* only — the actual behavior comes from the knobs below. Mismatch (e.g. `BM` with `m=1`) logs a WARN. |
+| `optimizer` | `LBFGS` | `LBFGS` (used by both BM and SBM) or `GD` (vanilla gradient descent; rarely needed — uses `alpha`/`Learning_rate`). |
+| `N_iter` | `400` | Number of L-BFGS iterations (outer loop). **Standard at 400** — convergence is usually reached by ~300–500. Think before changing. |
+| `N_chains` | `50` | MCMC chains used to estimate model statistics each gradient step. More chains = lower-variance gradient, slower step. BM=100, SBM=50. |
+| `m` | `1` | L-BFGS memory rank. Higher = better curvature approximation, more memory. BM=20, SBM=1. |
+| `lambda_J` | `0.0` | L2 penalty on couplings: `gradJ += 2·lambda_J·J`. BM=0.01, SBM=0. |
+| `lambda_h` | `0.0` | L2 penalty on fields: `gradh += 2·lambda_h·h`. BM=0.01, SBM=0. |
+| `theta` | `0.3` | Sequence-reweighting threshold (fractional Hamming distance): sequences closer than `theta` are clustered so each cluster contributes ~1 effective sequence. Lower `theta` ⇒ stricter clustering ⇒ larger effective count. |
+| `k_MCMC` | `100000` | Metropolis sweeps per chain per gradient step (the `tburn` argument to the C++ kernel). Governs how well each artificial alignment is equilibrated. **Standard at 1e5** — lowering it speeds the run but biases the gradient. |
+| `TestTrain` | `0` | `0` = train on all sequences; `1` = hold out a random 20% test split (recorded in `output["Test"]`, used only for evaluation/figures, never for optimization). **Required `1` to render the `energy`/`similarity`/`diversity`/`length` figures.** |
+| `record_every` | `5` | Record the coupling Frobenius norm (`J_norm`) every N iterations (feeds the `coupling_evol` figure). Cosmetic/diagnostic only. |
+| `ignore_gaps` | `false` | How gaps enter the reweighting distance. `false` ⇒ gaps count as a 21st state (`pdist` Hamming over all L columns); `true` ⇒ gaps are excluded (distance over non-gap columns only). Either way the threshold is `theta`. |
+
+Inference temperature is **always `T=1`** during training (the model is meant to
+reproduce the data statistics at T=1); it is not configurable here. Sampling
+temperatures are a separate downstream step — see `sample`.
+
+---
+
+## `sample` — synthetic alignments from the trained model
+
+Writes one `synthetic/align_T<temp>.npy` per temperature (plus a JSON sidecar).
+
+| Key | Default | Description / notes |
+|---|---|---|
+| `N` | `2000` | Sequences sampled **per temperature** (not a total split across temperatures). With `temperatures: [0.75, 1.0]` and `N: 2000` you get 2000 sequences at each T. |
+| `temperatures` | `[0.75, 1.0]` | Sampling temperatures (all `> 0`, must be unique). The two-T default is deliberate: **T=0.75** (low-T, mode-collapsed) vs **T=1.0** (the model's native fit). Every multi-temperature figure compares them, so changing this changes what the figures show. |
+
+---
+
+## `figures` — which figures to render
+
+| Key | Default | Description / notes |
+|---|---|---|
+| `which` | `null` | `null` = render every figure whose required data is present (auto-skip the rest). A list (e.g. `[coupling_evol, params]`) renders exactly that subset — and **errors** if a requested figure's data is missing. |
+| `sector` | `emily` | Sector strip drawn on the `params` figure (`emily`/`rama`/`none`; same as `msa_stats.sector`, CM-only). |
+
+Figure names and their data requirements:
+
+| Figure | Requires | Notes |
+|---|---|---|
+| `coupling_evol` | `model.npy` only | Always renderable. `J_norm` trajectory. |
+| `params` | `model.npy` only | Always renderable. `h`/`J` heatmaps + sector strip. |
+| `correlations` | ≥1 synthetic alignment | One figure, rows = temperatures × cols = 1st/2nd/3rd-order stats. |
+| `pca` | ≥1 synthetic alignment | 1×(1+N_temps) PCA panels. |
+| `energy` | `TestTrain: 1` | Energy histograms; overlays every available temperature. |
+| `similarity` | `TestTrain: 1` | Sequence-similarity violins. |
+| `diversity` | `TestTrain: 1` | Sequence-diversity violins. |
+| `length` | `TestTrain: 1` | Sequence-length histograms. |
+| `mpnn` | `mpnn` sweep present + scored | ProteinMPNN foldability; auto-detected from the sweep dir. |
+
+---
+
+## `mpnn` — ProteinMPNN foldability sweep
+
+A temperature-ladder sampling + scoring sweep against a reference structure.
+Outputs land in `<run_dir>/synthetic/mpnn_sweep_seed<seed>/`.
+
+> **If `enabled: false`, the whole section is ignored** (no sweep, no `mpnn`
+> figure). When `enabled: true` *and* `skip_scoring: false`, scoring needs the
+> upstream `dauparas/ProteinMPNN` repo — set `PROTEINMPNN_PATH` (or pass
+> `--mpnn-path`). See `docs/MPNN_FOLDABILITY.md`.
+
+| Key | Default | Description / notes |
+|---|---|---|
+| `enabled` | `true` | Master switch for the sweep + `mpnn` figure. |
+| `pdb` | `data/structures/1ECM.pdb` | Reference backbone scored against. |
+| `chain` | `A` | Chain in the PDB to score. |
+| `seed` | `null` | Sweep seed. `null` ⇒ inherit the run's master `seed`. |
+| `temperatures` | `[0.1 … 1.0]` (step 0.1) | The sampling ladder (all `> 0`). Lower T = sharper distribution near modes; T=1.0 = native fit. |
+| `N_per_T` | `100` | Sequences sampled per temperature (and per control group). |
+| `controls` | `[wt, random, shuffled, natural]` | Interpretability baselines: `wt` (wild-type), `random` (uniform AAs at non-gap columns), `shuffled` (per-row permutation of WT — composition preserved, structure destroyed), `natural` (bootstrap from the training MSA). `none` = no controls (use it alone). |
+| `model_name` | `v_48_020` | ProteinMPNN weight file basename (`vanilla_model_weights/<name>.pt`); `v_48_020` = the soluble model at 0.20 Å backbone noise. |
+| `skip_scoring` | `false` | `true` ⇒ generate the sweep alignments + manifest but **skip the torch/ProteinMPNN scoring**. Used by the smoke test (`params_tiny.yaml`) so it needs no torch or `PROTEINMPNN_PATH`. No `mpnn_scores.json`, so the `mpnn` figure won't render. |
+
+---
+
+## Reproducibility
+
+Bit-identical re-runs require **all three** of: a fixed `seed`, a fixed
+`omp_num_threads`, and a fixed `train.N_chains`. The shipped configs leave
+`omp_num_threads: null`, so by default the arrays inside `model.npy` are *not*
+guaranteed bit-identical across machines/runs (the manifest records what was
+actually used). Note that `model.npy` *bytes* are never identical even when the
+arrays are — it stores wall-clock execution times. Compare arrays, not pickles.
+
+## See also
+
+- `src/SBM/workflow_config.py` — the validated schema (single source of truth).
+- `CLAUDE.md` (repo root) — pipeline overview, data flow, gotchas.
+- `pruning/README.md` — pruning strategies in depth.
+- `docs/MPNN_FOLDABILITY.md` — ProteinMPNN setup and score interpretation.
+- `config/params_tiny.yaml` — minimal end-to-end smoke-test config.
+- `config/params_CM-bm-pruned.yaml` — the CM BM positive-control worked example.
