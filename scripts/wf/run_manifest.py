@@ -47,6 +47,8 @@ manifest = {
     "env": provenance.env_block(provenance.omp_threads_requested()),
     "artifacts": {
         "config_snapshot": _file_ref(run_root / "config_snapshot.yaml"),
+        "encoded_msa": _file_ref(run_root / "inputs" / "msa.npy"),
+        "encode_manifest": _file_ref(run_root / "inputs" / "msa_manifest.json"),
         "model": _file_ref(run_root / "model.npy"),
         "train_manifest": _file_ref(run_root / "manifest.json"),
         "msa_stats_figure": _file_ref(run_root / "msa_stats.pdf"),

@@ -24,7 +24,7 @@ prune_J = snakemake.params.prune_J  # noqa: F821
 prune_h = snakemake.params.prune_h  # noqa: F821
 
 train_sbm.run_SBM(
-    Input_MSA=cfg.msa,
+    Input_MSA=snakemake.input.msa,  # noqa: F821 (run-local encoded MSA from encode_msa)
     fam=cfg.family or cfg.run_name,
     Model=cfg.train.mode,
     train_file=None,

@@ -25,18 +25,26 @@ IFS=$'\n\t'
 # Requires the [sca] optional extra (`pip install -e ".[sca]"`).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
-FULL_CM_ALG="${REPO_ROOT}/data/MSA_array/MSA_CM.npy"
+CM_FASTA="${REPO_ROOT}/data/fasta/CM.fasta"
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
+
+MASK_LOG="$(mktemp -t cm_example_mask.XXXXXX)"
+TRAIN_LOG="$(mktemp -t cm_example_train.XXXXXX)"
+MSA_TMP_DIR="$(mktemp -d -t cm_example_msa.XXXXXX)"
+trap 'rm -rf "${MASK_LOG}" "${TRAIN_LOG}" "${MSA_TMP_DIR}"' EXIT
+
+# 0. Encode the aligned FASTA into the integer MSA (.npy) the steps below
+#    consume. The FASTA is the immutable source of truth; the array is a
+#    derived artifact (the pipeline's encode_msa rule does the same thing).
+FULL_CM_ALG="${MSA_TMP_DIR}/MSA_CM.npy"
+python "${REPO_ROOT}/scripts/encode_msa.py" --fasta "${CM_FASTA}" --out "${FULL_CM_ALG}"
 
 # 1. Build pruning masks from the full alignment (98% of params zeroed
 #    per kind). Couplings: SCA (the conserved-correlation strategy);
 #    fields: Dia (the per-site KL-divergence strategy). build_mask.py
 #    creates "<path>/<run-id>/" and prints "Run dir: <abs path>" to
 #    stdout; we scrape that to find the mask files.
-MASK_LOG="$(mktemp -t cm_example_mask.XXXXXX)"
-TRAIN_LOG="$(mktemp -t cm_example_train.XXXXXX)"
-trap 'rm -f "${MASK_LOG}" "${TRAIN_LOG}"' EXIT
 
 python build_mask.py \
     --alg "${FULL_CM_ALG}" \

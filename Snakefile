@@ -19,7 +19,7 @@ import sys
 from SBM import workflow_config as wc
 
 # ── Config: validate, reject unknown keys ────────────────────────────────
-if "run_name" not in config or "msa" not in config:
+if "run_name" not in config or "msa_fasta" not in config:
     sys.exit(
         "ERROR: missing config. Invoke with a config file, e.g.\n"
         "  snakemake --configfile config/params_CM-bm-pruned.yaml --cores 8 all"
@@ -31,7 +31,12 @@ RUN_NAME = cfg.run_name
 RUN_ROOT = config.get("run_root") or f"results/{RUN_NAME}"
 
 # ── Path scheme (all rooted under RUN_ROOT) ──────────────────────────────
-MSA            = cfg.msa  # input; relative to the dir Snakemake is run from
+# The MSA enters as an aligned FASTA (raw, immutable input) and is encoded
+# into a run-local integer .npy by the `encode_msa` rule; every downstream
+# rule consumes that derived array (MSA), never the FASTA directly.
+MSA_FASTA      = cfg.msa_fasta  # input; relative to the dir Snakemake is run from
+MSA            = f"{RUN_ROOT}/inputs/msa.npy"            # derived: encode_msa output
+ENCODE_MANIFEST = f"{RUN_ROOT}/inputs/msa_manifest.json"
 CONFIG_SNAP    = f"{RUN_ROOT}/config_snapshot.yaml"
 MSA_STATS_PDF  = f"{RUN_ROOT}/msa_stats.pdf"        # top level: render deletes figs/
 MASK_J         = f"{RUN_ROOT}/masks/J_mask.npy"
@@ -89,6 +94,26 @@ rule snapshot_config:
         runtime=2,
     script:
         "scripts/wf/run_snapshot_config.py"
+
+
+# ── Encode the aligned FASTA into a run-local integer MSA (.npy) ─────────
+# Raw FASTA in, derived array out (+ a manifest recording the input hash
+# and any sequences dropped for non-canonical residues). Every rule below
+# depends on this output, not on the FASTA.
+rule encode_msa:
+    input:
+        fasta=MSA_FASTA,
+    output:
+        npy=MSA,
+        manifest=ENCODE_MANIFEST,
+    log:
+        f"{RUN_ROOT}/logs/encode_msa.log"
+    threads: 1
+    resources:
+        mem_mb=2000,
+        runtime=10,
+    script:
+        "scripts/wf/run_encode_msa.py"
 
 
 # ── MSA-only statistics figure (independent of any model) ────────────────
@@ -244,6 +269,7 @@ rule render:
 rule run_manifest:
     input:
         CONFIG_SNAP,
+        ENCODE_MANIFEST,
         TRAIN_MANIFEST,
         FIGS_DIR,
         *([MSA_STATS_PDF] if cfg.msa_stats.enabled else []),

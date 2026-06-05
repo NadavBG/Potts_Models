@@ -8,7 +8,7 @@ setup_stage_logging(snakemake, "msa_stats")  # noqa: F821 (injected by Snakemake
 cfg = load_cfg_from_snakemake(snakemake)  # noqa: F821
 
 argv = [
-    "--msa", cfg.msa,
+    "--msa", snakemake.input.msa,  # noqa: F821 (run-local encoded MSA from encode_msa)
     "--theta", str(cfg.msa_stats.theta),
     "--lbda", str(cfg.msa_stats.lbda),
     "--Dia-prior", cfg.msa_stats.Dia_prior,

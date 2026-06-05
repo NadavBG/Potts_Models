@@ -27,7 +27,7 @@ exact validated config is round-tripped into each run's
 A few enum vocabularies are fixed in `workflow_config.py`:
 
 | Enum | Allowed values |
-|---|---|
+| --- | --- |
 | coupling pruning `strategy` | `fij`, `cij`, `sca` |
 | field pruning `strategy` | `fia`, `dia` |
 | `Dia_prior` | `gap-corrected`, `uniform` |
@@ -41,9 +41,9 @@ A few enum vocabularies are fixed in `workflow_config.py`:
 ## Top-level keys
 
 | Key | Default | Required | Description / notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `run_name` | — | **yes** | Identifier for the run; also the default results subdir (`results/<run_name>/`). Must be non-empty. |
-| `msa` | — | **yes** | Path to the input MSA `.npy` (`int` array, shape `(N_seq, L)`, alphabet `-ACDEFGHIKLMNPQRSTVWY`, gap=0). Relative to the repo root. |
+| `msa_fasta` | — | **yes** | Path (relative to the repo root) to the input MSA as an **aligned FASTA**. The `encode_msa` rule converts it once into a run-local integer array `<run_dir>/inputs/msa.npy` (alphabet `-ACDEFGHIKLMNPQRSTVWY`, gap=0, dtype int64), and every downstream stage consumes that array. The FASTA is treated as immutable raw input; the `.npy` is a derived, regenerable artifact. See "MSA input" below. |
 | `description` | `""` | no | Free-text label carried into provenance. |
 | `family` | `""` | no | Protein family tag (e.g. `CM`); used only for organizing/labelling. |
 | `seed` | `42` | no | **Master seed.** Seeds the Python RNG and the C++ MCMC kernels (per-thread seed = `seed + thread_id`). The `sample` rule derives a per-temperature seed `seed + temperature_index`; `mpnn` inherits it unless `mpnn.seed` is set. |
@@ -51,6 +51,27 @@ A few enum vocabularies are fixed in `workflow_config.py`:
 
 Then six nested sections: `msa_stats`, `pruning`, `train`, `sample`, `figures`,
 `mpnn`. Each may be omitted entirely (the schema default applies).
+
+### MSA input
+
+The pipeline starts from an **aligned FASTA** (`msa_fasta`), not a pre-encoded
+array. The `encode_msa` rule runs first and writes:
+
+- `<run_dir>/inputs/msa.npy` — the integer-encoded alignment consumed by
+  `msa_stats`, the pruning mask builders, and `train`.
+- `<run_dir>/inputs/msa_manifest.json` — provenance: the input FASTA's sha256,
+  the output shape/hash, and the count + record IDs of any sequences dropped.
+
+Two things to know:
+
+- **Sequences with non-canonical residues are dropped.** Any record containing
+  a character outside `-ACDEFGHIKLMNPQRSTVWY` (lowercase, `BJOUXZ`, etc.) is
+  removed. The count and the dropped record IDs are logged at WARNING and
+  recorded in `msa_manifest.json`, so the drop is never silent — but the
+  encoded MSA may have fewer rows than the FASTA has records. (For the shipped
+  `data/fasta/CM.fasta`: 1259 records → 1258 kept, 1 dropped.)
+- **It must be a true alignment.** All records must have equal length; a ragged
+  FASTA is a hard error, not a truncated array.
 
 ---
 
@@ -62,7 +83,7 @@ reads only the MSA, so it can be rendered without any model
 (`snakemake ... msa_stats_only`).
 
 | Key | Default | Description / notes |
-|---|---|---|
+| --- | --- | --- |
 | `enabled` | `true` | Set `false` to skip the MSA figure entirely. |
 | `theta` | `0.7` | Sequence-reweighting threshold (fractional Hamming distance): near-identical sequences are clustered so each cluster contributes ~1 effective sequence. |
 | `lbda` | `0.03` | Pseudocount for frequency/SCA estimation (additive smoothing toward the background). `0` = raw empirical frequencies. |
@@ -82,7 +103,7 @@ per-strategy importance score; the strongest entries are kept.
 > leave them in the file as documentation.
 
 | Key | Default | Description / notes |
-|---|---|---|
+| --- | --- | --- |
 | `enabled` | `false` | Master switch. When `true`, **at least one of `couplings`/`fields` must be set** (validated). |
 | `theta` | `0.7` | Reweighting threshold for mask construction, applied with **identity semantics**: the code passes `1 − theta` as the distance threshold (`build_mask.py:286`), so `0.7` clusters sequences sharing ≥70% identity. (Contrast `train.theta`, which is a *distance* threshold passed directly — the two sections express the same quantity differently.) Always uses the gaps-included weighting path. |
 | `lbda` | `0.03` | Pseudocount for the frequency/correlation/SCA matrices the strategies rank on. |
@@ -116,13 +137,13 @@ temperature `T=1` are fixed; the schema **warns** (does not fail) if `mode` and
 the knobs disagree.
 
 | Parameter | BM (positive control) | SBM (stochastic regularization) |
-|---|---|---|
+| --- | --- | --- |
 | `m` (L-BFGS memory) | 20 | 1 |
 | `lambda_J`, `lambda_h` | 0.01 | 0 |
 | `N_chains` | 100 | 50 |
 
 | Key | Default (schema) | Description / notes |
-|---|---|---|
+| --- | --- | --- |
 | `mode` | `SBM` | `BM` or `SBM`. Selects the *intended regime* only — the actual behavior comes from the knobs below. Mismatch (e.g. `BM` with `m=1`) logs a WARN. |
 | `optimizer` | `LBFGS` | `LBFGS` (used by both BM and SBM) or `GD` (vanilla gradient descent; rarely needed — uses `alpha`/`Learning_rate`). |
 | `N_iter` | `400` | Number of L-BFGS iterations (outer loop). **Standard at 400** — convergence is usually reached by ~300–500. Think before changing. |
@@ -147,7 +168,7 @@ temperatures are a separate downstream step — see `sample`.
 Writes one `synthetic/align_T<temp>.npy` per temperature (plus a JSON sidecar).
 
 | Key | Default | Description / notes |
-|---|---|---|
+| --- | --- | --- |
 | `N` | `2000` | Sequences sampled **per temperature** (not a total split across temperatures). With `temperatures: [0.75, 1.0]` and `N: 2000` you get 2000 sequences at each T. |
 | `temperatures` | `[0.75, 1.0]` | Sampling temperatures (all `> 0`, must be unique). The two-T default is deliberate: **T=0.75** (low-T, mode-collapsed) vs **T=1.0** (the model's native fit). Every multi-temperature figure compares them, so changing this changes what the figures show. |
 
@@ -156,14 +177,14 @@ Writes one `synthetic/align_T<temp>.npy` per temperature (plus a JSON sidecar).
 ## `figures` — which figures to render
 
 | Key | Default | Description / notes |
-|---|---|---|
+| --- | --- | --- |
 | `which` | `null` | `null` = render every figure whose required data is present (auto-skip the rest). A list (e.g. `[coupling_evol, params]`) renders exactly that subset — and **errors** if a requested figure's data is missing. |
 | `sector` | `emily` | Sector strip drawn on the `params` figure (`emily`/`rama`/`none`; same as `msa_stats.sector`, CM-only). |
 
 Figure names and their data requirements:
 
 | Figure | Requires | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `coupling_evol` | `model.npy` only | Always renderable. `J_norm` trajectory. |
 | `params` | `model.npy` only | Always renderable. `h`/`J` heatmaps + sector strip. |
 | `correlations` | ≥1 synthetic alignment | One figure, rows = temperatures × cols = 1st/2nd/3rd-order stats. |
@@ -187,7 +208,7 @@ Outputs land in `<run_dir>/synthetic/mpnn_sweep_seed<seed>/`.
 > `--mpnn-path`). See `docs/MPNN_FOLDABILITY.md`.
 
 | Key | Default | Description / notes |
-|---|---|---|
+| --- | --- | --- |
 | `enabled` | `true` | Master switch for the sweep + `mpnn` figure. |
 | `pdb` | `data/structures/1ECM.pdb` | Reference backbone scored against. |
 | `chain` | `A` | Chain in the PDB to score. |

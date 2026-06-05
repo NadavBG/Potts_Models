@@ -11,8 +11,16 @@ IFS=$'\n\t'
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../../.. && pwd)"
 
+# The MSA enters as an aligned FASTA; encode it into the integer .npy that
+# run_sbm.sh consumes (the FASTA is the source of truth, the array derived).
+MSA_TMP_DIR="$(mktemp -d -t cm_example_msa.XXXXXX)"
+trap 'rm -rf "${MSA_TMP_DIR}"' EXIT
+python "${REPO_ROOT}/scripts/encode_msa.py" \
+    --fasta "${REPO_ROOT}/data/fasta/CM.fasta" \
+    --out "${MSA_TMP_DIR}/MSA_CM.npy"
+
 bash "${REPO_ROOT}/scripts/run_sbm.sh" \
     SBM \
-    "${REPO_ROOT}/data/MSA_array/MSA_CM.npy" \
+    "${MSA_TMP_DIR}/MSA_CM.npy" \
     --label CM-example \
     "$@"

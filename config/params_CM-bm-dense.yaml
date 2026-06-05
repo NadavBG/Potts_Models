@@ -5,7 +5,7 @@
 # or
 #   snakemake --configfile config/params_CM-bm-pruned.yaml --cores 8 all
 
-run_name: CM-bm-pruned
+run_name: CM-bm-dense
 description: CM BM positive control, SCA-J + Dia-h pruning at 98%
 family: CM
 msa_fasta: data/fasta/CM.fasta
@@ -20,7 +20,7 @@ msa_stats:                     # MSA-only figure; independent of training
   sector: emily
 
 pruning:
-  enabled: true
+  enabled: false
   theta: 0.7
   lbda: 0.03
   label: CM

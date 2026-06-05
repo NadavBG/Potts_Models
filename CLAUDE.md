@@ -46,6 +46,9 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 ## Data flow
 
 ```
+aligned FASTA (msa_fasta)
+   │
+   ▼  load_fasta  (encode_msa rule → <run_dir>/inputs/msa.npy; non-canonical seqs dropped)
 MSA (.npy)
    │
    ▼  CalcWeights, CalcStatsWeighted
@@ -95,7 +98,7 @@ The `workflow` extra adds Snakemake + PyYAML for the pipeline (below). It instal
 snakemake --configfile config/params_tiny.yaml --cores 8 all
 ```
 
-It exercises the whole DAG — mask → train → sample(×2) → mpnn → render → manifest, plus the independent `msa_stats` branch — and lands deterministic outputs under `results/tiny/` (assert on `model.npy`, `manifest.json`, `synthetic/align_T*.npy`, `figs/*.pdf`, `msa_stats.pdf`, `run_manifest.json`). The legacy `bash pruning/CM_example.sh` still works but is superseded by the pipeline.
+It exercises the whole DAG — encode_msa → mask → train → sample(×2) → mpnn → render → manifest, plus the independent `msa_stats` branch — and lands deterministic outputs under `results/tiny/` (assert on `inputs/msa.npy`, `model.npy`, `manifest.json`, `synthetic/align_T*.npy`, `figs/*.pdf`, `msa_stats.pdf`, `run_manifest.json`). The legacy `bash pruning/CM_example.sh` still works but is superseded by the pipeline.
 
 **Pruning workflow** lives in `pruning/` with its own `README.md` and `CM_example.sh`. The `"sca"` strategy depends on `pysca`, gated behind the `[sca]` optional-dependency group; `"fij"` and `"cij"` don't need it.
 
@@ -112,7 +115,7 @@ snakemake --configfile config/params_CM-bm-pruned.yaml \
 ```
 
 - **Run dirs:** `RUN_ROOT = config.get("run_root") or results/<run_name>/`. The iteration helper mints `results/<run_name>/iter-NNN-<tag>/` (history-preserving) and updates a `latest` symlink. Re-running Snakemake against the same `run_root` overwrites in place (Snakemake re-runs only stages whose inputs changed); start a new iteration to keep the old one.
-- **Rules:** `snapshot_config`, `msa_stats` (MSA-only — no model dependency, the fix for "can't make the MSA figure without inference"), `build_mask_J`/`build_mask_h` (only when `pruning.enabled`), `train`, `sample` (one job per temperature → `synthetic/align_T<temp>.npy`), `mpnn_sweep` (only when `mpnn.enabled`), `render` (`figs/`), `run_manifest`. Target `msa_stats_only` renders just the MSA figure with no training.
+- **Rules:** `snapshot_config`, `encode_msa` (aligned FASTA `msa_fasta` → `<run_dir>/inputs/msa.npy` + `inputs/msa_manifest.json`; every MSA-consuming rule depends on this, not on the FASTA), `msa_stats` (MSA-only — no model dependency, the fix for "can't make the MSA figure without inference"), `build_mask_J`/`build_mask_h` (only when `pruning.enabled`), `train`, `sample` (one job per temperature → `synthetic/align_T<temp>.npy`), `mpnn_sweep` (only when `mpnn.enabled`), `render` (`figs/`), `run_manifest`. Target `msa_stats_only` renders just the MSA figure with no training.
 - **MSA figure lands at** `<run_dir>/msa_stats.pdf` (run-dir top level, NOT under `figs/`, because `render` deletes+regenerates `figs/` each call).
 - **Provenance chain:** `config_snapshot.yaml` (exact validated params) → `manifest.json` (training; input hashes incl. mask paths, options, seed, git) → `figs/inputs/sources.json` (model + synthetic sha256s per figure) + each PDF's `sbm_run_id` keyword → `run_manifest.json` (aggregate). `iteration_note.md` carries the human hypothesis.
 - **Determinism:** the `sample` rule passes `--seed (master_seed + temp_index)` to reproduce the old multi-T `t_seed = seed+i` offset. `run_train.py` pins `OMP_NUM_THREADS` before importing the MCMC kernel **only when `omp_num_threads` is set** in the config; the shipped configs leave it `null`, so default runs are not bit-identical (set it to a fixed int for reproducible arrays).

@@ -79,10 +79,11 @@ Anything after `--` is forwarded verbatim to scripts/train_sbm.py, so
 you can reach the long tail of options (e.g. --optimizer GD,
 --ParamInit, --record_every).
 
-Examples:
-    bash scripts/run_sbm.sh SBM data/MSA_array/MSA_CM.npy --label CM-sbm
-    bash scripts/run_sbm.sh BM  data/MSA_array/MSA_CM.npy --label CM-bm
-    bash scripts/run_sbm.sh BM  data/MSA_array/MSA_CM.npy \
+Examples (MSA is an integer .npy — encode an aligned FASTA first with
+`python scripts/encode_msa.py --fasta data/fasta/CM.fasta --out msa.npy`):
+    bash scripts/run_sbm.sh SBM msa.npy --label CM-sbm
+    bash scripts/run_sbm.sh BM  msa.npy --label CM-bm
+    bash scripts/run_sbm.sh BM  msa.npy \
         --prune-J ./J_mask.npy --prune-h ./h_mask.npy --label CM-bm-pruned
 EOF
 }

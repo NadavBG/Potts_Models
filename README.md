@@ -124,7 +124,7 @@ Start from `config/params_CM-bm-pruned.yaml` (a full BM run with pruning + MPNN)
 
 ```yaml
 run_name: CM-bm-pruned          # required; names results/<run_name>/...
-msa: data/MSA_array/MSA_CM.npy  # required; numerical alignment (see "Inputs")
+msa_fasta: data/fasta/CM.fasta  # required; aligned FASTA, encoded to .npy by the encode_msa rule (see "Inputs")
 description: ""                 # free text, copied into manifests
 family: CM                      # enables CM catalytic-sector annotation in figures
 seed: 42                        # master RNG seed (training + sampling)
@@ -201,23 +201,29 @@ gap A C D E F G H I K L M N P Q R S T V W Y
  0  1 2 3 4 5 6 7 8 9 ...                  20      (q = 21)
 ```
 
-To convert a FASTA:
+The pipeline takes an **aligned FASTA** (the config's `msa_fasta` field) and encodes it to this array for you: the `encode_msa` rule writes `results/<run>/inputs/msa.npy` plus a manifest recording the input hash and any dropped sequences. To produce one by hand (e.g. for the lower-level CLIs below):
+
+```sh
+python scripts/encode_msa.py --fasta data/fasta/CM.fasta --out msa.npy
+```
+
+or programmatically (`load_fasta` logs and returns the rows it drops for non-canonical residues):
 
 ```python
 import numpy as np
 import SBM.utils.utils as ut
 
-MSA = ut.load_fasta("data/fasta/CM.fasta")    # silently drops non-canonical-residue rows
-np.save("data/MSA_array/MSA_CM.npy", MSA)
+MSA, dropped = ut.load_fasta("data/fasta/CM.fasta", return_dropped=True)
+np.save("msa.npy", MSA)
 ```
 
-Conventional layout (paths are conventional, not enforced — the config's `msa:` field takes any path):
+Conventional layout (the raw FASTA is the committed source of truth; encoded arrays are derived, per-run artifacts):
 
 ```text
 data/
-├── fasta/                         # raw inputs
-├── MSA_array/MSA_<fam>.npy        # numerical alignments
-└── structures/<pdb>.pdb           # PDBs for the ProteinMPNN sweep
+├── fasta/<fam>.fasta             # raw inputs (committed, immutable)
+└── structures/<pdb>.pdb          # PDBs for the ProteinMPNN sweep
+results/<run>/inputs/msa.npy      # derived integer alignment (one per run)
 ```
 
 Loading a trained model:
@@ -239,11 +245,14 @@ m["options0"] # subset of options (full set is in manifest.json)
 The pipeline calls a set of standalone CLIs; you can also drive them directly (this is what the old workflow did, and it still works). Each writes its own provenance.
 
 ```sh
+# Encode the aligned FASTA into the integer MSA the CLIs below consume:
+python scripts/encode_msa.py --fasta data/fasta/CM.fasta --out msa.npy
+
 # MSA statistics figure (MSA only — no model):
-python scripts/render_msa_stats.py --msa data/MSA_array/MSA_CM.npy --out msa_stats.pdf
+python scripts/render_msa_stats.py --msa msa.npy --out msa_stats.pdf
 
 # Train -> auto-named results/<fam>/<YYYY-MM-DD>_<label>_<idx>/ (use --run-dir to fix the path):
-bash scripts/run_sbm.sh BM data/MSA_array/MSA_CM.npy --label CM-example --prune-J <J_mask.npy> --prune-h <h_mask.npy>
+bash scripts/run_sbm.sh BM msa.npy --label CM-example --prune-J <J_mask.npy> --prune-h <h_mask.npy>
 
 # Sample synthetic alignments from a run:
 bash scripts/sample_sbm.sh results/CM/<run_id> --N 2000 --temperature 0.75 1.0
@@ -252,7 +261,7 @@ bash scripts/sample_sbm.sh results/CM/<run_id> --N 2000 --temperature 0.75 1.0
 bash scripts/render_sbm.sh results/CM/<run_id>
 
 # Build pruning masks:
-python pruning/build_mask.py --alg data/MSA_array/MSA_CM.npy --strategies sca dia --percent-J 98 --percent-h 98 --label CM --path ./prune_output
+python pruning/build_mask.py --alg msa.npy --strategies sca dia --percent-J 98 --percent-h 98 --label CM --path ./prune_output
 ```
 
 `run_sbm.sh` writes `model.npy`, `manifest.json`, and `command.sh`. `<MODE>` is `BM` or `SBM`; the two inputs you usually care about are the MSA path and the optional `--prune-J` / `--prune-h` masks. Anything after `--` is forwarded to `scripts/train_sbm.py` (run `python scripts/train_sbm.py --help` for the full flag list). `sample_sbm.sh` refuses to overwrite existing samples unless you pass `--force`. The legacy worked example `bash pruning/CM_example.sh` chains these together; it is superseded by `config/params_CM-bm-pruned.yaml`.

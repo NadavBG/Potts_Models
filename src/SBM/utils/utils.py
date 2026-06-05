@@ -7,6 +7,7 @@
 
 ####################### MODULES #######################
 import itertools as it
+import logging
 import SBM.MonteCarlo.MCMC_Potts.MonteCarlo_Potts as mc  # type: ignore
 import SBM.MonteCarlo.MCMC_PottsProf.MonteCarlo_PottsProf as mcp  # type: ignore
 import numpy as np  # type: ignore
@@ -14,6 +15,11 @@ from Bio import SeqIO  # type: ignore
 from tqdm import tqdm  # type: ignore
 from scipy.spatial.distance import squareform, pdist  # type: ignore
 import csv as csv
+
+log = logging.getLogger(__name__)
+
+#: Project-wide MSA alphabet: gap at index 0, then the 20 canonical AAs.
+MSA_ALPHABET = "-ACDEFGHIKLMNPQRSTVWY"
 
 ##########################################################
 ####################### LOAD FILES #######################
@@ -42,43 +48,66 @@ def csv_to_fasta(csv_path, fasta_path):
     ofile.close()
 
 
-def load_fasta(file):
-    """
-    Load a FASTA file and convert sequences into a numerical numpy array,
-    much faster than the original version.
-    """
-    # Define amino acid mapping
-    code = "-ACDEFGHIKLMNPQRSTVWY"
-    AA_to_num = {aa: i for i, aa in enumerate(code)}
+def load_fasta(file, *, dtype=np.int64, return_dropped=False):
+    """Load an *aligned* FASTA into an integer MSA array.
 
-    # Unknown or invalid characters → -1
-    invalid_chars = set("BJOUXZabcdefghijklmnopqrstuvwxyz")
-    for ch in invalid_chars:
-        AA_to_num[ch] = -1
+    Each residue is mapped to its index in :data:`MSA_ALPHABET`
+    (``-ACDEFGHIKLMNPQRSTVWY``; gap = 0). Sequences containing any
+    character outside that alphabet (including lowercase and the
+    ambiguity codes ``BJOUXZ``) are **dropped**; their record IDs are
+    logged at WARNING and returned when ``return_dropped=True`` so the
+    drop is never silent.
 
-    # Parse once
+    Requires a true alignment: every record must have the same length
+    as the first; ragged input raises ``ValueError`` rather than
+    producing a malformed array.
+
+    Args:
+        file: path to a FASTA file (passed to ``Bio.SeqIO.parse``).
+        dtype: integer dtype of the returned array (default ``int64``,
+            matching the rest of the package; values are 0..20).
+        return_dropped: if True, return ``(MSA, dropped_ids)``.
+
+    Returns:
+        The ``(n_kept, L)`` integer array, or ``(array, dropped_ids)``.
+    """
+    aa_to_num = {aa: i for i, aa in enumerate(MSA_ALPHABET)}
+
     records = list(SeqIO.parse(file, "fasta"))
     n_seq = len(records)
     if n_seq == 0:
-        raise ValueError("No sequences found in FASTA file.")
+        raise ValueError(f"No sequences found in FASTA file: {file}")
 
     seq_len = len(records[0].seq)
-    print(f"Nb of sequences: {n_seq}, sequence length: {seq_len}")
+    ragged = [(r.id, len(r.seq)) for r in records if len(r.seq) != seq_len]
+    if ragged:
+        raise ValueError(
+            f"{file} is not an alignment: {len(ragged)} record(s) differ in "
+            f"length from the first ({seq_len} cols); e.g. {ragged[:3]}"
+        )
 
-    # Preallocate numpy array (int8 is enough for 0–20 + -1)
-    MSA = np.empty((n_seq, seq_len), dtype=np.int8)
-
-    # Fill array efficiently
+    # Unmapped characters fall through to -1, which marks the row for dropping.
+    MSA = np.empty((n_seq, seq_len), dtype=dtype)
     for i, record in enumerate(records):
-        seq = str(record.seq)
-        MSA[i] = [AA_to_num.get(ch, -1) for ch in seq]
+        MSA[i] = [aa_to_num.get(ch, -1) for ch in str(record.seq)]
 
-    # Remove erroneous sequences (containing -1)
     valid_mask = np.all(MSA != -1, axis=1)
+    dropped_ids = [records[i].id for i in np.nonzero(~valid_mask)[0]]
     MSA = MSA[valid_mask]
 
-    print(f"Final shape: {MSA.shape}")
-    return MSA
+    log.info(
+        "load_fasta(%s): %d records, %d columns, %d kept, %d dropped",
+        file, n_seq, seq_len, MSA.shape[0], len(dropped_ids),
+    )
+    if dropped_ids:
+        log.warning(
+            "load_fasta dropped %d sequence(s) with non-canonical residues: %s%s",
+            len(dropped_ids),
+            dropped_ids[:10],
+            " ..." if len(dropped_ids) > 10 else "",
+        )
+
+    return (MSA, dropped_ids) if return_dropped else MSA
 
 
 def save_fasta_from_array(Model_file, fasta_file, Nb_seq=100):

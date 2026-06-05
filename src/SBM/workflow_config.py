@@ -238,7 +238,7 @@ class SBMRunConfig:
     """The complete, validated configuration for one pipeline run."""
 
     run_name: str
-    msa: str
+    msa_fasta: str
     description: str = ""
     family: str = ""
     seed: int = 42
@@ -263,7 +263,7 @@ class SBMRunConfig:
     def from_dict(cls, data: dict[str, Any]) -> "SBMRunConfig":
         _reject_unknown(cls, data, "config")
         _require("run_name" in data, "config: 'run_name' is required")
-        _require("msa" in data, "config: 'msa' is required")
+        _require("msa_fasta" in data, "config: 'msa_fasta' is required (path to an aligned FASTA)")
         nested = {
             "msa_stats": MsaStatsConfig,
             "pruning": PruningConfig,
@@ -278,6 +278,7 @@ class SBMRunConfig:
                 kwargs[key] = sub_cls.from_dict(data[key])
         obj = cls(**kwargs)
         _require(bool(obj.run_name), "config.run_name must be non-empty")
+        _require(bool(obj.msa_fasta), "config.msa_fasta must be non-empty")
         return obj
 
 

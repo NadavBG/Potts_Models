@@ -20,9 +20,14 @@ both ``Dia`` and ``SCA``, same alphabet (``-ACDEFGHIKLMNPQRSTVWY``).
 
 Output goes to ``data/figs/msa_stats_<msa-stem>.pdf`` by default.
 
+This CLI consumes a pre-encoded integer MSA (``.npy``). The pipeline
+produces one per run at ``<run_dir>/inputs/msa.npy`` (via the
+``encode_msa`` rule); pass that, or any array encoded with
+``SBM.utils.utils.load_fasta``.
+
 Usage::
 
-    python scripts/render_msa_stats.py --msa data/MSA_array/MSA_CM.npy \\
+    python scripts/render_msa_stats.py --msa <run_dir>/inputs/msa.npy \\
         [--theta 0.7] [--lbda 0.03] [--Dia-prior gap-corrected] \\
         [--sector emily|rama|none] [--out PATH]
 """

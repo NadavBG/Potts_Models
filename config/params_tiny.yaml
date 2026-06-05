@@ -9,7 +9,7 @@
 run_name: tiny
 description: Fast smoke test of the full pipeline DAG
 family: CM
-msa: data/MSA_array/MSA_CM.npy
+msa_fasta: data/fasta/CM.fasta
 seed: 42
 omp_num_threads: null
 

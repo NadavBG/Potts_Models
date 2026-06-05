@@ -9,7 +9,7 @@ cfg = load_cfg_from_snakemake(snakemake)  # noqa: F821
 
 spec = cfg.pruning.fields
 build_mask.main(
-    cfg.msa,
+    snakemake.input.msa,  # noqa: F821 (run-local encoded MSA from encode_msa)
     theta=cfg.pruning.theta,
     lbda=cfg.pruning.lbda,
     strategies=[spec.strategy],
