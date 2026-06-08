@@ -213,6 +213,8 @@ class MpnnConfig:
     controls: list[str] = field(default_factory=lambda: ["wt", "random", "shuffled", "natural"])
     model_name: str = "v_48_020"
     skip_scoring: bool = False
+    path: str | None = None  # ProteinMPNN clone; None → PROTEINMPNN_PATH env
+    python: str | None = None  # interpreter with torch; None → PROTEINMPNN_PYTHON env, else sys.executable
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MpnnConfig":

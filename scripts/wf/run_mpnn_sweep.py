@@ -1,8 +1,12 @@
 """Snakemake wrapper: ProteinMPNN foldability sweep (alternate sampling mode).
 
-Needs ``PROTEINMPNN_PATH`` set (or ``mpnn.path`` could be added) unless
-``mpnn.skip_scoring`` is true. The output dir name embeds the seed, which
-is deterministic from the config, so the rule can declare it as output.
+Unless ``mpnn.skip_scoring`` is true, scoring needs a ProteinMPNN clone
+and a torch-equipped interpreter. Either set them in the config
+(``mpnn.path`` / ``mpnn.python``) or via the ``PROTEINMPNN_PATH`` /
+``PROTEINMPNN_PYTHON`` environment variables; the config values, when
+present, win (they are forwarded as ``--mpnn-path`` / ``--mpnn-python``).
+The output dir name embeds the seed, which is deterministic from the
+config, so the rule can declare it as output.
 """
 
 from _common import load_cfg_from_snakemake, setup_stage_logging
@@ -29,6 +33,11 @@ argv = [
 ]
 if m.skip_scoring:
     argv.append("--mpnn-skip-scoring")
+else:
+    if m.path:
+        argv += ["--mpnn-path", m.path]
+    if m.python:
+        argv += ["--mpnn-python", m.python]
 
 rc = sample_sbm.main(argv)
 if rc:
