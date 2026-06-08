@@ -16,7 +16,7 @@ snakemake --configfile config/params_<run_name>.yaml --cores 8 all
 
 **How to read this doc.** Defaults below are the *schema* defaults from
 `workflow_config.py` (what you get if you omit the key). The values in the
-shipped configs (`params_CM-bm-pruned.yaml`, `params_tiny.yaml`) sometimes
+shipped configs (`params_CM-bm-dense.yaml`, `params_tiny.yaml`) sometimes
 differ — those are the BM positive-control regime, not the schema default.
 
 **Validation is strict.** `from_dict` **rejects unknown keys** (a typo'd key is
@@ -237,4 +237,4 @@ arrays are — it stores wall-clock execution times. Compare arrays, not pickles
 - `pruning/README.md` — pruning strategies in depth.
 - `docs/MPNN_FOLDABILITY.md` — ProteinMPNN setup and score interpretation.
 - `config/params_tiny.yaml` — minimal end-to-end smoke-test config.
-- `config/params_CM-bm-pruned.yaml` — the CM BM positive-control worked example.
+- `config/params_CM-bm-dense.yaml` — the CM BM positive-control worked example (no pruning; the `params_CM-bm-*` variants add coupling/field pruning).

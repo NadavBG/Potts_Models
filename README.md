@@ -21,10 +21,10 @@ source .venv/bin/activate
 uv pip install -e ".[plotting,analysis,dev,workflow]"
 
 # 3. run the whole pipeline from a config file
-python scripts/iter.py run CM-bm-pruned "first-try"
+python scripts/iter.py run CM-bm-dense "first-try"
 ```
 
-That last command reads `config/params_CM-bm-pruned.yaml`, creates a fresh run directory `results/CM-bm-pruned/iter-001-first-try/`, and builds everything into it: the MSA-statistics figure, the pruning masks, the trained model, synthetic alignments, all the figures, the ProteinMPNN sweep, and a provenance manifest.
+That last command reads `config/params_CM-bm-dense.yaml`, creates a fresh run directory `results/CM-bm-dense/iter-001-first-try/`, and builds everything into it: the MSA-statistics figure, the trained model, synthetic alignments, all the figures, the ProteinMPNN sweep, and a provenance manifest. (`CM-bm-dense` is a plain BM run with no pruning; the `params_CM-bm-*` variants under `config/` add coupling/field pruning.)
 
 To try the fast smoke-test config first (5 iterations, tiny everything — finishes in well under a minute):
 
@@ -120,10 +120,10 @@ The provenance chain is end-to-end and needs no extra bookkeeping from you:
 
 ## Writing a config
 
-Start from `config/params_CM-bm-pruned.yaml` (a full BM run with pruning + MPNN) or the minimal `config/params_tiny.yaml`. The schema is defined and validated in `src/SBM/workflow_config.py`. Fields, with defaults:
+Start from `config/params_CM-bm-dense.yaml` (a full BM run with MPNN, no pruning) or the minimal `config/params_tiny.yaml`. The schema is defined and validated in `src/SBM/workflow_config.py`. Fields, with defaults:
 
 ```yaml
-run_name: CM-bm-pruned          # required; names results/<run_name>/...
+run_name: CM-bm-dense           # required; names results/<run_name>/...
 msa_fasta: data/fasta/CM.fasta  # required; aligned FASTA, encoded to .npy by the encode_msa rule (see "Inputs")
 description: ""                 # free text, copied into manifests
 family: CM                      # enables CM catalytic-sector annotation in figures
@@ -264,7 +264,7 @@ bash scripts/render_sbm.sh results/CM/<run_id>
 python pruning/build_mask.py --alg msa.npy --strategies sca dia --percent-J 98 --percent-h 98 --label CM --path ./prune_output
 ```
 
-`run_sbm.sh` writes `model.npy`, `manifest.json`, and `command.sh`. `<MODE>` is `BM` or `SBM`; the two inputs you usually care about are the MSA path and the optional `--prune-J` / `--prune-h` masks. Anything after `--` is forwarded to `scripts/train_sbm.py` (run `python scripts/train_sbm.py --help` for the full flag list). `sample_sbm.sh` refuses to overwrite existing samples unless you pass `--force`. The legacy worked example `bash pruning/CM_example.sh` chains these together; it is superseded by `config/params_CM-bm-pruned.yaml`.
+`run_sbm.sh` writes `model.npy`, `manifest.json`, and `command.sh`. `<MODE>` is `BM` or `SBM`; the two inputs you usually care about are the MSA path and the optional `--prune-J` / `--prune-h` masks. Anything after `--` is forwarded to `scripts/train_sbm.py` (run `python scripts/train_sbm.py --help` for the full flag list). `sample_sbm.sh` refuses to overwrite existing samples unless you pass `--force`. The legacy worked example `bash pruning/CM_example.sh` chains these together; it is superseded by the config-driven pipeline (e.g. `config/params_CM-bm-dense.yaml`).
 
 ---
 

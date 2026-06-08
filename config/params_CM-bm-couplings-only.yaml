@@ -1,12 +1,11 @@
-# Worked example: CM, BM positive control — dense model (no pruning, no
-# stochastic regularization). The canonical end-to-end pipeline run.
+# CM, BM positive control — couplings-only model (all fields pruned).
 #
-#   python scripts/iter.py run CM-bm-dense "baseline"
+#   python scripts/iter.py run CM-bm-couplings-only "couplings-only"
 # or
-#   snakemake --configfile config/params_CM-bm-dense.yaml --cores 8 all
+#   snakemake --configfile config/params_CM-bm-couplings-only.yaml --cores 8 all
 
-run_name: CM-bm-dense
-description: Base CM model. no pruning, no stochastic regularization # No colons!
+run_name: CM-bm-coupling-only
+description: CM couplings only model (no fields)
 family: CM
 msa_fasta: data/fasta/CM.fasta
 seed: 42
@@ -20,13 +19,13 @@ msa_stats:                     # MSA-only figure; independent of training
   sector: emily
 
 pruning:
-  enabled: false
+  enabled: true
   theta: 0.7
   lbda: 0.03
   label: CM
   Dia_prior: gap-corrected
-  couplings: { strategy: sca, percent: 98.0 }
-  fields:    { strategy: dia, percent: 98.0 }
+  couplings: null
+  fields: { strategy: fia, percent: 100 }
 
 train:                         # BM regime (Summary Note 3)
   mode: BM

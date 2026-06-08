@@ -1,16 +1,15 @@
-# Worked example: CM, BM positive control, SCA-coupling + Dia-field pruning
-# at 98%. Reproduces the old pruning/CM_example.sh as a single pipeline run.
+# CM, BM positive control — f_ij-coupling pruning at 98% (fields unpruned).
 #
-#   python scripts/iter.py run CM-bm-pruned "sca98-baseline"
+#   python scripts/iter.py run CM-bm-Fij-98 "fij98"
 # or
-#   snakemake --configfile config/params_CM-bm-pruned.yaml --cores 8 all
+#   snakemake --configfile config/params_CM-bm-Fij-98.yaml --cores 8 all
 
-run_name: CM-bm-pruned
-description: CM BM positive control, SCA-J + Dia-h pruning at 98%
+run_name: CM-bm-Fij-98
+description: CM Fij-pruned at 98%
 family: CM
 msa_fasta: data/fasta/CM.fasta
 seed: 42
-omp_num_threads: null          # pin (e.g. 8) for bit-identical re-runs
+omp_num_threads: 8          # pin (e.g. 8) for bit-identical re-runs
 
 msa_stats:                     # MSA-only figure; independent of training
   enabled: true
@@ -25,8 +24,8 @@ pruning:
   lbda: 0.03
   label: CM
   Dia_prior: gap-corrected
-  couplings: { strategy: sca, percent: 98.0 }
-  fields:    { strategy: dia, percent: 98.0 }
+  couplings: { strategy: fij, percent: 98.0 }
+  fields: null
 
 train:                         # BM regime (Summary Note 3)
   mode: BM
@@ -50,7 +49,7 @@ figures:
   which: null                  # null = every figure whose data is present
   sector: emily
 
-mpnn:                          # on by default; needs PROTEINMPNN_PATH for scoring
+mpnn:                          # on by default; scoring needs path + python (or the env vars)
   enabled: true
   pdb: data/structures/1ECM.pdb
   chain: A
@@ -60,3 +59,5 @@ mpnn:                          # on by default; needs PROTEINMPNN_PATH for scori
   controls: [wt, random, shuffled, natural]
   model_name: v_48_020
   skip_scoring: false
+  path: ../ProteinMPNN         # clone of github.com/dauparas/ProteinMPNN; null → $PROTEINMPNN_PATH
+  python: /Users/nadav/miniforge3/envs/proteinmpnn/bin/python  # torch env (machine-specific); null → $PROTEINMPNN_PYTHON

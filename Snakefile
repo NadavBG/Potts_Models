@@ -22,7 +22,7 @@ from SBM import workflow_config as wc
 if "run_name" not in config or "msa_fasta" not in config:
     sys.exit(
         "ERROR: missing config. Invoke with a config file, e.g.\n"
-        "  snakemake --configfile config/params_CM-bm-pruned.yaml --cores 8 all"
+        "  snakemake --configfile config/params_CM-bm-dense.yaml --cores 8 all"
     )
 
 cfg = wc.from_dict({k: v for k, v in config.items() if k not in {"run_root"}})

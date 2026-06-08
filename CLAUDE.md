@@ -39,7 +39,7 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | Run-level provenance helpers | `src/SBM/provenance.py` |
 | The pruning CLI | `pruning/build_mask.py` (auto-names a per-run subdir; `--out-file PATH` writes a single mask to an exact path for the pipeline) |
 | The figure-save helpers | `scripts/lab_plotting.py` (`save_figure`, `panel_label`, `LAB_COLORS`) |
-| The CM worked example (pipeline) | `config/params_CM-bm-pruned.yaml`; the legacy `pruning/CM_example.sh` (chains `run_sbm.sh` → `sample_sbm.sh` → `render_sbm.sh`) still works |
+| The CM worked example (pipeline) | `config/params_CM-bm-dense.yaml` (plain BM, no pruning; the `params_CM-bm-*` variants add pruning); the legacy `pruning/CM_example.sh` (chains `run_sbm.sh` → `sample_sbm.sh` → `render_sbm.sh`) still works |
 
 `src/SBM/__init__.py` is empty by design — users import submodules directly (`SBM.SBM_GD.SBM_proteins`, `SBM.utils.utils`, `SBM.provenance`).
 
@@ -107,11 +107,11 @@ It exercises the whole DAG — encode_msa → mask → train → sample(×2) →
 One validated YAML config = one run. `config/params_<run_name>.yaml` drives the `Snakefile`; `src/SBM/workflow_config.py` validates it (unknown keys are an error) and the thin `scripts/wf/run_*.py` wrappers call the existing CLIs with deterministic output paths.
 
 ```
-python scripts/iter.py run CM-bm-pruned "sca98-baseline"     # mint iter dir + run everything
+python scripts/iter.py run CM-bm-dense "baseline"     # mint iter dir + run everything
 # equivalently, two steps:
-python scripts/iter.py new CM-bm-pruned "sca98-baseline"     # prints the snakemake command
-snakemake --configfile config/params_CM-bm-pruned.yaml \
-          --config run_root=results/CM-bm-pruned/iter-001-sca98-baseline --cores 8 all
+python scripts/iter.py new CM-bm-dense "baseline"     # prints the snakemake command
+snakemake --configfile config/params_CM-bm-dense.yaml \
+          --config run_root=results/CM-bm-dense/iter-001-baseline --cores 8 all
 ```
 
 - **Run dirs:** `RUN_ROOT = config.get("run_root") or results/<run_name>/`. The iteration helper mints `results/<run_name>/iter-NNN-<tag>/` (history-preserving) and updates a `latest` symlink. Re-running Snakemake against the same `run_root` overwrites in place (Snakemake re-runs only stages whose inputs changed); start a new iteration to keep the old one.
