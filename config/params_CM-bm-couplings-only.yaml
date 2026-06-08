@@ -4,7 +4,7 @@
 # or
 #   snakemake --configfile config/params_CM-bm-couplings-only.yaml --cores 8 all
 
-run_name: CM-bm-coupling-only
+run_name: CM-bm-couplings-only
 description: CM couplings only model (no fields)
 family: CM
 msa_fasta: data/fasta/CM.fasta
