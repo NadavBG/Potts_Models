@@ -474,6 +474,8 @@ def _render_one(
     run_id: str,
     sector_positions: list[int],
     mpnn_scores_path: Path | None = None,
+    max_seqs_per_group: int = 0,
+    subsample_seed: int | None = None,
 ) -> list[Path]:
     """Render one named figure and save the result(s) under ``figs_dir``.
 
@@ -489,6 +491,9 @@ def _render_one(
     Coupling_evol, Params, and the mpnn branch. ``natural_colors``
     carries Train/Test/Random colors. ``sector_positions`` is read only
     by the Params figure. ``mpnn_scores_path`` is read only by ``mpnn``.
+    ``max_seqs_per_group`` / ``subsample_seed`` are read only by the
+    ``similarity`` / ``diversity`` figures (they cap the O(N^2) all-pairs
+    computation; see ``utils_plot._subsample_rows``).
     """
     figs_dir.mkdir(parents=True, exist_ok=True)
     if name == "mpnn":
@@ -514,6 +519,8 @@ def _render_one(
         artificial=artificial,
         natural_colors=natural_colors,
         sector_positions=sector_positions,
+        max_seqs_per_group=max_seqs_per_group,
+        subsample_seed=subsample_seed,
     )
     after = set(plt.get_fignums())
     new_fignums = sorted(after - before)
@@ -677,6 +684,21 @@ def main(argv: list[str] | None = None) -> int:
             "whose data is missing is an error rather than a silent skip."
         ),
     )
+    parser.add_argument(
+        "--max-seqs-per-group",
+        type=int,
+        default=2000,
+        metavar="N",
+        help=(
+            "cap on sequences sampled per group before the O(N^2) "
+            "similarity / diversity all-pairs computations. Large natural "
+            "MSAs (e.g. ~26k PPIC) otherwise make these figures take "
+            "minutes; a few thousand sequences give faithful violins. "
+            "Subsampling is seeded with the run's master seed for "
+            "reproducibility. 0 disables the cap (use all sequences). "
+            "Default: 2000."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -822,6 +844,8 @@ def main(argv: list[str] | None = None) -> int:
                 run_id=run_id,
                 sector_positions=sector_positions,
                 mpnn_scores_path=mpnn_scores_path,
+                max_seqs_per_group=args.max_seqs_per_group,
+                subsample_seed=seed,
             )
             if paths:
                 rendered_names.append(name)

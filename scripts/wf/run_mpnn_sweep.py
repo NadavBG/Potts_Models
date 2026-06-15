@@ -30,6 +30,10 @@ argv = [
     "--mpnn-pdb", m.pdb,
     "--mpnn-chain", m.chain,
     "--mpnn-model-name", m.model_name,
+    # WT anchor = this run's own MSA reference (first record of msa_fasta).
+    # Without this the sweep falls back to the CM/1ECM default in
+    # mpnn_sweep.run, which mismatches any non-CM model's L.
+    "--mpnn-wt-fasta", cfg.msa_fasta,
 ]
 if m.skip_scoring:
     argv.append("--mpnn-skip-scoring")

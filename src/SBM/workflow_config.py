@@ -188,6 +188,12 @@ class SampleConfig:
 class FiguresConfig:
     which: list[str] | None = None
     sector: str = "emily"
+    # Cap on sequences sampled per group before the O(N^2) all-pairs
+    # similarity / diversity computations. Large natural MSAs (e.g. the
+    # ~26k-sequence PPIC alignment) otherwise make these figures take
+    # minutes; a few thousand sequences give faithful violins. The
+    # subsample is seeded with the run's master seed. 0 = no cap.
+    max_seqs_per_group: int = 2000
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "FiguresConfig":
@@ -197,6 +203,10 @@ class FiguresConfig:
         which = [str(w) for w in which] if which is not None else None
         obj = cls(which=which, **rest)
         _require(obj.sector in _SECTORS, f"figures.sector must be one of {_SECTORS}")
+        _require(
+            obj.max_seqs_per_group >= 0,
+            "figures.max_seqs_per_group must be >= 0 (0 = no cap)",
+        )
         return obj
 
 

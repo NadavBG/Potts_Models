@@ -235,6 +235,36 @@ def _flatten_for(key, arr, ind_pair):
     return arr.flatten()
 
 
+def _subsample_rows(align, max_n, rng, *, label):
+    """Randomly subsample alignment rows to bound O(N^2) figure cost.
+
+    ``Similarity`` and ``Diversity`` compute all-pairs distances, which
+    is O(N^2) in the number of sequences. For large natural MSAs (e.g.
+    the ~26k-sequence PPIC alignment) the natural ``Train`` group makes
+    these figures take many minutes and allocate multi-GB distance
+    arrays. Capping each group at ``max_n`` sequences keeps the violin
+    distributions faithful (a few thousand pairwise samples is ample)
+    while making the render fast.
+
+    Returns ``align`` unchanged when ``max_n`` is falsy (0/None → no
+    cap) or the alignment already has ``<= max_n`` rows. Otherwise draws
+    ``max_n`` distinct rows with ``rng`` (a seeded ``np.random.Generator``)
+    and returns them in ascending original-row order so the subsample is
+    deterministic given the seed.
+    """
+    n = int(align.shape[0])
+    if not max_n or n <= int(max_n):
+        return align
+    idx = np.sort(rng.choice(n, size=int(max_n), replace=False))
+    log.info(
+        "subsampling %s for O(N^2) figure: %d -> %d sequences (seeded)",
+        label,
+        n,
+        int(max_n),
+    )
+    return align[idx]
+
+
 def plot_stats(
     output,
     plot="Correlations",
@@ -242,6 +272,8 @@ def plot_stats(
     artificial=None,
     natural_colors=None,
     sector_positions=None,
+    max_seqs_per_group=0,
+    subsample_seed=None,
 ):
     """Render one figure for the requested plot mode.
 
@@ -510,18 +542,31 @@ def plot_stats(
         # compute_similarities returns distance d ∈ [0,1] (utils.py:564);
         # plot identity = 1 − d so higher = more similar to a natural.
         # Train is compared against itself with self excluded (utils.py:577).
+        #
+        # Subsample once to a fixed natural reference and reuse it for
+        # the Train-self panel AND as the reference for the Test /
+        # artificial panels, so every panel measures identity against
+        # the same-size natural pool (and the O(N·N_ref) cost is bounded
+        # for large MSAs). With ``max_seqs_per_group=0`` this is a no-op.
+        rng = np.random.default_rng(subsample_seed)
+        train_ref = _subsample_rows(
+            output["Train"], max_seqs_per_group, rng, label="natural (Train)"
+        )
         groups.append(
             _drop_non_finite(
-                1.0 - ut.compute_similarities(output["Train"]),
+                1.0 - ut.compute_similarities(train_ref),
                 label="Similarity[Train]",
             )
         )
         labels.append("Train")
         colors.append(natural_colors["Train"])
         if has_test:
+            test_q = _subsample_rows(
+                output["Test"], max_seqs_per_group, rng, label="natural (Test)"
+            )
             groups.append(
                 _drop_non_finite(
-                    1.0 - ut.compute_similarities(output["Test"], output["Train"]),
+                    1.0 - ut.compute_similarities(test_q, train_ref),
                     label="Similarity[Test]",
                 )
             )
@@ -529,9 +574,12 @@ def plot_stats(
             colors.append(natural_colors["Test"])
         for item in artificial:
             T = item["temperature"]
+            art_q = _subsample_rows(
+                item["align_mod"], max_seqs_per_group, rng, label=f"artificial T={T}"
+            )
             groups.append(
                 _drop_non_finite(
-                    1.0 - ut.compute_similarities(item["align_mod"], output["Train"]),
+                    1.0 - ut.compute_similarities(art_q, train_ref),
                     label=f"Similarity[Artificial T={T}]",
                 )
             )
@@ -553,18 +601,31 @@ def plot_stats(
         # the same gap-aware Hamming metric (utils.py:591). Higher =
         # more internally diverse alignment. Plotted as distance (not
         # flipped), so the y-axis name matches "Diversity".
+        #
+        # Within-set pairwise distance: a random row subsample is an
+        # unbiased estimate of the same distribution, so cap each group
+        # at ``max_seqs_per_group`` to bound the O(N^2) cost on large
+        # MSAs. Seeded so the natural-Train subset matches the one the
+        # Similarity figure draws (same seed, same first draw).
+        rng = np.random.default_rng(subsample_seed)
+        train_d = _subsample_rows(
+            output["Train"], max_seqs_per_group, rng, label="natural (Train)"
+        )
         groups.append(
             _drop_non_finite(
-                ut.compute_diversity(output["Train"]),
+                ut.compute_diversity(train_d),
                 label="Diversity[Train]",
             )
         )
         labels.append("Train")
         colors.append(natural_colors["Train"])
         if has_test:
+            test_d = _subsample_rows(
+                output["Test"], max_seqs_per_group, rng, label="natural (Test)"
+            )
             groups.append(
                 _drop_non_finite(
-                    ut.compute_diversity(output["Test"]),
+                    ut.compute_diversity(test_d),
                     label="Diversity[Test]",
                 )
             )
@@ -572,9 +633,12 @@ def plot_stats(
             colors.append(natural_colors["Test"])
         for item in artificial:
             T = item["temperature"]
+            art_d = _subsample_rows(
+                item["align_mod"], max_seqs_per_group, rng, label=f"artificial T={T}"
+            )
             groups.append(
                 _drop_non_finite(
-                    ut.compute_diversity(item["align_mod"]),
+                    ut.compute_diversity(art_d),
                     label=f"Diversity[Artificial T={T}]",
                 )
             )
