@@ -268,6 +268,113 @@ python pruning/build_mask.py --alg msa.npy --strategies sca dia --percent-J 98 -
 
 ---
 
+## Combining two models: energy of a sequence under both
+
+Once you have **two trained models** (e.g. two different families), you can score any sequence under *both* and report `E_A`, `E_B`, and the combined `E_tot = w_A·E_A + w_B·E_B`. This is a separate, two-model pipeline (`Snakefile.combine`); the design and the math are documented in `docs/initiate_two_model_energy.md`.
+
+The catch: a raw sequence is **not in either model's frame** (the two models have different aligned lengths and are non-homologous), so it must be aligned to each model independently. By default (`method: map`) each sequence is threaded into each model's frame the **same way** — the single best alignment per model — so `E_A` and `E_B` are computed by an identical procedure and are directly comparable. If you instead want the thermodynamically-principled energy that integrates over alignment uncertainty, `method: marginal` estimates the free energy by importance sampling and reports an effective sample size (ESS); see the method table.
+
+### Run it
+
+The combine pipeline reuses the **same environment** as the rest of the project (no extra dependencies). It needs two already-trained run directories. Everything is driven by one config:
+
+```sh
+# one command: mint an iteration dir under combine/ and run the whole thing
+python scripts/iter.py run combine-CM-PPIC "baseline" --snakefile Snakefile.combine
+
+# or drive Snakemake directly
+snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC.yaml --cores 8 all
+
+# fast smoke test first (a handful of sequences, seconds):
+snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --cores 4 all
+```
+
+Combine runs land under **`combine/<run_name>/`** — a separate (git-ignored) tree from the single-model `results/`, so dual-model runs never mix with single-model ones.
+
+### Write a combine config
+
+Copy `config/params_combine-CM-PPIC.yaml`. The schema is validated by `src/SBM/combine_config.py` (unknown keys are an error). Fields, with defaults:
+
+```yaml
+run_name: combine-CM-PPIC      # required; names combine/<run_name>/...
+description: ""
+seed: 42                       # required for the marginal estimator; logged
+omp_num_threads: null
+
+models:                        # required: exactly two {name, run_dir, weight}
+  - name: CM-bm-dense          # the EXACT model variant — labels the figure axes,
+    run_dir: results/CM-bm-dense/iter-002-base-model   # query groups, and manifests
+    weight: 1.0
+  - name: PPIC-dense
+    run_dir: results/PPIC-dense/iter-001-baseline
+    weight: 1.0
+
+query:
+  source: model_sets           # model_sets = each model's own natural + synthetic
+  include: [natural, synthetic]#   sequences; or `fasta` + `fasta: path/to.fasta`
+  fasta: null                  # used only when source: fasta
+  cap_per_group: 500           # seeded subsample per group (0 = no cap); bounds the
+                               #   marginal cost on large natural MSAs; drop is logged
+
+scoring:
+  method: map                  # auto | in_frame | map | marginal (see below). map is
+                               #   the default: same alignment procedure for both models
+  n_samples: 1000              # importance-sampling draws (used only by `marginal`)
+  ess_threshold: 100.0         # below this, a `marginal` estimate is flagged unreliable
+
+figures:
+  enabled: true                # one E_A-vs-E_B scatter + marginals, captioned with
+                               #   each model's exact run dir + sha256
+```
+
+To score **your own sequences** instead of the models' training/synthetic sets, set `query.source: fasta` and `query.fasta: path/to/your.fasta` (a normal amino-acid FASTA; mixed lengths are fine — each sequence is aligned to each model independently).
+
+**Methods** (`scoring.method`):
+
+| method | what it does | when |
+| --- | --- | --- |
+| `map` | **(default)** Viterbi-align to each model, full Potts energy on that single best path; same procedure for both models | you want the single best alignment + comparable `E_A`, `E_B` |
+| `marginal` | free energy `−log Σ_a e^(−E(x,a))` by importance sampling; reports ESS + MC stderr | the principled model-evidence; accounts for alignment ambiguity |
+| `in_frame` | exact Potts sum; requires the sequence already be in the model's frame | sequences already aligned to a model |
+| `auto` | `in_frame` (original MSA alignment) for a sequence's home model, `marginal` for the other | fast per-model scoring — **but** `E_A`/`E_B` use different aligners, so *not* comparable (it warns) |
+
+`map` is currently the *fields*-MAP (Viterbi under the HMM, which aligns using conservation but ignores the couplings `J`), so the alignment it picks is good but not guaranteed energy-optimal; a couplings-aware aligner (DCAlign) is the planned upgrade — see `docs/initiate_two_model_energy.md` §10.2.
+
+### What you get
+
+```text
+combine/<run_name>/iter-NNN-<tag>/
+├── config_snapshot.yaml   # the exact validated config
+├── models.json            # the two models: name, run_dir, sha256, length L, weight
+├── query/query.fasta      # the sequences scored (+ groups.json: origin + group per id)
+├── scores.tsv             # tidy, one row per (sequence × model): energy, ess, mc_stderr, ...
+├── scores_detail.json     # per sequence: E_A, E_B, E_tot, diagnostics, best alignment per model
+├── alignments.txt         # HUMAN-READABLE: each sequence's best alignment under EACH model,
+│                          #   stacked side-by-side, with both energies (see below)
+├── manifest.json          # scoring provenance: model hashes, method, seed, ESS summary, git
+├── figs/two_model_energy.pdf  # E_A vs E_B scatter, captioned with the exact models used
+└── run_manifest.json      # aggregate
+```
+
+`alignments.txt` is the file to read first. For every sequence it shows the raw query and how it threads into each model's frame, with both energies:
+
+```text
+### CM-bm-dense|natural|0   group=CM-bm-dense/natural   E_tot=-320.692
+  query (N=94): PQDCAGMVDIRAEIDML...
+  [CM-bm-dense]  E=-277.352  method=in_frame
+    PQDCAGMVDIRAEIDML...-VRAKERFEAML...  (L=96)
+  [PPIC-dense]  E=-43.340  method=marginal  ESS=1.0
+    -PQDCAG-MVDIRAEIDML...EKM-YRDLVNYF...  (L=91)
+```
+
+The two frames are independent (different lengths, not column-aligned). A native of one family sits low on its own model's axis and high on the other's.
+
+### Reading the ESS (only for `method: marginal`)
+
+ESS comes out of the importance-sampling pass, so it is reported only when you run `method: marginal` (the default `map` is a deterministic single alignment with no ESS). The marginal estimate is only as good as its ESS. **A low ESS is not always a problem:** when a sequence aligns essentially one way (e.g. a native in its own family), the alignment posterior is sharply peaked, ESS is near 1 *by construction*, and the marginal energy still agrees with the MAP and in-frame energies. A low ESS on a genuinely ambiguous cross-family alignment, on the other hand, means the estimate is dominated by one lucky sample and should be treated as an upper bound — raise `n_samples`, or upgrade to a Potts-aware proposal (DCAlign) / annealed importance sampling. Either way the run **warns loudly** and records the ESS in `scores.tsv`, `scores_detail.json`, and `manifest.json`; nothing is hidden.
+
+---
+
 ## Reproducibility
 
 - **`seed`** seeds the Python global RNG (test/train split, parameter init) **and** the C++ MCMC kernel (per-thread seed = `seed + thread_id`). Per-replicate seeds are derived via `np.random.SeedSequence(seed).spawn(N_av)`. The pipeline's per-temperature sampling uses `seed + temperature_index`.

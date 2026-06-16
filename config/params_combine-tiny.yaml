@@ -1,0 +1,32 @@
+# Fast end-to-end smoke test of the combine DAG (resolve_models -> build_query
+# -> score -> render -> manifest). Tiny per-group cap + few IS samples keep it
+# to seconds. Reuses the existing CM and PPIC dense models.
+#
+#   snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --cores 4 all
+
+run_name: combine-tiny
+description: Fast smoke test of the two-model combine pipeline
+seed: 42
+omp_num_threads: null
+
+models:
+  - name: CM-bm-dense
+    run_dir: results/CM-bm-dense/iter-002-base-model
+    weight: 1.0
+  - name: PPIC-dense
+    run_dir: results/PPIC-dense/iter-001-baseline
+    weight: 1.0
+
+query:
+  source: model_sets
+  include: [natural, synthetic]
+  cap_per_group: 4             # 4 sequences per group keeps the run tiny
+
+scoring:
+  method: marginal             # smoke-test the FFBS / importance-sampling path end-to-end
+                               # (the production default is 'map'; see params_combine-CM-PPIC)
+  n_samples: 50
+  ess_threshold: 100.0
+
+figures:
+  enabled: true

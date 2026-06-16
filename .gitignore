@@ -30,8 +30,12 @@ src/SBM/**/*.pyd
 # Run outputs ─────────────────────────────────────────────────────────────
 
 results/
+combine/
 pruning/masks/
 data/figs/
+
+# ── DCAlign integration spike (cloned Julia pkg + scratch driver) ────────
+dcalign_spike/
 
 # ── Snakemake working metadata ───────────────────────────────────────────
 .snakemake/

@@ -1,0 +1,49 @@
+# Two-model combine run: score CM & PPIC natural + synthetic sequences under
+# BOTH the CM and PPIC Potts models, and report E_CM, E_PPIC, E_tot.
+#
+#   python scripts/iter.py run combine-CM-PPIC "baseline" --snakefile Snakefile.combine
+# or
+#   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC.yaml --cores 8 all
+#
+# The two models are non-homologous and differ in length (CM L=96, PPIC L=91),
+# so a sequence is aligned to each model's frame independently — never trimmed
+# or padded to a common length.
+
+run_name: combine-CM-PPIC
+description: Cross-score CM and PPIC natural + synthetic under both models  # No colons!
+seed: 42
+omp_num_threads: null          # pin (e.g. 8) for reproducible per-sequence arrays
+
+models:                        # exactly two; E_tot = w_A*E_A + w_B*E_B.
+                               # `name` is the exact model variant (not just the
+                               # family) — it labels the figure axes, the query
+                               # groups, and the manifests, so you can tell which
+                               # CM / PPIC model this run used at a glance.
+  - name: CM-bm-dense
+    run_dir: results/CM-bm-dense/iter-002-base-model
+    weight: 1.0
+  - name: PPIC-dense
+    run_dir: results/PPIC-dense/iter-001-baseline
+    weight: 1.0
+
+query:
+  source: model_sets           # each model's natural + synthetic sets
+  include: [natural, synthetic]
+  cap_per_group: 300           # seeded subsample per group; bounds marginal cost
+                               # (PPIC natural is ~26k seqs). 0 = no cap. Drop logged.
+                               # Cost note: the cross-model marginal term is ~1-3 s
+                               # per sequence at n_samples=1000 (single-threaded), so
+                               # 300/group across ~6 groups is order tens of minutes.
+                               # Lower the cap or n_samples for a quicker first pass.
+
+scoring:
+  method: map                  # single best alignment per model, SAME procedure for
+                               # both → comparable E_A, E_B. (Currently fields-Viterbi;
+                               # see docs §10.2 on the couplings-aware upgrade.)
+                               # 'marginal' = the principled free energy + ESS (slower);
+                               # 'auto' = faster but breaks A/B comparability (warns).
+  n_samples: 1000              # importance-sampling draws (used only by 'marginal')
+  ess_threshold: 100.0         # below this, a 'marginal' estimate is flagged unreliable
+
+figures:
+  enabled: true                # single consolidated E_CM vs E_PPIC scatter + marginals

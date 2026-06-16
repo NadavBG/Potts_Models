@@ -1,0 +1,164 @@
+# Two-model `combine` pipeline.
+#
+# One validated YAML config = one combine run. Consumes two already-trained
+# models and scores a query set (each family's natural + synthetic sequences,
+# or an external FASTA) under both, writing E_A / E_B / E_tot.
+#
+#   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC.yaml --cores 8 all
+#
+# Combine runs land under combine/<run_name>/ — a separate, .gitignored tree
+# from the single-model results/, so dual-model runs never mix with single-model
+# ones. The iteration helper
+#   python scripts/iter.py run combine-CM-PPIC "<tag>" --snakefile Snakefile.combine
+# mints combine/<run_name>/iter-NNN-<tag>/ and passes run_root in.
+#
+# Runs inside the project's uv venv (no `conda:` directive), like the main
+# Snakefile; `threads`/`resources` declared on every rule for cluster use.
+
+import sys
+
+from SBM import combine_config as cc
+
+# ── Config: validate, reject unknown keys ────────────────────────────────
+if "run_name" not in config or "models" not in config:
+    sys.exit(
+        "ERROR: missing combine config. Invoke with a config file, e.g.\n"
+        "  snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC.yaml --cores 8 all"
+    )
+
+cfg = cc.from_dict({k: v for k, v in config.items() if k not in {"run_root"}})
+
+RUN_NAME = cfg.run_name
+RUN_ROOT = config.get("run_root") or f"combine/{RUN_NAME}"
+
+# ── Path scheme (all rooted under RUN_ROOT) ──────────────────────────────
+CONFIG_SNAP    = f"{RUN_ROOT}/config_snapshot.yaml"
+MODELS_JSON    = f"{RUN_ROOT}/models.json"
+QUERY_FASTA    = f"{RUN_ROOT}/query/query.fasta"
+QUERY_GROUPS   = f"{RUN_ROOT}/query/groups.json"
+SCORES         = f"{RUN_ROOT}/scores.tsv"
+SCORES_DETAIL  = f"{RUN_ROOT}/scores_detail.json"
+ALIGNMENTS     = f"{RUN_ROOT}/alignments.txt"
+SCORE_MANIFEST = f"{RUN_ROOT}/manifest.json"
+ENERGY_FIG     = f"{RUN_ROOT}/figs/two_model_energy.pdf"
+RUN_MANIFEST   = f"{RUN_ROOT}/run_manifest.json"
+
+
+# ── Aggregate target ──────────────────────────────────────────────────────
+rule all:
+    default_target: True
+    input:
+        CONFIG_SNAP,
+        MODELS_JSON,
+        QUERY_FASTA,
+        SCORES,
+        *([ENERGY_FIG] if cfg.figures.enabled else []),
+        RUN_MANIFEST,
+
+
+# ── Provenance: freeze the validated config into the run dir ─────────────
+rule snapshot_config:
+    output:
+        CONFIG_SNAP,
+    log:
+        f"{RUN_ROOT}/logs/snapshot_config.log"
+    threads: 1
+    resources:
+        mem_mb=256,
+        runtime=2,
+    script:
+        "scripts/wf/run_snapshot_config_combine.py"
+
+
+# ── Resolve the two referenced models (paths, hashes, L, seed MSAs) ──────
+rule resolve_models:
+    output:
+        MODELS_JSON,
+    log:
+        f"{RUN_ROOT}/logs/resolve_models.log"
+    threads: 1
+    resources:
+        mem_mb=2000,
+        runtime=10,
+    script:
+        "scripts/wf/run_resolve_models.py"
+
+
+# ── Assemble the query set into a (mixed-length) FASTA + groups sidecar ──
+rule build_query:
+    input:
+        models=MODELS_JSON,
+    output:
+        fasta=QUERY_FASTA,
+        groups=QUERY_GROUPS,
+    log:
+        f"{RUN_ROOT}/logs/build_query.log"
+    threads: 1
+    resources:
+        mem_mb=4000,
+        runtime=20,
+    script:
+        "scripts/wf/run_build_query.py"
+
+
+# ── Score every query sequence under both models ─────────────────────────
+rule score:
+    input:
+        models=MODELS_JSON,
+        fasta=QUERY_FASTA,
+        groups=QUERY_GROUPS,
+    output:
+        scores=SCORES,
+        detail=SCORES_DETAIL,
+        alignments=ALIGNMENTS,
+        manifest=SCORE_MANIFEST,
+    params:
+        run_root=RUN_ROOT,
+    log:
+        f"{RUN_ROOT}/logs/score.log"
+    threads: 4
+    resources:
+        mem_mb=8000,
+        runtime=240,
+    script:
+        "scripts/wf/run_score.py"
+
+
+# ── Consolidated energy figure (only when enabled) ───────────────────────
+if cfg.figures.enabled:
+
+    rule render_combine:
+        input:
+            scores=SCORES,
+            models=MODELS_JSON,
+        output:
+            ENERGY_FIG,
+        log:
+            f"{RUN_ROOT}/logs/render_combine.log"
+        threads: 1
+        resources:
+            mem_mb=4000,
+            runtime=30,
+        script:
+            "scripts/wf/run_render_combine.py"
+
+
+# ── Aggregate run manifest (last) ────────────────────────────────────────
+rule run_manifest:
+    input:
+        CONFIG_SNAP,
+        MODELS_JSON,
+        SCORES,
+        *([ENERGY_FIG] if cfg.figures.enabled else []),
+    output:
+        RUN_MANIFEST,
+    params:
+        run_root=RUN_ROOT,
+    log:
+        f"{RUN_ROOT}/logs/run_manifest.log"
+    threads: 1
+    resources:
+        mem_mb=512,
+        runtime=10,
+    script:
+        "scripts/wf/run_combine_manifest.py"

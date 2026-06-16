@@ -40,6 +40,9 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | The pruning CLI | `pruning/build_mask.py` (auto-names a per-run subdir; `--out-file PATH` writes a single mask to an exact path for the pipeline) |
 | The figure-save helpers | `scripts/lab_plotting.py` (`save_figure`, `panel_label`, `LAB_COLORS`) |
 | The CM worked example (pipeline) | `config/params_CM-bm-dense.yaml` (plain BM, no pruning; the `params_CM-bm-*` variants add pruning); the legacy `pruning/CM_example.sh` (chains `run_sbm.sh` → `sample_sbm.sh` → `render_sbm.sh`) still works |
+| Energy of a sequence under one/two models | `src/SBM/energy/` — `model.load_model` (loads + re-gauges), `potts.potts_energy` (in-frame, wraps `compute_energies`), `hmm.ProfileHMM` (alignment proposal: forward / Viterbi / FFBS), `score.score_sequence` / `score.score_two_models` (`method ∈ {in_frame, map, marginal}`). Spec: `docs/initiate_two_model_energy.md` |
+| The two-model scoring CLI | `scripts/score_two_models.py` (single sequence or batch FASTA → `E_A`, `E_B`, `E_tot` + diagnostics; `--method`, `--weights`, `--n-samples`, `--seed`) |
+| The two-model `combine` pipeline | `Snakefile.combine` driven by `config/params_combine-*.yaml` (validated by `src/SBM/combine_config.py`); run with `python scripts/iter.py run <name> "<tag>" --snakefile Snakefile.combine`. See "Combine pipeline" below. |
 
 `src/SBM/__init__.py` is empty by design — users import submodules directly (`SBM.SBM_GD.SBM_proteins`, `SBM.utils.utils`, `SBM.provenance`).
 
@@ -92,13 +95,23 @@ The `workflow` extra adds Snakemake + PyYAML for the pipeline (below). It instal
 
 **Python.** 3.11+ (`requires-python = ">=3.11"`).
 
-**Tests.** There is no unit-test suite. After non-trivial changes, run the pipeline smoke test (tiny config: 5 L-BFGS iters, 4 chains, N=50, MPNN with `skip_scoring`):
+**Tests.** The energy/scoring module (`src/SBM/energy/`) has a pytest suite at `tests/test_energy.py` — run it after touching that module:
+
+```
+.venv/bin/python -m pytest tests/test_energy.py -q
+```
+
+It is pure numpy/scipy (no MCMC) and covers spec §6 (gauge invariance, in-frame base case, MAP≈marginal when unambiguous, ordering sanity, IS diagnostics) plus the **DP anchor**: the profile-HMM forward log-Z, FFBS sample frequencies, marginal-IS estimate, and Viterbi path are all checked against *brute-force enumeration of every alignment* of a tiny query — this is the gold-standard check for `hmm.py`, so no `pyhmmer`/HMMER dependency is needed.
+
+The rest of the codebase has no unit-test suite. After non-trivial changes, run the pipeline smoke test (tiny config: 5 L-BFGS iters, 4 chains, N=50, MPNN with `skip_scoring`):
 
 ```
 snakemake --configfile config/params_tiny.yaml --cores 8 all
+# combine pipeline smoke test (scores a handful of CM+PPIC seqs under both models):
+snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --cores 4 all
 ```
 
-It exercises the whole DAG — encode_msa → mask → train → sample(×2) → mpnn → render → manifest, plus the independent `msa_stats` branch — and lands deterministic outputs under `results/tiny/` (assert on `inputs/msa.npy`, `model.npy`, `manifest.json`, `synthetic/align_T*.npy`, `figs/*.pdf`, `msa_stats.pdf`, `run_manifest.json`). The legacy `bash pruning/CM_example.sh` still works but is superseded by the pipeline.
+The first exercises the whole DAG — encode_msa → mask → train → sample(×2) → mpnn → render → manifest, plus the independent `msa_stats` branch — and lands deterministic outputs under `results/tiny/` (assert on `inputs/msa.npy`, `model.npy`, `manifest.json`, `synthetic/align_T*.npy`, `figs/*.pdf`, `msa_stats.pdf`, `run_manifest.json`). The legacy `bash pruning/CM_example.sh` still works but is superseded by the pipeline.
 
 **Pruning workflow** lives in `pruning/` with its own `README.md` and `CM_example.sh`. The `"sca"` strategy depends on `pysca`, gated behind the `[sca]` optional-dependency group; `"fij"` and `"cij"` don't need it.
 
@@ -120,6 +133,22 @@ snakemake --configfile config/params_CM-bm-dense.yaml \
 - **Provenance chain:** `config_snapshot.yaml` (exact validated params) → `manifest.json` (training; input hashes incl. mask paths, options, seed, git) → `figs/inputs/sources.json` (model + synthetic sha256s per figure) + each PDF's `sbm_run_id` keyword → `run_manifest.json` (aggregate). `iteration_note.md` carries the human hypothesis.
 - **Determinism:** the `sample` rule passes `--seed (master_seed + temp_index)` to reproduce the old multi-T `t_seed = seed+i` offset. `run_train.py` pins `OMP_NUM_THREADS` before importing the MCMC kernel **only when `omp_num_threads` is set** in the config; the shipped configs leave it `null`, so default runs are not bit-identical (set it to a fixed int for reproducible arrays).
 - **Cluster:** every rule declares `threads` + `resources(mem_mb, runtime)`, so a Snakemake Slurm/Midway profile can be added later without touching rules. Not wired yet (runs locally).
+
+## Combine pipeline (two-model energy)
+
+A **combine** run consumes two already-trained models and scores a query set under both, reporting `E_A`, `E_B`, and `E_tot = w_A·E_A + w_B·E_B` (spec: `docs/initiate_two_model_energy.md`). It is a separate entity from the single-model pipeline — its own validated schema (`src/SBM/combine_config.py`, `config/params_combine-*.yaml`) and its own `Snakefile.combine` — because the single-model config is one-model-per-run.
+
+```
+python scripts/iter.py run combine-CM-PPIC "baseline" --snakefile Snakefile.combine
+# or directly:
+snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC.yaml --cores 8 all
+```
+
+- **Rules:** `snapshot_config` → `resolve_models` (`models.json`: paths, sha256s, L, seed-MSA per model) → `build_query` (`query/query.fasta` + `query/groups.json`) → `score` (`scores.tsv` tidy long-form + `scores_detail.json` + `manifest.json`) → `render_combine` (`figs/two_model_energy.pdf`, one consolidated `E_A` vs `E_B` scatter + marginals) → `run_manifest`.
+- **Methods** (`scoring.method`): `map` (**default** for combine; Viterbi/fields-MAP — the single best alignment per model, same procedure for both → comparable `E_A`/`E_B`), `marginal` (importance-sampling free energy, spec §3.1 — the only mode that yields ESS + MC stderr; warns when ESS < threshold), `in_frame` (exact Potts sum, spec §2), and `auto` (in-frame via the original MSA alignment for a sequence's home model, marginal for the other — **breaks A/B comparability, so it warns**). `map` is currently *fields*-MAP (ignores couplings when choosing the alignment); a couplings-aware aligner (DCAlign) is the planned upgrade (spec §10.2). The HMM proposal is a **self-contained numpy profile HMM** (`src/SBM/energy/hmm.py`) with match emissions from `h`, validated against brute force — no HMMER/pyhmmer dependency.
+- **Reuse, don't reinvent:** in-frame energy is `SBM.utils.utils.compute_energies` (the canonical batched sum); the gauge is `Zero_Sum_Gauge` (re-applied defensively on load — idempotent). Both models are loaded in the zero-sum gauge so `E_A + E_B` is well-defined; the two keep their native lengths (CM L=96, PPIC L=91) — never trimmed/padded.
+- **Efficiency:** `query.cap_per_group` (seeded subsample, drop logged) bounds the marginal cost on large naturals (e.g. ~26k PPIC seqs); per-(sequence,model) seeds derive from the master seed in stable record order, so the marginal run is reproducible.
+- **Note on real-data ESS:** the fields-only proposal gives low ESS on the cross-family term for these strongly-coupled models (flagged, not hidden). For natives that is benign (the alignment posterior is sharply peaked, so marginal ≈ MAP ≈ in-frame); a genuinely poor cross-fit also reads as low ESS. DCAlign / annealed IS is the documented upgrade path.
 
 ## Architecture notes
 

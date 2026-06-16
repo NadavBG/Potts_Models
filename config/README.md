@@ -14,6 +14,22 @@ python scripts/iter.py run <run_name> "<tag>"
 snakemake --configfile config/params_<run_name>.yaml --cores 8 all
 ```
 
+**Two kinds of config live here.** Single-model runs (`params_<family>-*.yaml`)
+train one model and are validated by `src/SBM/workflow_config.py` against the
+main `Snakefile`. **Combine** runs (`params_combine-*.yaml`) score a query set
+under *two already-trained* models and are validated by
+`src/SBM/combine_config.py` against `Snakefile.combine`:
+
+```bash
+python scripts/iter.py run combine-CM-PPIC "baseline" --snakefile Snakefile.combine
+snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC.yaml --cores 8 all
+```
+
+The combine schema is documented in `combine_config.py`; keys are `models` (a
+list of exactly two `{name, run_dir, weight}`), `query` (`source` / `include` /
+`cap_per_group`), `scoring` (`method` / `n_samples` / `ess_threshold`), and
+`figures`. The rest of this doc covers the **single-model** schema.
+
 **How to read this doc.** Defaults below are the *schema* defaults from
 `workflow_config.py` (what you get if you omit the key). The values in the
 shipped configs (`params_CM-bm-dense.yaml`, `params_tiny.yaml`) sometimes
