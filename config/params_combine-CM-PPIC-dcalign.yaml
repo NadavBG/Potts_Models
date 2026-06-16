@@ -1,0 +1,46 @@
+# Two-model combine run scored with DCAlign (couplings-aware alignment, spec
+# §10.9) instead of fields-Viterbi `map`. The expensive Julia alignment runs
+# out-of-process on the cluster (pipeline/external/run_dcalign_align.sh) and is
+# cached; the `score` step reads the cache and recomputes energies in-frame.
+#
+#   # 1. build the query (cheap):
+#   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalign.yaml \
+#       --config run_root=combine/combine-CM-PPIC-dcalign/iter-001-baseline --cores 4 \
+#       combine/combine-CM-PPIC-dcalign/iter-001-baseline/query/query.fasta
+#   # 2. align on the cluster, then 3. score (see pipeline/external/README.md).
+
+run_name: combine-CM-PPIC-dcalign
+description: Cross-score CM and PPIC under both models with couplings-aware DCAlign  # No colons!
+seed: 42
+omp_num_threads: null
+
+models:                        # exactly two; E_tot = w_A*E_A + w_B*E_B.
+  - name: CM-bm-dense
+    run_dir: results/CM-bm-dense/iter-002-base-model
+    weight: 1.0
+  - name: PPIC-dense
+    run_dir: results/PPIC-dense/iter-001-baseline
+    weight: 1.0
+
+query:
+  source: model_sets
+  include: [natural, synthetic]
+  cap_per_group: 300           # seeded subsample per group; bounds the align cost
+                               # (DCAlign median ~19 s/seq). 0 = no cap. Drop logged.
+
+scoring:
+  method: dcalign              # couplings-aware; reads the on-disk align cache and
+                               # recomputes energy in-frame (gauge-consistent with map).
+  dcalign_path: null           # DCAlign clone; null → DCALIGN_PATH env (Midway: <repo>/../DCAlign)
+  julia: null                  # julia binary; null → JULIA_BINARY env / `which julia`
+  dcalign_seed: 0              # DCAlign RNG seed (palign seed=)
+  maxiter: 2000                # BP sweeps per sequence (palign maxiter=; auto-bumped to 5000 when N<L)
+  pcount: 0.001                # insertion-prior pseudocount floor (palign pcount=)
+  lambda_spec: flat            # phase-1 insertion prior (mass on Δn=1); phase-2: informed deltan_prior
+  n_shards: 32                 # Slurm array = 2*n_shards tasks (one per model x shard)
+  # n_samples / ess_threshold are unused by dcalign (kept at defaults for schema completeness)
+  n_samples: 1000
+  ess_threshold: 100.0
+
+figures:
+  enabled: true

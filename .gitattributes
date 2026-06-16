@@ -1,0 +1,6 @@
+# Fitted models and the arrays the combine pipeline consumes are binary .npy
+# blobs (model.npy ~tens of MB, inputs/msa.npy, synthetic/align_T*.npy). They
+# travel Mac → Midway via Git-LFS so the trained models reach the cluster
+# without bloating the git history. The run dirs they live in are explicitly
+# un-ignored in .gitignore (results/CM-bm-dense/, results/PPIC-dense/).
+results/**/*.npy filter=lfs diff=lfs merge=lfs -text

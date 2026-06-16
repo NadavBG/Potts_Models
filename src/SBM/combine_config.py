@@ -23,7 +23,7 @@ SCHEMA_VERSION = 1
 
 _QUERY_SOURCES = ("model_sets", "fasta")
 _INCLUDE = ("natural", "synthetic")
-_METHODS = ("auto", "in_frame", "map", "marginal")
+_METHODS = ("auto", "in_frame", "map", "marginal", "dcalign")
 
 
 @dataclass(frozen=True)
@@ -81,9 +81,22 @@ class ScoringConfig:
     # procedure for both → comparable energies). `marginal` is the principled
     # model-evidence (free energy) and the only mode that yields ESS; `auto` is a
     # speed hack that breaks A/B comparability (see the warning it emits).
+    # `dcalign` is the couplings-aware alignment upgrade (spec §10.9): the
+    # expensive Julia alignment runs out-of-process on the cluster and is cached
+    # on disk; the score branch reads the cache and recomputes the energy
+    # in-frame. The fields below configure that cluster-side align step.
     method: str = "map"
     n_samples: int = 1000
     ess_threshold: float = 100.0
+    # DCAlign bridge (only used by method="dcalign"; None → resolve from the
+    # DCALIGN_PATH / JULIA_BINARY env vars, mirroring mpnn.path / mpnn.python).
+    dcalign_path: str | None = None
+    julia: str | None = None
+    dcalign_seed: int = 0
+    maxiter: int = 2000
+    pcount: float = 1e-3
+    n_shards: int = 32
+    lambda_spec: str = "flat"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ScoringConfig":
@@ -92,6 +105,9 @@ class ScoringConfig:
         _require(obj.method in _METHODS, f"scoring.method must be one of {_METHODS}")
         _require(obj.n_samples >= 1, "scoring.n_samples must be >= 1")
         _require(obj.ess_threshold >= 0, "scoring.ess_threshold must be >= 0")
+        _require(obj.n_shards >= 1, "scoring.n_shards must be >= 1")
+        _require(obj.maxiter >= 1, "scoring.maxiter must be >= 1")
+        _require(obj.pcount > 0, "scoring.pcount must be > 0")
         return obj
 
 

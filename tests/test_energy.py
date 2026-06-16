@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from scipy.special import logsumexp
 
-from SBM.energy.encoding import Q
+from SBM.energy.encoding import Q, ints_to_seq
 from SBM.energy.hmm import AlignmentPath, ProfileHMM
 from SBM.energy.model import PottsModel
 from SBM.energy.potts import potts_energy
@@ -335,3 +335,181 @@ def test_marginal_is_reproducible():
     a = score_sequence(x, model, method="marginal", hmm=hmm, n_samples=500, seed=7)
     b = score_sequence(x, model, method="marginal", hmm=hmm, n_samples=500, seed=7)
     assert a.energy == b.energy  # same seed → identical (bit-for-bit)
+
+
+# ── DCAlign integration, Tier 0 (pure Python; no Julia, no real models) ───────
+
+
+def test_dcalign_handoff_round_trip():
+    """model_to_dcalign_arrays → <f8 Fortran bytes → reshape → inverse = J/h.
+
+    This is the gold check on the §10.9 handoff: the exact byte stream the Julia
+    side reads (column-major (q,q,L,L) / (q,L)) must round-trip our model with no
+    loss. Any error in ORDER, the transpose, the dtype, or the byte order shows
+    up as a mismatch here, before any Julia is involved.
+    """
+    from SBM.utils.dcalign_score import ORDER, model_to_dcalign_arrays
+
+    L = 5
+    model = make_model(L, seed=101)
+    J_dca, h_dca = model_to_dcalign_arrays(model)
+    assert J_dca.shape == (Q, Q, L, L)
+    assert h_dca.shape == (Q, L)
+
+    # Serialize exactly as align_sequences does, then read back as Julia would.
+    jbytes = J_dca.astype("<f8").tobytes(order="F")
+    hbytes = h_dca.astype("<f8").tobytes(order="F")
+    J_back = np.frombuffer(jbytes, dtype="<f8").reshape((Q, Q, L, L), order="F")
+    h_back = np.frombuffer(hbytes, dtype="<f8").reshape((Q, L), order="F")
+
+    # Invert: undo the ORDER permutation (argsort) then the (involutive) transpose.
+    inv = np.argsort(ORDER)
+    J_rec = J_back[inv][:, inv].transpose(2, 3, 0, 1)
+    h_rec = h_back[inv].T
+    assert np.array_equal(J_rec, model.J)
+    assert np.array_equal(h_rec, model.h)
+
+    # Sanity on the alphabet remap: DCAlign gap is index 21 (0-based 20), and our
+    # gap is 0; ORDER puts our gap last, residues 1..20 unchanged.
+    assert ORDER == list(range(1, 21)) + [0]
+
+
+def test_dcalign_branch_equals_in_frame():
+    """Given the same frame, method='dcalign' returns the in-frame energy."""
+    L = 6
+    model = make_model(L, seed=102)
+    S = np.random.default_rng(13).integers(0, Q, size=L)  # in-frame, gaps allowed
+    res_dca = score_sequence(
+        np.array([], dtype=np.int64), model, method="dcalign",
+        dcalign_frame=ints_to_seq(S), dcalign_notes="from cache",
+    )
+    res_inf = score_sequence(S, model, method="in_frame")
+    assert res_dca.method == "dcalign"
+    assert np.isclose(res_dca.energy, res_inf.energy)
+    assert "DCAlign" in res_dca.notes and "from cache" in res_dca.notes
+
+
+def test_dcalign_empty_frame_is_loud_error():
+    """An empty cached frame (DCAlign failed for that id) must raise, not score."""
+    model = make_model(5, seed=103)
+    with pytest.raises(ValueError, match="empty"):
+        score_sequence(np.array([], dtype=np.int64), model, method="dcalign", dcalign_frame="")
+    with pytest.raises(ValueError, match="empty"):
+        score_sequence(np.array([], dtype=np.int64), model, method="dcalign", dcalign_frame=None)
+    # Wrong-length frame is also loud.
+    with pytest.raises(ValueError, match="length"):
+        score_sequence(np.array([], dtype=np.int64), model, method="dcalign", dcalign_frame="ACD")
+
+
+def test_dcalign_cache_reader(tmp_path):
+    from SBM.utils.dcalign_score import TSV_HEADER, read_alignment_cache
+
+    tsv = tmp_path / "alignments.tsv"
+    tsv.write_text(
+        TSV_HEADER + "\n"
+        "seqA\tAC-DE\t-12.5\ttrue\tfalse\t37\n"
+        "seqB\t\tnan\tfalse\tfalse\t0\n",
+        encoding="utf-8",
+    )
+    cache = read_alignment_cache(tsv)
+    assert set(cache) == {"seqA", "seqB"}
+    assert cache["seqA"].aligned_frame == "AC-DE"
+    assert cache["seqA"].ok and np.isclose(cache["seqA"].dcalign_energy, -12.5)
+    assert cache["seqA"].converged and cache["seqA"].n_iter == 37
+    assert not cache["seqB"].ok and np.isnan(cache["seqB"].dcalign_energy)
+
+    dup = tmp_path / "dup.tsv"
+    dup.write_text(
+        "seqA\tACDEF\t-1\ttrue\tfalse\t1\nseqA\tACDEF\t-1\ttrue\tfalse\t1\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        read_alignment_cache(dup)
+
+
+def test_dcalign_cache_write_read_round_trip(tmp_path):
+    """write_alignment_cache → read_alignment_cache recovers every field."""
+    from SBM.utils.dcalign_score import (
+        DCAlignResult,
+        read_alignment_cache,
+        write_alignment_cache,
+    )
+
+    results = [
+        DCAlignResult("s1", "AC-DEFGHIK", -259.1234567890123, True, False, 412),
+        DCAlignResult("s2", "", float("nan"), False, False, 0),
+        DCAlignResult("s3", "MNPQRSTVWY", -3.0, True, True, 5000),
+    ]
+    out = tmp_path / "alignments.tsv"
+    write_alignment_cache(out, results)
+    back = read_alignment_cache(out)
+    assert set(back) == {"s1", "s2", "s3"}
+    assert back["s1"].aligned_frame == "AC-DEFGHIK"
+    assert back["s1"].dcalign_energy == -259.1234567890123  # exact round-trip
+    assert back["s1"].n_iter == 412 and back["s1"].converged
+    assert not back["s2"].ok and np.isnan(back["s2"].dcalign_energy)
+    assert back["s3"].used_decimation and back["s3"].n_iter == 5000
+
+
+def test_scoring_config_accepts_dcalign_keys():
+    from SBM.combine_config import ScoringConfig
+
+    cfg = ScoringConfig.from_dict(
+        {"method": "dcalign", "dcalign_path": "/x/DCAlign", "julia": "/y/julia",
+         "dcalign_seed": 7, "maxiter": 500, "pcount": 1e-2, "n_shards": 8, "lambda_spec": "flat"}
+    )
+    assert cfg.method == "dcalign" and cfg.n_shards == 8 and cfg.maxiter == 500
+    assert cfg.dcalign_path == "/x/DCAlign" and cfg.julia == "/y/julia"
+
+
+def test_scoring_config_rejects_unknown_and_bad_bounds():
+    from SBM.combine_config import ScoringConfig
+    from SBM.workflow_config import ConfigError
+
+    with pytest.raises(ConfigError):
+        ScoringConfig.from_dict({"bogus": 1})
+    with pytest.raises(ConfigError, match="n_shards"):
+        ScoringConfig.from_dict({"n_shards": 0})
+    with pytest.raises(ConfigError, match="maxiter"):
+        ScoringConfig.from_dict({"maxiter": 0})
+    with pytest.raises(ConfigError, match="pcount"):
+        ScoringConfig.from_dict({"pcount": 0})
+
+
+# ── DCAlign integration, Tier 1 (needs julia + a DCAlign clone) ───────────────
+
+
+@pytest.mark.integration
+def test_dcalign_energy_transfer_agrees(tmp_path):
+    """End-to-end: align via DCAlign, then our in-frame recompute on the returned
+    frame must equal DCAlign's own compute_potts_en to fp noise (≤ 5e-7). This is
+    the single check that validates the binary handoff, the gauge, and the energy
+    sign all at once. Skipped unless julia is on PATH and DCALIGN_PATH is set.
+    """
+    import os
+    import shutil
+
+    from SBM.energy.encoding import seq_to_ints
+    from SBM.energy.potts import potts_energy
+    from SBM.utils.dcalign_score import align_sequences, dcalign_context
+
+    if shutil.which("julia") is None or not os.environ.get("DCALIGN_PATH"):
+        pytest.skip("needs julia on PATH and DCALIGN_PATH set (module load julia; export DCALIGN_PATH)")
+
+    L = 10
+    model = make_model(L, seed=202, scale_J=0.3)
+    rng = np.random.default_rng(7)
+    seqs = [rng.integers(1, Q, size=n) for n in (10, 10, 9)]  # raw, gap-free, residues 1..20
+    ids = [f"q{i}" for i in range(len(seqs))]
+    ctx = dcalign_context(maxiter=2000)
+    results = align_sequences(ctx, model, seqs, ids, out_dir=tmp_path, lambda_spec="flat")
+
+    assert {r.seq_id for r in results} == set(ids)
+    checked = 0
+    for r in results:
+        if not r.ok:
+            continue
+        assert len(r.aligned_frame) == L
+        ours = potts_energy(seq_to_ints(r.aligned_frame), model)
+        assert abs(ours - r.dcalign_energy) <= 5e-7, (r.seq_id, ours, r.dcalign_energy)
+        checked += 1
+    assert checked >= 1  # at least one sequence aligned successfully

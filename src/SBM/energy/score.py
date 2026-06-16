@@ -11,6 +11,11 @@ single energy:
 - ``"marginal"`` (default) — integrate the alignment out by importance sampling
   with the profile-HMM posterior as proposal (spec §3.1). Reports ESS and Monte
   Carlo standard error; warns loudly when ESS is low (the estimate is unreliable).
+- ``"dcalign"`` — couplings-aware alignment by DCAlign (spec §10.9). The
+  expensive Julia alignment runs out-of-process and is cached on disk
+  (:mod:`SBM.utils.dcalign_score`); this branch is a thin cache-reader that
+  recomputes the energy in-frame on the cached frame, so it stays pure (no Julia
+  here) and gauge-consistent with ``map``/``in_frame``.
 
 Energies are only comparable / additive across models in a fixed gauge; both
 models are loaded in the zero-sum gauge (see :mod:`SBM.energy.model`).
@@ -24,14 +29,14 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import logsumexp
 
-from .encoding import GAP, ints_to_seq
+from .encoding import GAP, ints_to_seq, seq_to_ints
 from .hmm import ProfileHMM
 from .model import PottsModel
 from .potts import potts_energies, potts_energy
 
 log = logging.getLogger(__name__)
 
-METHODS = ("in_frame", "map", "marginal")
+METHODS = ("in_frame", "map", "marginal", "dcalign")
 DEFAULT_N_SAMPLES = 1000
 DEFAULT_ESS_THRESHOLD = 100.0
 
@@ -106,13 +111,18 @@ def score_sequence(
     n_samples: int = DEFAULT_N_SAMPLES,
     seed: int | None = None,
     ess_threshold: float = DEFAULT_ESS_THRESHOLD,
+    dcalign_frame: str | None = None,
+    dcalign_notes: str = "",
 ) -> ScoreResult:
     """Energy of one query (integer array) under ``model`` via ``method``.
 
     For ``"in_frame"`` ``seq`` must be length ``L`` (gaps allowed). For ``"map"``
     / ``"marginal"`` ``seq`` is a raw ungapped query (residues 1..20) and ``hmm``
     (built once via :meth:`ProfileHMM.from_model`) is required. ``marginal``
-    requires an explicit ``seed`` for reproducibility.
+    requires an explicit ``seed`` for reproducibility. For ``"dcalign"`` ``seq``
+    is ignored and ``dcalign_frame`` (a length-``L`` amino-acid frame string, gap
+    ``-``, from the on-disk DCAlign cache) is required; the energy is recomputed
+    in-frame on that frame, so this branch is pure (no Julia call here).
     """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
@@ -124,6 +134,30 @@ def score_sequence(
             energy=energy, method="in_frame", model_name=model.name,
             gauge=model.gauge, model_sha256=model.sha256,
             representative_alignment=ints_to_seq(seq),
+        )
+
+    if method == "dcalign":
+        # The expensive couplings-aware alignment ran out-of-process; we only
+        # recompute the energy on the cached frame. A missing/empty frame means
+        # DCAlign failed for this id — a loud error, never a silent skip.
+        if not dcalign_frame:
+            raise ValueError(
+                f"method='dcalign' needs a non-empty dcalign_frame for model {model.name!r}; "
+                "an empty frame means DCAlign failed to align this sequence (see the cache)."
+            )
+        frame = seq_to_ints(dcalign_frame)
+        if frame.size != model.L:
+            raise ValueError(
+                f"dcalign_frame length {frame.size} != model L={model.L} for {model.name!r}"
+            )
+        energy = potts_energy(frame, model)
+        notes = "couplings-aware (DCAlign); energy recomputed in-frame via potts_energy"
+        if dcalign_notes:
+            notes += f"; {dcalign_notes}"
+        return ScoreResult(
+            energy=energy, method="dcalign", model_name=model.name,
+            gauge=model.gauge, model_sha256=model.sha256,
+            representative_alignment=ints_to_seq(frame), notes=notes,
         )
 
     if hmm is None:

@@ -30,6 +30,15 @@ src/SBM/**/*.pyd
 # Run outputs ─────────────────────────────────────────────────────────────
 
 results/
+# Un-ignore the two model run dirs the combine pipeline references, so their
+# model.npy / inputs/msa.npy / synthetic/*.npy ship to Midway via Git-LFS
+# (.gitattributes tracks results/**/*.npy). The rest of results/ stays ignored.
+# (dir + /** is required: git won't descend into an ignored dir to find the
+# re-included files unless the dir itself is un-ignored first.)
+!results/CM-bm-dense/
+!results/CM-bm-dense/**
+!results/PPIC-dense/
+!results/PPIC-dense/**
 combine/
 pruning/masks/
 data/figs/

@@ -489,3 +489,37 @@ Make_Alignment sets up its bioconda env manually).
 
 **Open inputs for the Midway agent:** the DCAlign clone location + Julia environment on Midway;
 the seed-`.ins` source for the informed Λ; the shard count / partition / account.
+
+### 10.10 Phase-1 implementation (2026-06-16, Midway)
+
+Built and validated `method="dcalign"` per §10.9. **Phase-2 (informed insertion prior Λ via
+`deltan_prior`, Blocker 1) is deferred** — `lambda_spec` is wired but only `"flat"` is implemented.
+
+- **Bridge** `src/SBM/utils/dcalign_score.py` (mirrors `mpnn_score.py`): `model_to_dcalign_arrays`
+  (the §10.9 transform), `dcalign_context` (resolves `DCALIGN_PATH` / `julia`, captures git commit +
+  Julia version), `align_sequences` (writes `<f8` Fortran model bins + `meta.json` + `queries.fasta`,
+  shells out to Julia, parses the TSV; loud `RuntimeError` on nonzero rc), and the cache I/O
+  (`read_alignment_cache` / `write_alignment_cache`). **Julia driver** `src/SBM/julia/run_dcalign.jl`
+  (run with `--project=<clone>`): flat Λ = mass on Δn=1 (the `Alg` ctor adds the pcount floor), the
+  §10.9 `palign`→`decodeposterior`→`decimate_post`→`compute_potts_en` recipe verbatim, per-row
+  flushed TSV (resumable), per-seq try/catch (empty-frame on failure, no silent drop).
+- **Scoring** `score.py` `dcalign` branch is a pure cache-reader (`dcalign_frame` → `potts_energy`);
+  an empty/missing frame is a loud error. `combine_config.ScoringConfig` gains
+  `dcalign_path, julia, dcalign_seed, maxiter, pcount, n_shards, lambda_spec` (not added to `auto`).
+  `score_two_models.py` adds `--dcalign-cache` and a manifest `dcalign` block with a per-model
+  `dcalign_agreement` canary (max/median `|potts_energy − DCAlign energy|`).
+- **Cluster (chosen mechanism: `Make_Alignment`-style sbatch, not a Snakemake Slurm profile):**
+  `pipeline/external/run_dcalign_align.sh` (login driver: git-pull, preflight, `plan`, submit
+  `--array=0-(2N-1)` shard tasks + an `afterok` gather), `sbatch_dcalign_{shard,gather}.sh`,
+  `finalize_dcalign_push.sh` (sacct-validate, compress, opt-in `--push`). Entrypoints
+  `scripts/wf/run_dcalign_shard.py` (`plan`/`run`, round-robin shards, resume-skip) +
+  `run_dcalign_gather.py`. Account/partition `pi-ranganathanr`/`caslake`.
+- **Validation:** Tier-0 (handoff round-trip, branch = in-frame, cache I/O, config bounds) and
+  Tier-1 (end-to-end vs the real DCAlign clone: energy transfer ≤5e-7 — observed ~1e-15) pass;
+  a synthetic full-flow run (`plan`→4 shards→gather→`score --method dcalign`) gives
+  `dcalign_agreement` ~9e-16. **Tier-2** (real CM/PPIC models, actual sbatch submission) is
+  pending the Git-LFS model handoff (Mac-side commit; `.gitattributes` + `.gitignore` prepared).
+- **Midway env facts:** DCAlign clone at `../DCAlign` (commit `cab443f`); Julia 1.10.2 depot at
+  `/scratch/midway3/nadavbg/julia_depot`; SBM in a uv `.venv` at the repo root. `module load julia`
+  breaks `git` HTTPS (Julia's mbedTLS `libgit2` shadows system git) — scripts export
+  `GIT_SSL_CAINFO=/etc/pki/tls/certs/ca-bundle.crt`.
