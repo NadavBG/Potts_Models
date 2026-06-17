@@ -517,10 +517,47 @@ Built and validated `method="dcalign"` per §10.9. **Phase-2 (informed insertion
 - **Validation:** Tier-0 (handoff round-trip, branch = in-frame, cache I/O, config bounds) and
   Tier-1 (end-to-end vs the real DCAlign clone: energy transfer ≤5e-7 — observed ~1e-15) pass;
   a synthetic full-flow run (`plan`→4 shards→gather→`score --method dcalign`) gives
-  `dcalign_agreement` ~9e-16. **Tier-2** (real CM/PPIC models, actual sbatch submission) is
-  pending a checksummed rsync model push to Midway (`scripts/sync_models.sh push`; see
-  `docs/MODEL_SYNC.md`). Models are not in git — Git-LFS was removed in favor of rsync.
+  `dcalign_agreement` ~9e-16. **Tier-2 (real CM/PPIC models, actual sbatch submission) is now
+  validated** — see §10.11. Models reached Midway via checksummed rsync (`scripts/sync_models.sh
+  push`; `docs/MODEL_SYNC.md`); they are not in git (Git-LFS was removed in favor of rsync).
 - **Midway env facts:** DCAlign clone at `../DCAlign` (commit `cab443f`); Julia 1.10.2 depot at
   `/scratch/midway3/nadavbg/julia_depot`; SBM in a uv `.venv` at the repo root. `module load julia`
   breaks `git` HTTPS (Julia's mbedTLS `libgit2` shadows system git) — scripts export
   `GIT_SSL_CAINFO=/etc/pki/tls/certs/ca-bundle.crt`.
+
+### 10.11 Tier-2 validation on the real models (2026-06-17, Midway)
+
+With the CM/PPIC models rsync'd to Midway, Tier-2 was validated end-to-end on the real
+models via a tiny smoke (`config/params_combine-CM-PPIC-dcalign-smoke.yaml`: cap 8/group →
+48 seqs → 96 alignments, `n_shards=2`), the actual `run_dcalign_align.sh` → array → gather
+→ score path.
+
+- **Bug found + fixed (real-sbatch-only):** the shard/gather jobs ran with CWD = the driver's
+  submit dir (`RUN_ROOT/dcalign`), so `load_model` on the repo-root-relative paths in
+  `models.json` raised `FileNotFoundError`. The synthetic full-flow never went through the
+  real driver, so Tier-1 missed it. Fix: `cd "${REPO_DIR}"` in both `sbatch_dcalign_{shard,gather}.sh`
+  (RUN_ROOT is passed absolute; `#SBATCH --output` is opened by Slurm pre-`cd`, so logs are
+  unaffected).
+- **Validated on the real models:** agreement canary (our in-frame `potts_energy` vs DCAlign's
+  own energy) max |Δ| = **4.8e-13 (CM) / 5.7e-13 (PPIC)**, 0 alignment failures; the gather →
+  `score --method dcalign` → `manifest.json` chain completes (`scores.tsv` written for 48 seqs
+  under both models). The `render_combine` figure is the only step that fails on Midway — it
+  needs `lab_plotting` (not in the `[workflow]` venv); it is not part of the alignment and
+  renders on the Mac.
+- **Within-shard threading added** (`run_dcalign.jl` now `Threads.@threads :dynamic` over a
+  shard, thread count from `--cpus-per-task` via `JULIA_NUM_THREADS`; write under a lock,
+  BLAS pinned to 1; driver gains `DCALIGN_CPUS`/`DCALIGN_MEM`). Threaded answers are
+  byte-identical to single-thread (`align_one` deepcopies `J/h/Λ`, `palign` is seeded per seq).
+  **But threading scales poorly** — measured 1.7× on 4 threads, 2.9× on 8 threads (~36%): each
+  alignment is one chunk and a slow `N<L` sequence bounds a thread. So the recommended cluster
+  lever is **shard fan-out** (`cpus-per-task=1`, many shards), which is ~100% core-efficient and
+  fits the caslake QOS (4800 cores / 1000 jobs / 65533 array) easily.
+- **Cost (measured, real models):** mean ~200 s/seq — almost all combine-query sequences are
+  `N<L` (raw lengths 78–96, median 91; 99.9% of CM and 26% of PPIC alignments hit the slow
+  5000-sweep regime), so the 19 s spike median (raw naturals) does not apply here. **Full run
+  (3600 alignments): fan-out `cpus=1`/256 shards ≈ 160–230 core-hours, ~15–60 min wall**
+  (threaded `cpus=8` ≈ 640 core-hours — 3–4× more). The full query is staged at
+  `combine/combine-CM-PPIC-dcalign/iter-001-baseline`; launch with
+  `DCALIGN_CPUS=1 DCALIGN_MAX_CONCURRENT=512 bash pipeline/external/run_dcalign_align.sh <RR>`.
+- **Phase-2 (informed insertion prior `deltan_prior`, Blocker 1) remains deferred** — the next
+  tuning experiment, now that cluster-scale capability is validated.

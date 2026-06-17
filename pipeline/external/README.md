@@ -2,9 +2,14 @@
 
 Cluster-scale couplings-aware alignment for the two-model `combine` pipeline
 (spec `docs/initiate_two_model_energy.md` §10.9). DCAlign is ~700× slower than
-fields-Viterbi (median 19 s/seq), so the expensive alignment is sharded over a
-Slurm array and cached on disk; the `score` step then reads the cache and
-recomputes energies in-frame (cheap, gauge-consistent).
+fields-Viterbi, so the expensive alignment is sharded over a Slurm array and
+cached on disk; the `score` step then reads the cache and recomputes energies
+in-frame (cheap, gauge-consistent). Per-sequence cost is heavy-tailed and
+dominated by the `N<L` (query shorter than the model) regime, where `palign`
+auto-bumps to 5000 sweeps: on the CM/PPIC combine query the mean is **~200 s/seq**
+(almost all CM queries are `N<L`), not the 19 s spike median on raw naturals.
+See "Parallelism & cost" below for the measured numbers and the recommended
+fan-out launch.
 
 This mirrors `../Make_Alignment/pipeline/external/`: a login-node driver submits
 an `sbatch --array` + a gather job chained with `--dependency=afterok`, and a
@@ -53,14 +58,53 @@ snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalig
 - `module load julia/1.10.2`; `JULIA_DEPOT_PATH=/scratch/midway3/nadavbg/julia_depot`.
 - A DCAlign clone at `DCALIGN_PATH` (default `<repo>/../DCAlign`), instantiated
   (`julia --project=$DCALIGN_PATH -e 'using Pkg; Pkg.instantiate()'`).
-- `--account=pi-ranganathanr --partition=caslake` (CPU-only; DCAlign is single-threaded per seq).
-- Set `DCALIGN_TINY=1` for a small-resource smoke run; `DCALIGN_MAX_CONCURRENT=N`
-  to cap array concurrency (default 16).
+- `--account=pi-ranganathanr --partition=caslake` (CPU-only).
+- Driver env knobs: `DCALIGN_CPUS=N` sets `--cpus-per-task` per shard task (exported
+  to Julia as `JULIA_NUM_THREADS`); `DCALIGN_MEM=NNG` overrides memory;
+  `DCALIGN_MAX_CONCURRENT=N` caps array concurrency (default 16); `DCALIGN_TINY=1`
+  shrinks time/mem for a smoke. Defaults (no override): 4 cpus / 8 G / 8 h.
 
 > **git + julia gotcha:** `module load julia` puts Julia's mbedTLS `libgit2` on
 > `LD_LIBRARY_PATH`, which can't find the system CA bundle and breaks `git` over
 > HTTPS (`BADCERT_NOT_TRUSTED`). The login-node scripts export
 > `GIT_SSL_CAINFO=/etc/pki/tls/certs/ca-bundle.crt` to fix it.
+
+## Parallelism & cost (measured on the real CM/PPIC models, 2026-06-17)
+
+Two levers parallelise the work across the cluster (QOS caslake allows 4800 cores /
+100 nodes / 1000 submitted jobs):
+
+1. **Shard fan-out** — `2*n_shards` independent array tasks across nodes. The
+   primary lever.
+2. **Within-shard threading** — `run_dcalign.jl` threads a shard's sequences over
+   `--cpus-per-task` (`Threads.@threads :dynamic`). Set via `DCALIGN_CPUS`.
+
+**Threading scales poorly:** each alignment is one indivisible chunk and the cost is
+heavy-tailed, so a thread stuck on a slow `N<L` sequence bounds the task. Measured
+on the real models: **1.7× on 4 threads, 2.9× on 8 threads (~36% core efficiency)**.
+Threading is correct (byte-identical answers, validated against single-thread) and
+useful only if you would otherwise hit the 1000-job cap — which 3600 alignments do
+not. **So prefer fan-out with `cpus-per-task=1`.**
+
+**Recommended full run** (`combine-CM-PPIC-dcalign`, 1800 seqs × 2 models = 3600
+alignments, `n_shards=256` → 512 one-core tasks, ~7 seqs each):
+
+```bash
+RR=combine/combine-CM-PPIC-dcalign/iter-001-baseline   # query already staged
+DCALIGN_CPUS=1 DCALIGN_MAX_CONCURRENT=512 bash pipeline/external/run_dcalign_align.sh $RR
+```
+
+| Config | Service units | Wall (tunable) | Core efficiency |
+|---|---|---|---|
+| **fan-out** `cpus=1`, 256 shards | **~160–230 core-hours** | ~15–60 min (512 tasks at once) | ~100% |
+| threaded `cpus=8`, 32 shards | ~640 core-hours (3–4× more) | similar | ~36% |
+
+(core-hours ≈ SUs on caslake at 1 SU/core-hr — confirm against your RCC allocation.)
+Estimates scale the threaded smoke (96 alignments, 17.1 billed core-hours at `cpus=8`)
+by alignment count; the query distribution is identical (same seeded subsample, larger
+cap). The figure step (`render_combine`) is separate and needs `lab_plotting`
+(`pip install -e /home/nadavbg/lab-plotting` + `lab_plotting.install_styles()`) — or
+render it on the Mac; it is not part of the alignment.
 
 ## Cache layout (under the gitignored `combine/<run>/`)
 
