@@ -105,13 +105,23 @@ python "${REPO_DIR}/scripts/wf/run_dcalign_shard.py" plan --run-root "${RUN_ROOT
 ARRAY_MAX=$(( 2 * N_SHARDS - 1 ))
 CONC="${DCALIGN_MAX_CONCURRENT:-16}"
 
-# tiny_test / smoke override: small resources (set DCALIGN_TINY=1).
+# Resource overrides for the shard array. DCALIGN_CPUS sets --cpus-per-task, which
+# the wrapper exports as JULIA_NUM_THREADS, so each shard task aligns that many of
+# its sequences in parallel (run_dcalign.jl threads over the shard). One Julia
+# startup is amortised over all those cores, so a full node (e.g. DCALIGN_CPUS=48
+# on caslake) is the efficient unit; fan across nodes with more shards + a higher
+# DCALIGN_MAX_CONCURRENT. DCALIGN_MEM overrides memory; DCALIGN_TINY=1 shrinks
+# time/mem for a smoke. Defaults (no override): the #SBATCH 4 cpus / 8G / 8h.
 SHARD_OVERRIDES=()
 GATHER_OVERRIDES=()
 if [[ "${DCALIGN_TINY:-0}" == "1" ]]; then
-    SHARD_OVERRIDES=(--time=00:30:00 --mem=4G --cpus-per-task=2)
+    SHARD_OVERRIDES=(--time=00:30:00 --mem="${DCALIGN_MEM:-4G}" --cpus-per-task="${DCALIGN_CPUS:-2}")
     GATHER_OVERRIDES=(--time=00:15:00 --mem=2G)
-    echo "DCALIGN_TINY=1: overriding sbatch resources for shard/gather"
+    echo "DCALIGN_TINY=1: small sbatch resources (cpus=${DCALIGN_CPUS:-2}, mem=${DCALIGN_MEM:-4G}, time=30min)"
+elif [[ -n "${DCALIGN_CPUS:-}" ]]; then
+    SHARD_MEM="${DCALIGN_MEM:-$(( DCALIGN_CPUS * 2 ))G}"
+    SHARD_OVERRIDES=(--cpus-per-task="${DCALIGN_CPUS}" --mem="${SHARD_MEM}")
+    echo "per-shard threads: cpus-per-task=${DCALIGN_CPUS} (JULIA_NUM_THREADS), mem=${SHARD_MEM}"
 fi
 
 # Submit from RUN_ROOT/dcalign so #SBATCH --output=logs/... lands there.

@@ -27,6 +27,7 @@
 
 using DCAlign
 using OffsetArrays
+using LinearAlgebra
 
 const TSV_HEADER = "seq_id\taligned_frame\tdcalign_energy\tconverged\tused_decimation\tn_iter"
 
@@ -137,15 +138,27 @@ function main()
     Λ = build_lambda(lambda_spec, L)
     queries = read_fasta(joinpath(in_dir, "queries.fasta"))
     println(stderr, "run_dcalign: L=$L q=$q maxiter=$maxiter seed=$seed pcount=$pcount " *
-                    "lambda=$lambda_spec n_queries=$(length(queries))")
+                    "lambda=$lambda_spec n_queries=$(length(queries)) threads=$(Threads.nthreads())")
 
+    # Parallelise over the shard's sequences across JULIA_NUM_THREADS (set by the
+    # sbatch wrapper from --cpus-per-task). align_one deepcopies J/h/Λ per call and
+    # palign is seeded per sequence, so the per-row results are independent of the
+    # thread count and of completion order — threading changes speed, not answers.
+    # Rows are written under a lock and flushed per row, preserving the resume
+    # contract (a killed shard leaves a valid partial cache, any order). BLAS is
+    # pinned to one thread when we thread, to avoid oversubscribing the cores.
+    if Threads.nthreads() > 1
+        LinearAlgebra.BLAS.set_num_threads(1)
+    end
     need_header = !isfile(out_tsv) || filesize(out_tsv) == 0
+    iolock = ReentrantLock()
     open(out_tsv, "a") do io
         if need_header
             println(io, TSV_HEADER)
             flush(io)
         end
-        for (header, rawseq) in queries
+        Threads.@threads :dynamic for idx in eachindex(queries)
+            header, rawseq = queries[idx]
             row = try
                 align_one(header, rawseq, J, h, Λ, L, maxiter, seed, pcount)
             catch e
@@ -153,8 +166,10 @@ function main()
                 (String(header), "", NaN, false, false, 0)
             end
             sid, frame, energy, converged, used_decimation, niter = row
-            println(io, join((sid, frame, energy, converged, used_decimation, niter), '\t'))
-            flush(io)
+            lock(iolock) do
+                println(io, join((sid, frame, energy, converged, used_decimation, niter), '\t'))
+                flush(io)
+            end
         end
     end
     println(stderr, "run_dcalign: done -> $out_tsv")
