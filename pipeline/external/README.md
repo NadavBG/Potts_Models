@@ -26,11 +26,15 @@ is `src/SBM/julia/run_dcalign.jl`.
 ## One run
 
 ```bash
-# 0. Build the combine query first (cheap; produces config_snapshot.yaml,
-#    models.json, query/). RUN_ROOT is a combine iteration dir.
-RUN_ROOT=combine/combine-CM-PPIC/iter-001-dcalign
+# 0. Build the combine query first (cheap). The driver's preflight requires all
+#    three of config_snapshot.yaml, models.json, query/query.fasta + query/groups.json;
+#    snapshot_config is an independent rule, so name it explicitly (building only
+#    query.fasta does NOT pull it in). RUN_ROOT is a combine iteration dir — mint one
+#    with `scripts/iter.py new combine-CM-PPIC-dcalign "<tag>" --snakefile Snakefile.combine`.
+RUN_ROOT=combine/combine-CM-PPIC-dcalign/iter-001-baseline
 snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalign.yaml \
-    --config run_root=$RUN_ROOT --cores 4 $RUN_ROOT/query/query.fasta $RUN_ROOT/models.json
+    --config run_root=$RUN_ROOT --cores 4 \
+    $RUN_ROOT/config_snapshot.yaml $RUN_ROOT/models.json $RUN_ROOT/query/query.fasta
 
 # 1. Submit the align step (login node).
 bash pipeline/external/run_dcalign_align.sh $RUN_ROOT          # or: ... $RUN_ROOT <n_shards>

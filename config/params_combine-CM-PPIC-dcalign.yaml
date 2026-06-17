@@ -3,10 +3,11 @@
 # out-of-process on the cluster (pipeline/external/run_dcalign_align.sh) and is
 # cached; the `score` step reads the cache and recomputes energies in-frame.
 #
-#   # 1. build the query (cheap):
+#   # 1. build the query (cheap); name config_snapshot.yaml too — the cluster
+#   #    driver's preflight requires it and snapshot_config is an independent rule:
+#   RR=combine/combine-CM-PPIC-dcalign/iter-001-baseline
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalign.yaml \
-#       --config run_root=combine/combine-CM-PPIC-dcalign/iter-001-baseline --cores 4 \
-#       combine/combine-CM-PPIC-dcalign/iter-001-baseline/query/query.fasta
+#       --config run_root=$RR --cores 4 $RR/config_snapshot.yaml $RR/models.json $RR/query/query.fasta
 #   # 2. align on the cluster, then 3. score (see pipeline/external/README.md).
 
 run_name: combine-CM-PPIC-dcalign
