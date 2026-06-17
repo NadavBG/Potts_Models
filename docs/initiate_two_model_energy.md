@@ -518,7 +518,8 @@ Built and validated `method="dcalign"` per §10.9. **Phase-2 (informed insertion
   Tier-1 (end-to-end vs the real DCAlign clone: energy transfer ≤5e-7 — observed ~1e-15) pass;
   a synthetic full-flow run (`plan`→4 shards→gather→`score --method dcalign`) gives
   `dcalign_agreement` ~9e-16. **Tier-2** (real CM/PPIC models, actual sbatch submission) is
-  pending the Git-LFS model handoff (Mac-side commit; `.gitattributes` + `.gitignore` prepared).
+  pending a checksummed rsync model push to Midway (`scripts/sync_models.sh push`; see
+  `docs/MODEL_SYNC.md`). Models are not in git — Git-LFS was removed in favor of rsync.
 - **Midway env facts:** DCAlign clone at `../DCAlign` (commit `cab443f`); Julia 1.10.2 depot at
   `/scratch/midway3/nadavbg/julia_depot`; SBM in a uv `.venv` at the repo root. `module load julia`
   breaks `git` HTTPS (Julia's mbedTLS `libgit2` shadows system git) — scripts export

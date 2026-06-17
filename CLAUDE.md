@@ -44,6 +44,7 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | The two-model scoring CLI | `scripts/score_two_models.py` (single sequence or batch FASTA → `E_A`, `E_B`, `E_tot` + diagnostics; `--method`, `--weights`, `--n-samples`, `--seed`) |
 | The two-model `combine` pipeline | `Snakefile.combine` driven by `config/params_combine-*.yaml` (validated by `src/SBM/combine_config.py`); run with `python scripts/iter.py run <name> "<tag>" --snakefile Snakefile.combine`. See "Combine pipeline" below. |
 | The DCAlign couplings-aware align step (cluster) | bridge `src/SBM/utils/dcalign_score.py` (mirrors `mpnn_score.py`) + Julia driver `src/SBM/julia/run_dcalign.jl` (run with `--project=<DCAlign clone>`); cluster wrappers `pipeline/external/run_dcalign_align.sh` (login driver) + `sbatch_dcalign_{shard,gather}.sh` + `finalize_dcalign_push.sh`; Python entrypoints `scripts/wf/run_dcalign_shard.py` (`plan`/`run`) + `run_dcalign_gather.py`. See `pipeline/external/README.md`. |
+| Model transfer Mac ↔ Midway | `scripts/sync_models.sh` (checksummed rsync; `push`/`pull`/`verify`/`status`). Models are **not** in git. See "Model transfer" below and `docs/MODEL_SYNC.md`. |
 
 `src/SBM/__init__.py` is empty by design — users import submodules directly (`SBM.SBM_GD.SBM_proteins`, `SBM.utils.utils`, `SBM.provenance`).
 
@@ -150,6 +151,29 @@ snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC.yaml -
 - **Reuse, don't reinvent:** in-frame energy is `SBM.utils.utils.compute_energies` (the canonical batched sum); the gauge is `Zero_Sum_Gauge` (re-applied defensively on load — idempotent). Both models are loaded in the zero-sum gauge so `E_A + E_B` is well-defined; the two keep their native lengths (CM L=96, PPIC L=91) — never trimmed/padded.
 - **Efficiency:** `query.cap_per_group` (seeded subsample, drop logged) bounds the marginal cost on large naturals (e.g. ~26k PPIC seqs); per-(sequence,model) seeds derive from the master seed in stable record order, so the marginal run is reproducible.
 - **Note on real-data ESS:** the fields-only proposal gives low ESS on the cross-family term for these strongly-coupled models (flagged, not hidden). For natives that is benign (the alignment posterior is sharply peaked, so marginal ≈ MAP ≈ in-frame); a genuinely poor cross-fit also reads as low ESS. DCAlign / annealed IS is the documented upgrade path.
+
+## Model transfer (Mac ↔ Midway)
+
+Trained models (`results/<fam>/<iter>/`, ~0.5 GB each, 4.4 GB total) are **not in
+git** — too large for git/Git-LFS. They move between the Mac and Midway via
+`scripts/sync_models.sh`, a checksummed `rsync` wrapper, and are meant to exist on
+both machines so larger cross-model comparisons can run on the cluster. Full doc:
+`docs/MODEL_SYNC.md`.
+
+- `push` (Mac→Midway) / `pull` (Midway→Mac) / `status` (diff both sides, no
+  transfer) / `verify [--remote]` / `hash`.
+- **Durable-only by default:** syncs `model.npy`, `inputs/`, `synthetic/*.npy` +
+  JSON, `masks/`, `mpnn_scores.json`, and the provenance JSON; **excludes** the
+  regenerable `figs/` (incl. the 203 MB `figs/inputs/stats_*.npy` caches) and
+  `mpnn_tmp/`. `--with-figs` mirrors everything.
+- **Two-layer integrity:** rsync's own per-file check, **plus** an independent
+  `results/SHA256SUMS` manifest verified on the destination after transfer (a
+  mismatched/missing file prints `FAILED` and exits non-zero — never silent).
+- Config: `SBM_MIDWAY_HOST` (default `midway3.rcc.uchicago.edu`), `SBM_MIDWAY_REPO`
+  (default `/project/ranganathanr/nadavbg/Potts_Models`), optional gitignored
+  `scripts/sync_models.local.sh`. Models land at the relative `run_dir` paths the
+  combine configs reference, so `resolve_models` finds them with no config change.
+- Additive by default (never deletes); `--mirror` is opt-in.
 
 ## Architecture notes
 

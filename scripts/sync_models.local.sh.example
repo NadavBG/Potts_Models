@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Machine-specific defaults for scripts/sync_models.sh.
+#
+# Copy this file to scripts/sync_models.local.sh (gitignored) and edit if your
+# Midway login alias, project path, or rsync binary differ from the defaults
+# baked into scripts/sync_models.sh. You usually do NOT need this file — the
+# defaults below already match the project's setup.
+#
+#   cp scripts/sync_models.local.sh.example scripts/sync_models.local.sh
+#
+# The `:=` form means an inline env var still wins, e.g.
+#   SBM_MIDWAY_HOST=midway2.rcc.uchicago.edu scripts/sync_models.sh push
+
+# Midway login host (must resolve via your ~/.ssh/config or be a real hostname).
+: "${SBM_MIDWAY_HOST:=midway3.rcc.uchicago.edu}"
+
+# Remote repo root on Midway. The script appends "/results"; the destination is
+# the /project PI space (larger quota than home, persistent unlike scratch).
+: "${SBM_MIDWAY_REPO:=/project/ranganathanr/nadavbg/Potts_Models}"
+
+# Optional: pin a specific rsync binary. macOS ships openrsync (limited flags);
+# `brew install rsync` puts GNU rsync at /opt/homebrew/bin/rsync, which the
+# script auto-prefers, so this is rarely needed.
+# : "${SBM_RSYNC:=/opt/homebrew/bin/rsync}"
+
+export SBM_MIDWAY_HOST SBM_MIDWAY_REPO

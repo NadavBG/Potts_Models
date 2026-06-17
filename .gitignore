@@ -1,8 +1,9 @@
 # ── Claude Code local settings ───────────────────────────────────────────
 .claude/
 
-# ── Machine-specific shell config sourced by scripts/sample_sbm.sh ───────
+# ── Machine-specific shell config (gitignored; sourced if present) ───────
 scripts/sample_sbm.local.sh
+scripts/sync_models.local.sh
 
 # ── Python bytecode / caches ─────────────────────────────────────────────
 __pycache__/
@@ -29,16 +30,10 @@ src/SBM/**/*.pyd
 
 # Run outputs ─────────────────────────────────────────────────────────────
 
+# Models are never committed. They travel Mac <-> Midway via checksummed rsync
+# (scripts/sync_models.sh; docs/MODEL_SYNC.md), not git. results/SHA256SUMS is
+# the rsync integrity manifest and is covered by this ignore too.
 results/
-# Un-ignore the two model run dirs the combine pipeline references, so their
-# model.npy / inputs/msa.npy / synthetic/*.npy ship to Midway via Git-LFS
-# (.gitattributes tracks results/**/*.npy). The rest of results/ stays ignored.
-# (dir + /** is required: git won't descend into an ignored dir to find the
-# re-included files unless the dir itself is un-ignored first.)
-!results/CM-bm-dense/
-!results/CM-bm-dense/**
-!results/PPIC-dense/
-!results/PPIC-dense/**
 combine/
 pruning/masks/
 data/figs/
