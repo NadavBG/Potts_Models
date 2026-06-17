@@ -34,6 +34,10 @@ N_SHARDS="$2"
 : "${SLURM_ARRAY_TASK_ID:?must run as a Slurm array job}"
 
 REPO_DIR="$(git -C "${RUN_ROOT}" rev-parse --show-toplevel)"
+# Run from the repo root: models.json stores repo-root-relative model paths
+# (e.g. results/<fam>/<iter>/model.npy) but the driver submits from RUN_ROOT/dcalign,
+# so load_model would otherwise fail to find the model. RUN_ROOT is passed absolute.
+cd "${REPO_DIR}"
 
 module load julia/1.10.2
 export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-/scratch/midway3/nadavbg/julia_depot}"

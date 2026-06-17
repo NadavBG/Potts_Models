@@ -27,6 +27,10 @@ if [[ $# -ne 1 ]]; then
 fi
 RUN_ROOT="$1"
 REPO_DIR="$(git -C "${RUN_ROOT}" rev-parse --show-toplevel)"
+# Run from the repo root: gather load_model()s the repo-root-relative model paths in
+# models.json to stamp model_sha256, but is submitted from RUN_ROOT/dcalign. RUN_ROOT
+# is passed absolute, so the git -C above resolves regardless of CWD.
+cd "${REPO_DIR}"
 
 # julia + DCAlign clone are loaded so gather can stamp the cache meta.json with
 # the DCAlign commit + julia version (provenance); the merge itself is pure Python.
