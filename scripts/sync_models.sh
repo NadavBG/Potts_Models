@@ -18,8 +18,13 @@
 #   --mirror       add rsync --delete: delete destination files absent from the
 #                  synced set (excluded dirs like figs/ are NOT deleted); prompts
 #   --yes          skip the --mirror confirmation prompt
+#   --no-verify    transfer only; skip the checksum verify (verify later with
+#                  `verify`/`verify --remote`)
 #   --host HOST    override SBM_MIDWAY_HOST
 #   --repo PATH    override SBM_MIDWAY_REPO (remote repo root; /results is appended)
+#
+# ssh connections are multiplexed (ControlMaster), so a whole command — transfer
+# AND verify — authenticates to Midway only ONCE (one Duo/password prompt).
 #
 # Config resolution (first wins): CLI flag -> environment variable ->
 # scripts/sync_models.local.sh (sourced if present) -> built-in default.
@@ -55,6 +60,7 @@ DRY_RUN=0
 WITH_FIGS=0
 MIRROR=0
 ASSUME_YES=0
+NO_VERIFY=0
 VERIFY_REMOTE=0
 CLI_HOST=""
 CLI_REPO=""
@@ -65,6 +71,7 @@ while [[ $# -gt 0 ]]; do
         --with-figs) WITH_FIGS=1 ;;
         --mirror)    MIRROR=1 ;;
         --yes)       ASSUME_YES=1 ;;
+        --no-verify) NO_VERIFY=1 ;;
         --remote)    VERIFY_REMOTE=1 ;;
         --host)      CLI_HOST="${2:-}"; shift ;;
         --repo)      CLI_REPO="${2:-}"; shift ;;
@@ -77,6 +84,26 @@ HOST="${CLI_HOST:-${SBM_MIDWAY_HOST:-${DEFAULT_HOST}}}"
 REPO="${CLI_REPO:-${SBM_MIDWAY_REPO:-${DEFAULT_REPO}}}"
 # Strip a trailing slash so "${REPO}/results" is well-formed.
 REPO="${REPO%/}"
+
+# --- ssh connection sharing (multiplexing) ----------------------------------
+# Without this, one `push` opens TWO ssh connections (rsync + verify) and a
+# Duo/password prompt fires for EACH. ControlMaster shares a single
+# authenticated connection across every ssh+rsync in the command: the first to
+# connect authenticates, the rest reuse the socket. setup_mux is idempotent;
+# close_mux (EXIT trap) tears the master down so no socket lingers.
+SSH_CTL=""
+SSH_OPTS=()
+setup_mux() {
+    [[ -n "${SSH_CTL}" ]] && return 0
+    SSH_CTL="$(mktemp -u /tmp/sbm_sync_ctl.XXXXXXXX)"
+    SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=${SSH_CTL}" -o ControlPersist=60)
+    trap 'close_mux' EXIT
+    log "ssh connection sharing on — you authenticate to ${HOST} once for this command."
+}
+close_mux() {
+    [[ -n "${SSH_CTL}" ]] || return 0
+    ssh -o "ControlPath=${SSH_CTL}" -O exit "${HOST}" >/dev/null 2>&1 || true
+}
 
 # --- tool detection ---------------------------------------------------------
 # rsync detection is lazy (only push/pull transfer), so hash/verify/status do
@@ -159,7 +186,8 @@ build_local_manifest() {
 # Build the manifest on Midway. Self-contained so it does not depend on this
 # script existing remotely. Echoes the remote file count on success.
 build_remote_manifest() {
-    ssh "${HOST}" 'bash -s' -- "${REPO}" "${WITH_FIGS}" <<'REOF'
+    setup_mux
+    ssh "${SSH_OPTS[@]}" "${HOST}" 'bash -s' -- "${REPO}" "${WITH_FIGS}" <<'REOF'
 set -euo pipefail
 repo="$1"; with_figs="$2"
 cd "$repo" || { echo "ERROR: remote repo not found: $repo" >&2; exit 1; }
@@ -202,9 +230,10 @@ verify_local() {
 # tool by existence — NOT a `sha256sum -c || shasum -c` fallback, which would
 # silently retry-on-failure and could mask a real mismatch.
 verify_remote() {
+    setup_mux
     log "remote verify on ${HOST}:${REPO}/results ..."
     local out rc=0
-    out="$(ssh "${HOST}" 'bash -s' -- "${REPO}" <<'REOF'
+    out="$(ssh "${SSH_OPTS[@]}" "${HOST}" 'bash -s' -- "${REPO}" <<'REOF'
 set -uo pipefail
 cd "$1" || { echo "verify: cannot cd to remote repo $1" >&2; exit 12; }
 [ -f results/SHA256SUMS ] || { echo "verify: results/SHA256SUMS missing on remote" >&2; exit 8; }
@@ -237,6 +266,9 @@ build_rsync_args() {
     [[ "${MIRROR}"  -eq 1 ]] && RSYNC_ARGS+=(--delete)
     local pat
     while IFS= read -r pat; do RSYNC_ARGS+=("--exclude=${pat}"); done < <(rsync_excludes)
+    # Route rsync's ssh through the shared master so the transfer reuses the
+    # one authenticated connection (no second Duo/password prompt).
+    [[ -n "${SSH_CTL}" ]] && RSYNC_ARGS+=(-e "ssh -o ControlMaster=auto -o ControlPath=${SSH_CTL} -o ControlPersist=60")
 }
 
 confirm_mirror() {
@@ -265,6 +297,7 @@ print_summary() {
 
 do_push() {
     confirm_mirror
+    setup_mux              # one auth here; rsync + verify reuse the connection
     build_rsync_args
     print_summary push
     build_local_manifest
@@ -274,12 +307,17 @@ do_push() {
         log "dry-run: skipped remote verify."
         return 0
     fi
+    if [[ "${NO_VERIFY}" -eq 1 ]]; then
+        log "push complete. Verify skipped (--no-verify); run later: scripts/sync_models.sh verify --remote"
+        return 0
+    fi
     verify_remote
     log "push complete and verified."
 }
 
 do_pull() {
     confirm_mirror
+    setup_mux              # one auth here; remote manifest + rsync reuse it
     build_rsync_args
     print_summary pull
     log "rebuilding manifest on ${HOST} ..."
@@ -288,6 +326,10 @@ do_pull() {
     "${RSYNC}" "${RSYNC_ARGS[@]}" "${HOST}:${REPO}/results/" "${REPO_ROOT}/results/"
     if [[ "${DRY_RUN}" -eq 1 ]]; then
         log "dry-run: skipped local verify."
+        return 0
+    fi
+    if [[ "${NO_VERIFY}" -eq 1 ]]; then
+        log "pull complete. Verify skipped (--no-verify); run later: scripts/sync_models.sh verify"
         return 0
     fi
     verify_local
@@ -305,7 +347,7 @@ do_status() {
     # Normalize each manifest to "path<TAB>hash", sorted by path.
     normalize() { awk '{h=$1; $1=""; sub(/^[ \t]+/,""); print $0"\t"h}' | LC_ALL=C sort; }
     normalize < "${REPO_ROOT}/results/SHA256SUMS" > "${lt}"
-    ssh "${HOST}" "cat ${REPO}/results/SHA256SUMS" > "${remote_raw}"
+    ssh "${SSH_OPTS[@]}" "${HOST}" "cat ${REPO}/results/SHA256SUMS" > "${remote_raw}"
     normalize < "${remote_raw}" > "${rt}"
 
     local report; report="$(LC_ALL=C join -t"$(printf '\t')" -a1 -a2 -e '__ABSENT__' -o '0,1.2,2.2' "${lt}" "${rt}")"

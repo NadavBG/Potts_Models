@@ -97,9 +97,20 @@ scripts/sync_models.sh verify --remote   # on Midway
 scripts/sync_models.sh hash
 ```
 
+### Authentication (Midway / Duo)
+
+A `push` does two remote operations (transfer, then verify) and `pull`/`status`
+likewise; each would normally trigger its own password + Duo prompt. To avoid
+that, every command opens **one shared SSH connection** (OpenSSH `ControlMaster`
+multiplexing) and reuses it, so **you authenticate exactly once per command**.
+The shared connection is torn down when the command finishes.
+
 ### Flags
 
 - `--dry-run` — rsync `-n`; show the transfer plan, skip verify.
+- `--no-verify` — transfer only; skip the checksum verify. Use when you want a
+  fast push/pull and will verify later (`verify` / `verify --remote`). You still
+  authenticate once for the transfer.
 - `--with-figs` — also sync `figs/` and `mpnn_tmp/` (full mirror).
 - `--mirror` — add rsync `--delete`: delete destination files absent from the
   synced set (prompts first; `--yes` to skip the prompt). **Off by default** —
