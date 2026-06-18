@@ -567,3 +567,46 @@ models via a tiny smoke (`config/params_combine-CM-PPIC-dcalign-smoke.yaml`: cap
   `DCALIGN_CPUS=1 DCALIGN_MAX_CONCURRENT=512 bash pipeline/external/run_dcalign_align.sh <RR>`.
 - **Phase-2 (informed insertion prior `deltan_prior`, Blocker 1) remains deferred** — the next
   tuning experiment, now that cluster-scale capability is validated.
+
+### 10.12 DCAlign-vs-in-frame baseline rule (2026-06-18, Mac)
+
+To make Blocker 1 a *measured* baseline (a "thing to beat" for the Phase-2 prior tuning), the
+combine pipeline now produces a per-sequence comparison of DCAlign's best-attempt energy against
+the **native in-frame energy**. For every query in its own model's frame (a "home pair"), the
+native frame energy is `potts_energy(query, model)` and DCAlign's energy is recomputed in-frame
+on its cached frame; `ΔE = E_dcalign − E_inframe`, so `ΔE > 0` means DCAlign scored the native
+*worse* than the trivial native frame (the pathology). Cross-family pairs have no in-frame
+reference (different length) and are skipped.
+
+- **Code:** pure logic `src/SBM/energy/dcalign_baseline.py` (`column_agreement`, `compare_record`,
+  `summarize`; unit-tested in `tests/test_energy.py`); figure `src/SBM/utils/utils_dcalign_baseline_plot.py`;
+  CLI `scripts/compare_dcalign_baseline.py`; wrapper `scripts/wf/run_dcalign_baseline.py`.
+- **Rule** `dcalign_baseline` in `Snakefile.combine`, defined only when `scoring.method == "dcalign"`
+  and run on the Mac (pure numpy, no Julia). Outputs `data/dcalign_vs_inframe.tsv` (tidy, one row per
+  home pair), `data/dcalign_vs_inframe.json` (ΔE summary per model/group + the standing cache canary),
+  `provenance/dcalign_vs_inframe_manifest.json`, and (when figures enabled) `figs/dcalign_vs_inframe.pdf`
+  (per-model `E_dcalign` vs `E_inframe` scatter with the `y=x` diagonal + the ΔE histogram). The
+  scatter overlays the **not-converged** points (DCAlign decimation fallback) as open rings.
+  `n_worse` counts `ΔE > equal_tol` (default 1.0 a.u.); the figure uses the same threshold.
+- **Baseline result (flat prior, the full `iter-001-baseline` run, 1800 home pairs):** DCAlign
+  scored worse than the native frame on **569/900 CM (63%, median ΔE +11.9, max +168)** but only
+  **112/900 PPIC (12%, median ΔE 0)** — so Blocker 1 is pervasive on CM, not the 3-sequence anomaly
+  §10.8 reported, and strongly model-dependent. The gauge/handoff canary held (max |Δ| ≤ 1.5e-12).
+  This is the number the informed-prior experiment (§10.9) must drive toward ≈0.
+- **Convergence is not the cause — it is converged-on-a-bad-frame.** A companion rule
+  `dcalign_convergence` (`scripts/report_dcalign_convergence.py` + `convergence_by_group` in
+  `dcalign_baseline.py` + figure `utils_dcalign_convergence_plot.py`) counts non-convergence per
+  (model, group) over **all** alignments (home + cross). DCAlign falls back to decimation rarely and
+  almost only on **cross-family** frames: **40/1800 (CM), 14/1800 (PPIC)** total, of which only
+  **4 (CM) / 1 (PPIC)** are home pairs. So the 569/112 worse-than-native home pairs are overwhelmingly
+  *converged* — the flat insertion prior steers `palign` to a confidently-wrong frame, which is what
+  the Phase-2 `deltan_prior` must fix (not a convergence/annealing problem). Outputs
+  `data/dcalign_convergence.{tsv,json}` + `figs/dcalign_convergence.pdf`.
+- **Run-dir layout (tidied 2026-06-18).** Combine runs now group Mac-side outputs into `data/`
+  (tables: `scores.tsv`, `scores_detail.json`, `alignments.txt`, `dcalign_vs_inframe.{tsv,json}`,
+  `dcalign_convergence.{tsv,json}`) and `provenance/` (`score_manifest.json`, the two diagnostic
+  manifests, `run_manifest.json`); `figs/` holds figures. The top level keeps only the
+  **Mac↔Midway contract** files the cluster DCAlign scripts read by exact path —
+  `config_snapshot.yaml`, `models.json`, `query/` — plus `iteration_note.md` and `dcalign/`/`logs/`.
+  `scripts/sync_models.sh` selects by directory-name prune, so `data/`/`provenance/` are synced
+  automatically (no sync change). The cluster scripts were intentionally **not** touched.

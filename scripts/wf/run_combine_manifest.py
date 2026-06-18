@@ -42,14 +42,23 @@ manifest = {
     },
     "env": provenance.env_block(provenance.omp_threads_requested()),
     "artifacts": {
+        # Top-level contract files (cluster reads these) + the human note.
         "config_snapshot": _file_ref(run_root / "config_snapshot.yaml"),
         "models": _file_ref(run_root / "models.json"),
         "query_fasta": _file_ref(run_root / "query" / "query.fasta"),
-        "scores": _file_ref(run_root / "scores.tsv"),
-        "scores_detail": _file_ref(run_root / "scores_detail.json"),
-        "alignments": _file_ref(run_root / "alignments.txt"),
-        "score_manifest": _file_ref(run_root / "manifest.json"),
+        # Tables live under data/, manifests under provenance/ (run-dir tidy).
+        "scores": _file_ref(run_root / "data" / "scores.tsv"),
+        "scores_detail": _file_ref(run_root / "data" / "scores_detail.json"),
+        "alignments": _file_ref(run_root / "data" / "alignments.txt"),
+        "score_manifest": _file_ref(run_root / "provenance" / "score_manifest.json"),
         "energy_figure": _file_ref(run_root / "figs" / "two_model_energy.pdf"),
+        # DCAlign diagnostics (only present for method=dcalign; None otherwise).
+        "dcalign_baseline_table": _file_ref(run_root / "data" / "dcalign_vs_inframe.tsv"),
+        "dcalign_baseline_summary": _file_ref(run_root / "data" / "dcalign_vs_inframe.json"),
+        "dcalign_baseline_figure": _file_ref(run_root / "figs" / "dcalign_vs_inframe.pdf"),
+        "dcalign_convergence_table": _file_ref(run_root / "data" / "dcalign_convergence.tsv"),
+        "dcalign_convergence_summary": _file_ref(run_root / "data" / "dcalign_convergence.json"),
+        "dcalign_convergence_figure": _file_ref(run_root / "figs" / "dcalign_convergence.pdf"),
     },
     "stage_timings_sec": timings,
 }

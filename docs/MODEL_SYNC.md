@@ -56,7 +56,7 @@ drops the rest:
 | `dcalign/cache/<model>/meta.json` (provenance) | `dcalign/cache/<model>/shards/` (raw per-shard TSVs, merged into `alignments.tsv`) |
 | `config_snapshot.yaml`, `models.json`, `query/` | `dcalign/logs/` + top-level `logs/` (machine-local job logs) |
 | `dcalign/{shards_manifest,gather_status}.json`, `.shard_jids` | `*.tar.zst` (the finalizer's archives) |
-| `scores.tsv`, `scores_detail.json`, `manifest.json`, `alignments.txt` (after scoring) | `figs/` (regenerable; `--with-figs` to include) |
+| `data/` (scores + DCAlign diagnostics) + `provenance/` (manifests), after scoring | `figs/` (regenerable; `--with-figs` to include) |
 
 The whole point: the alignment runs on Midway (~15 GB scratch), but only
 ~0.5 MB/run needs to come back for the Mac to score. The score step reads

@@ -39,16 +39,41 @@ RUN_NAME = cfg.run_name
 RUN_ROOT = config.get("run_root") or f"combine/{RUN_NAME}"
 
 # ── Path scheme (all rooted under RUN_ROOT) ──────────────────────────────
-CONFIG_SNAP    = f"{RUN_ROOT}/config_snapshot.yaml"
-MODELS_JSON    = f"{RUN_ROOT}/models.json"
-QUERY_FASTA    = f"{RUN_ROOT}/query/query.fasta"
-QUERY_GROUPS   = f"{RUN_ROOT}/query/groups.json"
-SCORES         = f"{RUN_ROOT}/scores.tsv"
-SCORES_DETAIL  = f"{RUN_ROOT}/scores_detail.json"
-ALIGNMENTS     = f"{RUN_ROOT}/alignments.txt"
-SCORE_MANIFEST = f"{RUN_ROOT}/manifest.json"
+# Top-level holds the Mac↔Midway CONTRACT files (the cluster DCAlign scripts in
+# pipeline/external/ read these exact paths) + the human note. Everything the
+# pipeline produces on the Mac is grouped into two subdirs to keep the run dir
+# tidy: data/ (tables) and provenance/ (manifests). figs/ holds figures.
+CONFIG_SNAP    = f"{RUN_ROOT}/config_snapshot.yaml"   # contract (cluster reads it)
+MODELS_JSON    = f"{RUN_ROOT}/models.json"            # contract (cluster reads it)
+QUERY_FASTA    = f"{RUN_ROOT}/query/query.fasta"      # contract
+QUERY_GROUPS   = f"{RUN_ROOT}/query/groups.json"      # contract
+SCORES         = f"{RUN_ROOT}/data/scores.tsv"
+SCORES_DETAIL  = f"{RUN_ROOT}/data/scores_detail.json"
+ALIGNMENTS     = f"{RUN_ROOT}/data/alignments.txt"
+SCORE_MANIFEST = f"{RUN_ROOT}/provenance/score_manifest.json"
 ENERGY_FIG     = f"{RUN_ROOT}/figs/two_model_energy.pdf"
-RUN_MANIFEST   = f"{RUN_ROOT}/run_manifest.json"
+RUN_MANIFEST   = f"{RUN_ROOT}/provenance/run_manifest.json"
+
+# DCAlign diagnostics (only meaningful for method=dcalign, which has a cache).
+# Figures are gated on figures.enabled like the energy figure.
+DCALIGN_BASELINE_TSV      = f"{RUN_ROOT}/data/dcalign_vs_inframe.tsv"
+DCALIGN_BASELINE_JSON     = f"{RUN_ROOT}/data/dcalign_vs_inframe.json"
+DCALIGN_BASELINE_MANIFEST = f"{RUN_ROOT}/provenance/dcalign_vs_inframe_manifest.json"
+DCALIGN_BASELINE_FIG      = f"{RUN_ROOT}/figs/dcalign_vs_inframe.pdf"
+
+DCALIGN_CONV_TSV      = f"{RUN_ROOT}/data/dcalign_convergence.tsv"
+DCALIGN_CONV_JSON     = f"{RUN_ROOT}/data/dcalign_convergence.json"
+DCALIGN_CONV_MANIFEST = f"{RUN_ROOT}/provenance/dcalign_convergence_manifest.json"
+DCALIGN_CONV_FIG      = f"{RUN_ROOT}/figs/dcalign_convergence.pdf"
+
+DCALIGN_BASELINE_OUTPUTS = []
+if cfg.scoring.method == "dcalign":
+    DCALIGN_BASELINE_OUTPUTS = [
+        DCALIGN_BASELINE_TSV, DCALIGN_BASELINE_JSON, DCALIGN_BASELINE_MANIFEST,
+        DCALIGN_CONV_TSV, DCALIGN_CONV_JSON, DCALIGN_CONV_MANIFEST,
+    ]
+    if cfg.figures.enabled:
+        DCALIGN_BASELINE_OUTPUTS += [DCALIGN_BASELINE_FIG, DCALIGN_CONV_FIG]
 
 
 # ── Aggregate target ──────────────────────────────────────────────────────
@@ -60,6 +85,7 @@ rule all:
         QUERY_FASTA,
         SCORES,
         *([ENERGY_FIG] if cfg.figures.enabled else []),
+        *DCALIGN_BASELINE_OUTPUTS,
         RUN_MANIFEST,
 
 
@@ -150,6 +176,53 @@ if cfg.figures.enabled:
             "scripts/wf/run_render_combine.py"
 
 
+# ── DCAlign-vs-in-frame baseline (only when method=dcalign) ──────────────
+if cfg.scoring.method == "dcalign":
+
+    rule dcalign_baseline:
+        input:
+            models=MODELS_JSON,
+            fasta=QUERY_FASTA,
+            groups=QUERY_GROUPS,
+            scores=SCORES,  # orders after scoring; the cache must be present by then
+        output:
+            tsv=DCALIGN_BASELINE_TSV,
+            summary=DCALIGN_BASELINE_JSON,
+            manifest=DCALIGN_BASELINE_MANIFEST,
+            **({"fig": DCALIGN_BASELINE_FIG} if cfg.figures.enabled else {}),
+        params:
+            run_root=RUN_ROOT,
+        log:
+            f"{RUN_ROOT}/logs/dcalign_baseline.log"
+        threads: 1
+        resources:
+            mem_mb=4000,
+            runtime=20,
+        script:
+            "scripts/wf/run_dcalign_baseline.py"
+
+    rule dcalign_convergence:
+        input:
+            models=MODELS_JSON,
+            groups=QUERY_GROUPS,
+            scores=SCORES,  # orders after scoring; the cache must be present by then
+        output:
+            tsv=DCALIGN_CONV_TSV,
+            summary=DCALIGN_CONV_JSON,
+            manifest=DCALIGN_CONV_MANIFEST,
+            **({"fig": DCALIGN_CONV_FIG} if cfg.figures.enabled else {}),
+        params:
+            run_root=RUN_ROOT,
+        log:
+            f"{RUN_ROOT}/logs/dcalign_convergence.log"
+        threads: 1
+        resources:
+            mem_mb=2000,
+            runtime=15,
+        script:
+            "scripts/wf/run_dcalign_convergence.py"
+
+
 # ── Aggregate run manifest (last) ────────────────────────────────────────
 rule run_manifest:
     input:
@@ -157,6 +230,7 @@ rule run_manifest:
         MODELS_JSON,
         SCORES,
         *([ENERGY_FIG] if cfg.figures.enabled else []),
+        *DCALIGN_BASELINE_OUTPUTS,
     output:
         RUN_MANIFEST,
     params:

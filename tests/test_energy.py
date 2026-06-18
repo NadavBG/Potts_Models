@@ -450,6 +450,122 @@ def test_dcalign_cache_write_read_round_trip(tmp_path):
     assert back["s3"].used_decimation and back["s3"].n_iter == 5000
 
 
+# ── DCAlign-vs-in-frame baseline (SBM.energy.dcalign_baseline) ─────────────
+
+
+def test_column_agreement():
+    from SBM.energy.dcalign_baseline import column_agreement
+
+    a = np.array([1, 0, 5, 9, 0, 3])
+    assert column_agreement(a, a) == 1.0
+    b = a.copy()
+    b[2] = 7  # one position differs
+    assert np.isclose(column_agreement(a, b), 5 / 6)
+    with pytest.raises(ValueError, match="equal-length"):
+        column_agreement(a, a[:-1])
+
+
+def test_compare_record_recovered_and_perturbed():
+    """delta_e/col_agreement track the native vs DCAlign frame; cache canary ~0."""
+    from SBM.energy.dcalign_baseline import compare_record
+    from SBM.energy.datasets import QueryRecord
+    from SBM.utils.dcalign_score import DCAlignResult
+
+    L = 6
+    model = make_model(L, seed=204)
+    native = np.array([1, 0, 5, 9, 2, 11], dtype=np.int64)  # in-frame, gap allowed
+    record = QueryRecord(id="q0", group="A/natural", origin_model=model.name, ints=native)
+
+    # (a) DCAlign returns the native frame exactly → recovered.
+    e_native = potts_energy(native, model)
+    dca_same = DCAlignResult("q0", ints_to_seq(native), e_native, True, False, 10)
+    row = compare_record(record, model, dca_same)
+    assert row.ok and row.n_residues == int(np.count_nonzero(native))
+    assert np.isclose(row.e_inframe, e_native) and np.isclose(row.delta_e, 0.0)
+    assert row.col_agreement == 1.0 and row.cache_abs_diff < 1e-9
+
+    # (b) DCAlign returns a different frame → delta_e is the exact energy gap,
+    #     col_agreement < 1, and the cache canary still ~0 (energy passed in).
+    other = np.array([1, 3, 5, 9, 2, 11], dtype=np.int64)  # differs at one column
+    e_other = potts_energy(other, model)
+    dca_diff = DCAlignResult("q0", ints_to_seq(other), e_other, True, False, 42)
+    row2 = compare_record(record, model, dca_diff)
+    assert np.isclose(row2.e_dcalign, e_other)
+    assert np.isclose(row2.delta_e, e_other - e_native)
+    assert np.isclose(row2.col_agreement, 5 / 6) and row2.cache_abs_diff < 1e-9
+
+
+def test_compare_record_failed_alignment_is_flagged_not_dropped():
+    from SBM.energy.dcalign_baseline import compare_record
+    from SBM.energy.datasets import QueryRecord
+    from SBM.utils.dcalign_score import DCAlignResult
+
+    model = make_model(5, seed=205)
+    native = np.array([1, 2, 3, 0, 5], dtype=np.int64)
+    record = QueryRecord(id="bad", group="A/natural", origin_model=model.name, ints=native)
+    row = compare_record(record, model, DCAlignResult("bad", "", float("nan"), False, False, 0))
+    assert not row.ok
+    assert np.isclose(row.e_inframe, potts_energy(native, model))  # native still scored
+    assert np.isnan(row.e_dcalign) and np.isnan(row.delta_e) and np.isnan(row.col_agreement)
+
+
+def test_summarize_counts_worse_better_equal():
+    from SBM.energy.dcalign_baseline import BaselineRow, summarize
+
+    def mk(delta, model="A", group="A/natural", ok=True):
+        return BaselineRow(
+            sequence_id="x", group=group, model=model, n_residues=5,
+            e_inframe=-100.0, e_dcalign=-100.0 + delta, delta_e=delta,
+            col_agreement=0.9, cache_energy=-100.0 + delta, cache_abs_diff=1e-13,
+            converged=True, used_decimation=False, n_iter=1, ok=ok,
+        )
+
+    rows = [mk(5.0), mk(0.2), mk(-3.0), mk(50.0), mk(float("nan"), ok=False)]
+    s = summarize(rows, equal_tol=1.0)["overall"]
+    assert s["n"] == 5 and s["n_ok"] == 4 and s["n_failed"] == 1
+    assert s["n_worse"] == 2  # delta 5 and 50 exceed tol
+    assert s["n_better"] == 1  # delta -3
+    assert s["n_near_equal"] == 1  # delta 0.2
+    assert np.isclose(s["frac_worse"], 2 / 4)
+    assert s["cache_max_abs_diff"] < 1e-9
+
+
+def test_convergence_by_group_counts_over_both_models():
+    """Per-(model, group) convergence tallies span home + cross alignments."""
+    from SBM.energy.dcalign_baseline import convergence_by_group, summarize_convergence
+    from SBM.utils.dcalign_score import DCAlignResult
+
+    def r(sid, conv, dec=False, frame="ACDEF"):
+        return DCAlignResult(sid, frame, -1.0, conv, dec, 1)
+
+    # Model A aligns two of its own (home) + two cross; B mirrors. Not-converged
+    # always coincides with the decimation fallback (as in the real cache).
+    caches = {
+        "A": {"a0": r("a0", True), "a1": r("a1", False, dec=True),
+              "b0": r("b0", False, dec=True), "b1": r("b1", True)},
+        "B": {"a0": r("a0", True), "a1": r("a1", True),
+              "b0": r("b0", True), "b1": r("b1", False, dec=True, frame="")},  # failed
+    }
+    groups = {
+        "a0": {"group": "A/nat"}, "a1": {"group": "A/nat"},
+        "b0": {"group": "B/nat"}, "b1": {"group": "B/nat"},
+    }
+    rows = convergence_by_group(caches, groups)
+    by = {(x["model"], x["group"]): x for x in rows}
+    assert by[("A", "A/nat")]["n_not_converged"] == 1 and by[("A", "A/nat")]["n"] == 2
+    assert by[("A", "B/nat")]["n_not_converged"] == 1  # cross-family non-convergence
+    assert by[("B", "B/nat")]["n_failed"] == 1  # empty frame counted as failed
+    assert by[("A", "A/nat")]["n_decimation"] == 1
+
+    summ = summarize_convergence(rows)
+    assert summ["overall"]["n"] == 8
+    assert summ["by_model"]["A"]["n_not_converged"] == 2
+    assert summ["by_model"]["B"]["n_not_converged"] == 1
+    # A sequence absent from groups buckets as "(unknown)", not dropped.
+    rows2 = convergence_by_group({"A": {"z9": r("z9", True)}}, {})
+    assert rows2[0]["group"] == "(unknown)" and rows2[0]["n"] == 1
+
+
 def test_scoring_config_accepts_dcalign_keys():
     from SBM.combine_config import ScoringConfig
 

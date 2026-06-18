@@ -158,16 +158,26 @@ snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalig
     --config run_root=$RUN_ROOT --cores 4 all
 ```
 
-Outputs under `$RUN_ROOT`:
+Outputs under `$RUN_ROOT` (tables in `data/`, manifests in `provenance/`, figures
+in `figs/`; the top level keeps only the cluster-contract files —
+`config_snapshot.yaml`, `models.json`, `query/` — plus `iteration_note.md`):
 
-- `scores.tsv` — tidy, one row per (sequence × model): `E_A`/`E_B`, energy, flags
-- `scores_detail.json` — per sequence: `E_A`, `E_B`, `E_tot`, diagnostics, best frame
-- `alignments.txt` — human-readable; each sequence threaded into both frames
-- `manifest.json` — provenance incl. the DCAlign `meta` and the agreement canary
+- `data/scores.tsv` — tidy, one row per (sequence × model): `E_A`/`E_B`, energy, flags
+- `data/scores_detail.json` — per sequence: `E_A`, `E_B`, `E_tot`, diagnostics, best frame
+- `data/alignments.txt` — human-readable; each sequence threaded into both frames
+- `provenance/score_manifest.json` — provenance incl. the DCAlign `meta` and the agreement canary
 - `figs/two_model_energy.pdf` — `E_A` vs `E_B` scatter + marginals
-- `run_manifest.json` — aggregate
+- `provenance/run_manifest.json` — aggregate
 
-Read `alignments.txt` first; a native of one family sits low on its own model's
+For `method: dcalign`, two diagnostics also land (Blocker-1 baseline + convergence):
+
+- `data/dcalign_vs_inframe.{tsv,json}` + `figs/dcalign_vs_inframe.pdf` — DCAlign's energy
+  vs the native in-frame energy per home-pair sequence (`ΔE>0` ⇒ DCAlign worse than the
+  native frame); the scatter rings the not-converged points
+- `data/dcalign_convergence.{tsv,json}` + `figs/dcalign_convergence.pdf` — non-convergence
+  counts per (model, group) over all alignments (most non-convergence is cross-family)
+
+Read `data/alignments.txt` first; a native of one family sits low on its own model's
 axis and high on the other's.
 
 ---

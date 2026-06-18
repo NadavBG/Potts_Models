@@ -198,8 +198,10 @@ find_durable() {
         prune+=(-o -name work -o -name shards -o -name logs)
         extra=(! -name '*.tar.zst')
     fi
+    # ${extra[@]+...} guards against bash 3.2 (macOS default) treating an empty
+    # array under `set -u` as unbound — expands to nothing when extra is empty.
     find "${root}" -type d \( "${prune[@]}" \) -prune -o \
-         -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' "${extra[@]}" -print
+         -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' ${extra[@]+"${extra[@]}"} -print
 }
 
 # Build <tree>/SHA256SUMS locally for each present tree (cwd = repo root,
