@@ -112,21 +112,21 @@ CONC="${DCALIGN_MAX_CONCURRENT:-16}"
 # on caslake) is the efficient unit; fan across nodes with more shards + a higher
 # DCALIGN_MAX_CONCURRENT. DCALIGN_MEM overrides memory; DCALIGN_TINY=1 shrinks
 # walltime for a smoke (memory is NOT shrunk; see below). Defaults (no override):
-# the #SBATCH 4 cpus / 16G / 8h.
+# the #SBATCH 4 cpus / 8G / 8h.
 SHARD_OVERRIDES=()
 GATHER_OVERRIDES=()
 if [[ "${DCALIGN_TINY:-0}" == "1" ]]; then
-    SHARD_OVERRIDES=(--time=00:30:00 --mem="${DCALIGN_MEM:-16G}" --cpus-per-task="${DCALIGN_CPUS:-2}")
+    SHARD_OVERRIDES=(--time=00:30:00 --mem="${DCALIGN_MEM:-8G}" --cpus-per-task="${DCALIGN_CPUS:-2}")
     GATHER_OVERRIDES=(--time=00:15:00 --mem=2G)
-    echo "DCALIGN_TINY=1: short walltime (cpus=${DCALIGN_CPUS:-2}, mem=${DCALIGN_MEM:-16G}, time=30min)"
+    echo "DCALIGN_TINY=1: short walltime (cpus=${DCALIGN_CPUS:-2}, mem=${DCALIGN_MEM:-8G}, time=30min)"
 elif [[ -n "${DCALIGN_CPUS:-}" ]]; then
-    # cpus*2 GB, floored at 16G: lambda_spec="deltan" builds DCAlign.deltan_prior at
+    # cpus*2 GB, floored at 8G: lambda_spec="deltan" builds DCAlign.deltan_prior at
     # shard startup (~1.8 GB dist array for PPIC's 26701-seq seed) AND N~=L inflates
-    # palign's working set, so per-task peak exceeds 4G regardless of cpus — measured
-    # OOM at >4.13 GB on a 4G PPIC shard (2026-06-18). The floor is a per-task need, not
-    # a thread count. DCALIGN_MEM overrides (tune down to the smoke-measured MaxRSS for a
-    # cheaper fan-out: 16G/1-core bills as 4 core-equivalents on caslake). (spec §10.13)
-    SHARD_MEM_GB=$(( DCALIGN_CPUS * 2 )); (( SHARD_MEM_GB < 16 )) && SHARD_MEM_GB=16
+    # palign's working set — measured per-task peak ~4.5 GB at cpus=2 (iter-004 smoke,
+    # 2026-06-18); the old 4G cap OOM'd. The floor is a per-task need, not a thread count.
+    # 8G = ~1.75x headroom and bills as 2 core-equivalents on caslake (4 GB/core) vs 16G's
+    # 4. DCALIGN_MEM still overrides. (spec §10.13)
+    SHARD_MEM_GB=$(( DCALIGN_CPUS * 2 )); (( SHARD_MEM_GB < 8 )) && SHARD_MEM_GB=8
     SHARD_MEM="${DCALIGN_MEM:-${SHARD_MEM_GB}G}"
     SHARD_OVERRIDES=(--cpus-per-task="${DCALIGN_CPUS}" --mem="${SHARD_MEM}")
     echo "per-shard threads: cpus-per-task=${DCALIGN_CPUS} (JULIA_NUM_THREADS), mem=${SHARD_MEM}"

@@ -67,7 +67,7 @@ snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalig
   to Julia as `JULIA_NUM_THREADS`); `DCALIGN_MEM=NNG` overrides memory;
   `DCALIGN_MAX_CONCURRENT=N` caps array concurrency (default 16); `DCALIGN_TINY=1`
   shrinks walltime for a smoke (memory is NOT shrunk — the `deltan` seed `dist` is
-  full-size regardless). Defaults (no override): 4 cpus / 16 G / 8 h.
+  full-size regardless). Defaults (no override): 4 cpus / 8 G / 8 h.
 
 > **git + julia gotcha:** `module load julia` puts Julia's mbedTLS `libgit2` on
 > `LD_LIBRARY_PATH`, which can't find the system CA bundle and breaks `git` over
@@ -93,13 +93,13 @@ not. **So prefer fan-out with `cpus-per-task=1`.**
 
 **Memory (`lambda_spec="deltan"`):** every shard rebuilds the model's full seed prior at
 startup — a `(N_seed,L,L)` int64 `dist` array (~1.8 GB for PPIC's 26701-seq seed) — and
-`N≈L` inflates `palign`'s working set, so per-task peak exceeds 4 GB *regardless of how
-few queries the shard holds* (measured OOM at >4.13 GB on a 4 GB PPIC shard, 2026-06-18).
-The default floor is now **16 G/task**. Cost: caslake is 4 GB/core, so `1 core + 16 G`
-bills as **4 core-equivalents** and packs ~12 tasks/node instead of 48 — same real compute,
-~4× the SUs/node-hours. The smoke uses the same models + prior, so its `sacct MaxRSS` is the
-true per-task peak; tune `DCALIGN_MEM` down to ~1.5× that (likely 6–8 G) before the full run
-to recover packing efficiency.
+`N≈L` inflates `palign`'s working set, so per-task peak is **~4.5 GB** *regardless of how
+few queries the shard holds* — measured at `cpus=2` on the iter-004 smoke (2026-06-18); the
+old 4 GB cap OOM'd by ~0.5 GB. The default floor is now **8 G/task** (~1.75× the peak;
+`cpus=1` fan-out peaks lower still, ~3 GB, since only one `palign` runs at a time). Cost:
+caslake is 4 GB/core, so `1 core + 8 G` bills as **2 core-equivalents** (~24 tasks/node) —
+same real compute, ~2× the SUs/node-hours (vs 4× at 16 G). `DCALIGN_MEM` overrides for
+tighter packing.
 
 **Recommended full run** (`combine-CM-PPIC-dcalign`, 1800 seqs × 2 models = 3600
 alignments, `n_shards=256` → 512 one-core tasks, ~7 seqs each):
