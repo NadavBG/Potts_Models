@@ -274,6 +274,35 @@ def _write_queries(seqs: Sequence[np.ndarray], seq_ids: Sequence[str], path: Pat
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_seed_ins(msa: np.ndarray, path: Path) -> None:
+    """Write the model-frame seed MSA as a DCAlign a2m seed (``seed.ins``).
+
+    Each row of the width-``L`` integer MSA becomes one FASTA record with
+    residues uppercased and gaps as ``-`` (via :func:`_ints_to_str`); this is the
+    input ``DCAlign.deltan_prior`` reads to build the ``lambda_spec="deltan"``
+    prior (combine spec §10.13). The fixed-width MSA carries no insert columns,
+    so there are no lowercase residues and the prior captures the empirical
+    per-(i,j) gap/deletion geometry rather than literal insertions. Record ids
+    must be unique — DCAlign's ``readfull`` dedupes by the first header token, so
+    a shared id would silently collapse the seed to one sequence.
+    """
+    msa = np.asarray(msa, dtype=np.int64)
+    if msa.ndim != 2:
+        raise ValueError(f"seed MSA must be 2-D (N, L); got shape {msa.shape}")
+    if msa.size and (msa.min() < 0 or msa.max() > 20):
+        # _ints_to_str indexes ALPHABET (len 21); a stray -1 (load_fasta's
+        # non-canonical sentinel) would silently map to 'Y'. Fail loud instead.
+        raise ValueError(
+            f"seed MSA values must be in 0..20 (gap=0, residues 1..20); "
+            f"got [{int(msa.min())}, {int(msa.max())}]"
+        )
+    lines: list[str] = []
+    for i, row in enumerate(msa):
+        lines.append(f">seed{i}")
+        lines.append(_ints_to_str(row))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 # ── alignment via the Julia subprocess ───────────────────────────────────────
 
 
@@ -325,6 +354,21 @@ def align_sequences(
         ),
         encoding="utf-8",
     )
+    if lambda_spec != "flat":
+        # The empirical "deltan" prior is built (Julia-side) from the model-frame
+        # seed MSA; stage it as seed.ins next to the model binaries (spec §10.13).
+        # Local import: keep the bridge decoupled from the model module (and the
+        # MCMC kernel it pulls in) at import time — this runs cluster-side only.
+        from SBM.energy.model import load_seed_msa
+
+        msa = load_seed_msa(model.source)
+        if msa.ndim != 2 or msa.shape[1] != model.L:
+            raise ValueError(
+                f"seed MSA for {model.name!r} has shape {msa.shape}, expected "
+                f"(N, L={model.L}); the deltan prior must be built in the model's "
+                "exact frame"
+            )
+        _write_seed_ins(msa, out_dir / "seed.ins")
 
     cmd = [
         str(ctx.julia),

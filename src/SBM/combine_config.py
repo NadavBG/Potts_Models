@@ -24,6 +24,11 @@ SCHEMA_VERSION = 1
 _QUERY_SOURCES = ("model_sets", "fasta")
 _INCLUDE = ("natural", "synthetic")
 _METHODS = ("auto", "in_frame", "map", "marginal", "dcalign")
+# DCAlign insertion prior Λ (only used by method="dcalign"). "flat" = the original
+# geometry-blind prior (mass on Δn=1 for every (i,j)); "deltan" = the empirical
+# per-(i,j) prior built from each model's own seed MSA via DCAlign.deltan_prior
+# (combine spec §10.13).
+_LAMBDA_SPECS = ("flat", "deltan")
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,7 @@ class ScoringConfig:
     maxiter: int = 2000
     pcount: float = 1e-3
     n_shards: int = 32
+    # Insertion-prior shape for the cluster align step (see _LAMBDA_SPECS).
     lambda_spec: str = "flat"
 
     @classmethod
@@ -108,6 +114,10 @@ class ScoringConfig:
         _require(obj.n_shards >= 1, "scoring.n_shards must be >= 1")
         _require(obj.maxiter >= 1, "scoring.maxiter must be >= 1")
         _require(obj.pcount > 0, "scoring.pcount must be > 0")
+        _require(
+            obj.lambda_spec in _LAMBDA_SPECS,
+            f"scoring.lambda_spec must be one of {_LAMBDA_SPECS}",
+        )
         return obj
 
 

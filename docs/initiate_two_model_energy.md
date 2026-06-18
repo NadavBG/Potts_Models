@@ -610,3 +610,70 @@ reference (different length) and are skipped.
   `config_snapshot.yaml`, `models.json`, `query/` — plus `iteration_note.md` and `dcalign/`/`logs/`.
   `scripts/sync_models.sh` selects by directory-name prune, so `data/`/`provenance/` are synced
   automatically (no sync change). The cluster scripts were intentionally **not** touched.
+
+### 10.13 Informed insertion prior `lambda_spec="deltan"` (2026-06-18) — the Blocker-1 fix
+
+Phase-2 of §10.9: replace the flat insertion prior (the cause of the §10.12 baseline pathology)
+with an **inferred** prior, keeping the trained Potts `h`/`J` untouched. `scoring.lambda_spec`
+now accepts `"deltan"` in addition to `"flat"`.
+
+- **Why flat failed.** DCAlign's `palign` weights an insertion prior `Λ[i,j,Δn]` = the
+  distribution of the number of symbols between used match columns `i,j` (its `compute_dist`
+  convention: `Δn=1` = adjacent residue columns, no insertion). The flat prior
+  (`build_lambda` in `src/SBM/julia/run_dcalign.jl`) put **all mass on `Δn=1` for every `(i,j)`
+  pair, position-independently** — a geometry-blind prior. With only the `Alg`-ctor pcount floor +
+  noise to break ties, `palign` had no positional guidance and converged on confidently-wrong
+  frames (CM 569/900 home pairs worse-than-native; PPIC 112/900 — §10.12).
+- **The fix (`deltan`).** Use `DCAlign.deltan_prior(seed.ins, L)` (its native prior builder; the
+  exact usage in DCAlign's own `script/Run_alignment.jl`: `Λ,_,_ = deltan_prior(...)` →
+  `palign(..., deepcopy(Λ), ...)`). It builds the empirical per-`(i,j)` distribution from a
+  **model-frame** seed alignment.
+- **Frame-matching reality (resolved).** `deltan_prior` needs an insertion-bearing seed in the
+  model's *exact* L-frame. In DCAlign's native pipeline `align_seed_pfam` (hmmbuild) ties the
+  prior, `L`, and the Potts frame to one HMM. **Ours is bespoke** (Make_Alignment reference
+  coordinates: CM `L=96`, PPIC `L=91`), and Make_Alignment's insertion-bearing files are in the
+  Pfam ~80-col frame while its model-frame files have insertions stripped — so there is no
+  ready-made model-frame insertion seed. **Decision (user):** build the seed from **each model's
+  own training MSA** (`inputs/msa.npy`, already in the exact L-frame), written as an all-match
+  a2m. It carries no insert columns, so the prior learns the empirical **gap/deletion geometry**
+  per `(i,j)` rather than literal insertions — but that alone replaces the degenerate flat prior
+  with real per-position statistics.
+- **Plumbing.** `SBM.utils.dcalign_score._write_seed_ins` converts the seed MSA to `seed.ins`
+  (one unique-id record per row — DCAlign's `readfull` dedupes by header; gaps→`-`, residues
+  uppercased via `_ints_to_str`); `align_sequences` stages it into each shard work dir when
+  `lambda_spec != "flat"` (after asserting MSA width == `model.L`). `build_lambda(spec, L, in_dir)`
+  gains a `"deltan"` branch = `first(DCAlign.deltan_prior(joinpath(in_dir,"seed.ins"), L))`.
+  `combine_config.ScoringConfig` validates `lambda_spec ∈ {"flat","deltan"}` (default `"flat"`, so
+  existing flat runs are unchanged). The cluster wrappers already thread `lambda_spec` through —
+  no change. `score.py`'s `dcalign` branch is prior-agnostic (cache-reader) — no change.
+- **Status / validation.** Python path validated on the real models: `seed.ins` is `1258×96`
+  (CM) / `26701×91` (PPIC), all-uppercase+`-`, unique ids, width == `L`. `tests/test_energy.py`
+  covers the config validation + `_write_seed_ins` (32 passed). A local Julia smoke (DCAlign
+  `cab443f`, Julia 1.12.6) confirmed `build_lambda("deltan", L, in_dir)` dispatches and reaches
+  `DCAlign.deltan_prior` with the correct `seed.ins`/`L`; it then fails *inside* DCAlign's
+  `readfull`→`FastaIO` on a macOS-only zlib gap (`could not load symbol "gzopen64"`, the Linux LFS
+  variant macOS lacks). The flat path never hits FastaIO (it uses the driver's own `read_fasta`),
+  so this surfaces only for `deltan` and only on macOS. The authoritative end-to-end check is the
+  Tier-1/Tier-2 run on Midway (Linux, Julia 1.10.2, where `gzopen64` exists and DCAlign's own
+  pipeline uses FastaIO routinely). **iter-002** sets
+  `lambda_spec: deltan` in `config/params_combine-CM-PPIC-dcalign.yaml` (+ the `-smoke` variant).
+- **Non-degeneracy verified locally (the load-bearing claim).** Bypassing the macOS FastaIO gap by
+  feeding the real CM seed Dict straight into DCAlign's own `compute_dist` (Julia 1.12.6, clone
+  `cab443f`): the resulting Λ mode tracks column distance — adjacent `(1,2)`→Δn 1 but `(1,11)`→10,
+  `(1,31)`→30, `(40,60)`→20 — and only **2.1%** of `(i,j)` pairs have mode Δn=1, versus the flat
+  prior forcing Δn=1 on **100%**. So the insertion-free seed does **not** collapse back to flat;
+  the gaps make Δn encode real per-`(i,j)` geometry, which is the whole point.
+- **Success gate (vs the §10.12 flat baseline).** Home pairs worse-than-native (ΔE>1) CM
+  569/900 → ≈0, PPIC 112/900 → ≈0, and no native scoring worse than fields-Viterbi `map`. The
+  in-frame-vs-DCAlign energy canary (≤~1e-12) must still hold (the prior changes the alignment,
+  not the energy recompute). **Escalation if `deltan` under-fixes CM:** build a profile HMM in the
+  model frame and `hmmalign` the raw ungapped sequences to recover *literal* insertions, then
+  re-run — deferred behind this measurement.
+- **Memory / cost note.** `deltan_prior` allocates `dist` of shape `(N_seed, L, L)` int64 at shard
+  startup; PPIC's 26701-seq seed → ~1.8 GB transient. This is **before** the first row flush, so an
+  under-budgeted shard OOM-kills with zero progress. The fan-out path in
+  `pipeline/external/run_dcalign_align.sh` therefore floors `--mem` at **4G** (it was `cpus*2`, i.e.
+  2G for the documented `DCALIGN_CPUS=1` launch — too tight for `deltan`); `DCALIGN_MEM` still
+  overrides. Each shard rebuilds the (deterministic) prior independently — redundant across a model's
+  shards and on every resume, but dwarfed by the ~200 s/seq align cost; a build-once-and-stage-Λ
+  design is the obvious optimization if the seed grows much larger.

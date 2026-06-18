@@ -42,7 +42,7 @@ scoring:
   dcalign_seed: 0              # DCAlign RNG seed (palign seed=)
   maxiter: 2000                # BP sweeps per sequence (palign maxiter=; auto-bumped to 5000 when N<L)
   pcount: 0.001                # insertion-prior pseudocount floor (palign pcount=)
-  lambda_spec: flat            # phase-1 insertion prior (mass on dn=1); phase-2: informed deltan_prior
+  lambda_spec: deltan          # informed prior (DCAlign.deltan_prior from the model's own MSA, §10.13)
   n_shards: 2                  # Slurm array = 2*n_shards = 4 tasks (one per model x shard)
   # n_samples / ess_threshold are unused by dcalign (kept at defaults for schema completeness)
   n_samples: 1000

@@ -575,6 +575,8 @@ def test_scoring_config_accepts_dcalign_keys():
     )
     assert cfg.method == "dcalign" and cfg.n_shards == 8 and cfg.maxiter == 500
     assert cfg.dcalign_path == "/x/DCAlign" and cfg.julia == "/y/julia"
+    assert cfg.lambda_spec == "flat"  # default
+    assert ScoringConfig.from_dict({"lambda_spec": "deltan"}).lambda_spec == "deltan"
 
 
 def test_scoring_config_rejects_unknown_and_bad_bounds():
@@ -589,6 +591,35 @@ def test_scoring_config_rejects_unknown_and_bad_bounds():
         ScoringConfig.from_dict({"maxiter": 0})
     with pytest.raises(ConfigError, match="pcount"):
         ScoringConfig.from_dict({"pcount": 0})
+    with pytest.raises(ConfigError, match="lambda_spec"):
+        ScoringConfig.from_dict({"lambda_spec": "bogus"})
+
+
+def test_write_seed_ins_is_model_frame_a2m(tmp_path):
+    """The deltan-prior seed (seed.ins) is the width-L MSA as an all-match a2m:
+    one unique-id record per row, gaps as '-', residues uppercased, no lowercase
+    (no insert columns) — exactly what DCAlign.deltan_prior consumes (§10.13).
+    """
+    from SBM.utils.dcalign_score import ALPHABET, _write_seed_ins
+
+    # Two rows, width 4: a gap at (0,0) and (1,3); residues elsewhere.
+    msa = np.array([[0, 1, 20, 5], [3, 2, 1, 0]], dtype=np.int64)
+    out = tmp_path / "seed.ins"
+    _write_seed_ins(msa, out)
+
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert lines == [">seed0", "-AYF", ">seed1", "DCA-"]  # ALPHABET = "-ACDEFGHIKLMNPQRSTVWY"
+    headers = [ln for ln in lines if ln.startswith(">")]
+    assert len(headers) == len(set(headers)) == msa.shape[0]  # unique ids, one per row
+    for seq_line in (lines[1], lines[3]):
+        assert set(seq_line) <= set(ALPHABET)  # only uppercase residues + '-'
+        assert not any(c.islower() for c in seq_line)  # no insert columns
+
+    with pytest.raises(ValueError, match="2-D"):
+        _write_seed_ins(np.array([1, 2, 3], dtype=np.int64), tmp_path / "bad.ins")
+    # A stray -1 (load_fasta's non-canonical sentinel) must fail loud, not map to 'Y'.
+    with pytest.raises(ValueError, match="0..20"):
+        _write_seed_ins(np.array([[1, -1, 3, 4]], dtype=np.int64), tmp_path / "bad2.ins")
 
 
 # ── DCAlign integration, Tier 1 (needs julia + a DCAlign clone) ───────────────

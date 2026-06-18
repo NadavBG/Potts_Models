@@ -42,7 +42,9 @@ scoring:
   dcalign_seed: 0              # DCAlign RNG seed (palign seed=)
   maxiter: 2000                # BP sweeps per sequence (palign maxiter=; auto-bumped to 5000 when N<L)
   pcount: 0.001                # insertion-prior pseudocount floor (palign pcount=)
-  lambda_spec: flat            # phase-1 insertion prior (mass on Δn=1); phase-2: informed deltan_prior
+  lambda_spec: deltan          # informed prior: DCAlign.deltan_prior from each model's own
+                               # seed MSA (empirical per-(i,j) gap/deletion geometry, spec §10.13).
+                               # iter-001-baseline used "flat" (geometry-blind, mass on Δn=1).
   n_shards: 256                # Slurm array = 2*n_shards tasks (one per model x shard).
                                # 256 -> 512 one-core tasks (~7 seqs each) for the fan-out
                                # launch above; well under the 1000-job / 4800-core QOS cap.

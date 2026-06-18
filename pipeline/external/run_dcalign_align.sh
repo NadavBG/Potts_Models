@@ -119,7 +119,12 @@ if [[ "${DCALIGN_TINY:-0}" == "1" ]]; then
     GATHER_OVERRIDES=(--time=00:15:00 --mem=2G)
     echo "DCALIGN_TINY=1: small sbatch resources (cpus=${DCALIGN_CPUS:-2}, mem=${DCALIGN_MEM:-4G}, time=30min)"
 elif [[ -n "${DCALIGN_CPUS:-}" ]]; then
-    SHARD_MEM="${DCALIGN_MEM:-$(( DCALIGN_CPUS * 2 ))G}"
+    # cpus*2 GB, floored at 4G: lambda_spec="deltan" builds DCAlign.deltan_prior at
+    # shard startup, whose dist array is (N_seed,L,L) int64 (~1.8 GB for PPIC's 26701-seq
+    # seed) — the cpus=1 fan-out would otherwise request only 2G and OOM before any row
+    # is written (zero progress). DCALIGN_MEM still overrides. (spec §10.13)
+    SHARD_MEM_GB=$(( DCALIGN_CPUS * 2 )); (( SHARD_MEM_GB < 4 )) && SHARD_MEM_GB=4
+    SHARD_MEM="${DCALIGN_MEM:-${SHARD_MEM_GB}G}"
     SHARD_OVERRIDES=(--cpus-per-task="${DCALIGN_CPUS}" --mem="${SHARD_MEM}")
     echo "per-shard threads: cpus-per-task=${DCALIGN_CPUS} (JULIA_NUM_THREADS), mem=${SHARD_MEM}"
 fi

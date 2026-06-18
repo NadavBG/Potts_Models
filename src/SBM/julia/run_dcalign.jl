@@ -14,6 +14,8 @@
 #                  layout; gap remapped to index 21 — see ORDER in dcalign_score)
 #   model_h.bin    (q,L)     Float64, column-major
 #   queries.fasta  one >id / raw-sequence (residues A..Y, no gaps) per query
+#   seed.ins       (lambda_spec="deltan" only) the model-frame seed MSA as an
+#                  a2m FASTA; DCAlign.deltan_prior reads it to build Λ (§10.13)
 #
 # Output (appended to <out_tsv>, one row per query, flushed per row so a killed
 # shard leaves a valid partial cache — the resume contract):
@@ -81,20 +83,33 @@ function read_fasta(path::AbstractString)
 end
 
 
-"""Build the insertion prior Λ.
+"""Build the insertion prior Λ (combine spec §10.13).
 
-Phase-1 supports only `"flat"`: mass on Δn=1 (adjacent match, no insertion).
-The DCAlign `Alg` constructor reshapes this to (L,L,N+2), adds the pcount floor
-plus small noise, and renormalises — reproducing the spike's flat prior. The
-phase-2 upgrade (`DCAlign.deltan_prior`) plugs in here behind a new spec value.
+`"flat"`: mass on Δn=1 (adjacent match, no insertion) for every (i,j) pair — a
+geometry-blind prior. The DCAlign `Alg` constructor reshapes this to (L,L,N+2),
+adds the pcount floor plus small noise, and renormalises.
+
+`"deltan"`: the empirical per-(i,j) prior `DCAlign.deltan_prior` builds from a
+model-frame seed alignment (`seed.ins`, written by the Python bridge from each
+model's own seed MSA). It returns `(Λ, Mseed, dist)`; we take Λ and hand it to
+`palign` directly — exactly DCAlign's own `Run_alignment.jl` usage. The seed
+carries no insert columns, so this learns the gap/deletion geometry, replacing
+the flat prior's geometry-blind mass with real per-position statistics.
 """
-function build_lambda(spec::AbstractString, L::Int)
-    spec == "flat" || error("phase-1 supports only lambda_spec=\"flat\", got \"$spec\"")
-    Λ = OffsetArray(fill(0.0, (L, L, 2)), 1:L, 1:L, 0:1)
-    for i in 1:L, j in 1:L
-        Λ[i, j, 1] = 1.0
+function build_lambda(spec::AbstractString, L::Int, in_dir::AbstractString)
+    if spec == "flat"
+        Λ = OffsetArray(fill(0.0, (L, L, 2)), 1:L, 1:L, 0:1)
+        for i in 1:L, j in 1:L
+            Λ[i, j, 1] = 1.0
+        end
+        return Λ
+    elseif spec == "deltan"
+        seedins = joinpath(in_dir, "seed.ins")
+        isfile(seedins) ||
+            error("lambda_spec=\"deltan\" needs $seedins (written by align_sequences)")
+        return first(DCAlign.deltan_prior(seedins, L))
     end
-    return Λ
+    error("lambda_spec must be \"flat\" or \"deltan\", got \"$spec\"")
 end
 
 
@@ -135,7 +150,7 @@ function main()
     lambda_spec = String(meta["lambda_spec"])
 
     J, h = read_model(in_dir, q, L)
-    Λ = build_lambda(lambda_spec, L)
+    Λ = build_lambda(lambda_spec, L, in_dir)
     queries = read_fasta(joinpath(in_dir, "queries.fasta"))
     println(stderr, "run_dcalign: L=$L q=$q maxiter=$maxiter seed=$seed pcount=$pcount " *
                     "lambda=$lambda_spec n_queries=$(length(queries)) threads=$(Threads.nthreads())")
