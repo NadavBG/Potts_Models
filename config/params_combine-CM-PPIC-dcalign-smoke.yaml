@@ -1,9 +1,10 @@
 # Tier-2 real-model SMOKE for the DCAlign couplings-aware combine path. Same two
 # (real, synced) models and method as params_combine-CM-PPIC-dcalign.yaml, but a
-# tiny query (cap_per_group: 8 -> ~48 seqs over 6 groups, ~96 alignments) and
+# tiny query (cap_per_group: 2 -> ~12 seqs over 6 groups, ~24 alignments) and
 # n_shards: 2 so the whole sbatch array -> gather -> finalize -> score path runs
 # in minutes. Validates the model handoff + agreement canary on the real models
-# before the full cap=300 run. Run with DCALIGN_TINY=1 (small sbatch resources):
+# before the full cap=300 run. Run with DCALIGN_TINY=1 (short walltime; memory is
+# NOT shrunk -- the deltan seed dist needs the full 16G default, see run_dcalign_align.sh):
 #
 #   RR=combine/combine-CM-PPIC-dcalign-smoke/iter-001-tier2-smoke
 #   .venv/bin/python scripts/iter.py new combine-CM-PPIC-dcalign-smoke "tier2-smoke" --snakefile Snakefile.combine
@@ -32,7 +33,7 @@ models:                        # exactly two; E_tot = w_A*E_A + w_B*E_B.
 query:
   source: model_sets
   include: [natural, synthetic]
-  cap_per_group: 8             # tiny: ~8 seqs/group x 6 groups = ~48 query seqs
+  cap_per_group: 2             # tiny: ~2 seqs/group x 6 groups = ~12 query seqs -> ~24 alignments
 
 scoring:
   method: dcalign              # couplings-aware; reads the on-disk align cache and

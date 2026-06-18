@@ -17,7 +17,10 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=8G
+# 16G (not 4-8): lambda_spec="deltan" builds the seed dist array (~1.8 GB for PPIC)
+# and N~=L inflates palign, so per-task peak exceeds 4G regardless of cpus (measured
+# OOM at >4.13 GB, 2026-06-18). Driver's DCALIGN_MEM overrides; tune from smoke MaxRSS.
+#SBATCH --mem=16G
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/dcalign_shard_%A_%a.log
 #SBATCH --mail-type=FAIL,TIME_LIMIT
