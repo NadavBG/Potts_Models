@@ -1,5 +1,12 @@
 # Two-model `combine` pipeline.
 #
+# SEPARATE from the single-model `Snakefile` (one MSA -> one model): this one
+# takes two ALREADY-TRAINED models and scores a query set under both. Different
+# DAG, config schema (combine_config.py vs workflow_config.py), and output tree
+# (combine/ vs results/) — intentionally not merged. Scoring runs on the Mac;
+# only `scoring.method: dcalign` needs Midway (the alignment is sharded there,
+# then cached and pulled back). End-to-end runbook: docs/PIPELINE.md.
+#
 # One validated YAML config = one combine run. Consumes two already-trained
 # models and scores a query set (each family's natural + synthetic sequences,
 # or an external FASTA) under both, writing E_A / E_B / E_tot.

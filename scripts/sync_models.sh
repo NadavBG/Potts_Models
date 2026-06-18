@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
-# Sync trained models between the Mac and Midway with end-to-end checksum
-# verification. Replaces the old (never-populated) Git-LFS handoff: models are
-# big binary blobs (model.npy ~47 MB; 4.4 GB across all families) that do not
-# belong in git. They live on BOTH machines so larger cross-model comparisons
-# can run on the cluster.
+# Sync the durable artifacts that don't belong in git between the Mac and
+# Midway, with end-to-end checksum verification. Covers two trees:
+#   results/  trained models (big .npy blobs; ~0.5 GB/run)
+#   combine/  two-model runs, incl. the DCAlign cache the Mac reads to score
+# Replaces the old (never-populated) Git-LFS handoff. Both live on BOTH
+# machines: models so the cluster alignment can read them, and the DCAlign
+# cache so the combine SCORING can run on the Mac after that alignment. The
+# Mac-primary / Midway-for-DCAlign split is documented in docs/PIPELINE.md;
+# sync specifics in docs/MODEL_SYNC.md.
+#
+# Each tree gets its own <tree>/SHA256SUMS manifest. A tree absent on one side
+# is skipped (a fresh Mac has no combine/ until a run); a command fails only if
+# NO tree is present. Override the tree list with SBM_SYNC_ROOTS="results ...".
 #
 # Usage:
-#   scripts/sync_models.sh hash                  # (re)build results/SHA256SUMS locally
+#   scripts/sync_models.sh hash                  # (re)build each tree's SHA256SUMS locally
 #   scripts/sync_models.sh push   [opts]         # Mac -> Midway, then verify on Midway
 #   scripts/sync_models.sh pull   [opts]         # Midway -> Mac, then verify locally
-#   scripts/sync_models.sh verify [--remote]     # check results/SHA256SUMS (no transfer)
+#   scripts/sync_models.sh verify [--remote]     # check each SHA256SUMS (no transfer)
 #   scripts/sync_models.sh status [opts]         # diff local vs remote manifests (no transfer)
 #
 # Options:
@@ -21,7 +29,8 @@
 #   --no-verify    transfer only; skip the checksum verify (verify later with
 #                  `verify`/`verify --remote`)
 #   --host HOST    override SBM_MIDWAY_HOST
-#   --repo PATH    override SBM_MIDWAY_REPO (remote repo root; /results is appended)
+#   --repo PATH    override SBM_MIDWAY_REPO (remote repo root; each synced tree —
+#                  results/, combine/ — is appended)
 #
 # ssh connections are multiplexed (ControlMaster), so a whole command — transfer
 # AND verify — authenticates to Midway only ONCE (one Duo/password prompt).
@@ -35,6 +44,11 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Trees synced (repo-root-relative). results/ = trained models; combine/ =
+# two-model runs incl. the DCAlign cache. Override with SBM_SYNC_ROOTS.
+# IFS is $'\n\t' here (no space), so split explicitly on whitespace.
+IFS=$' \t\n' read -r -a SYNC_ROOTS <<< "${SBM_SYNC_ROOTS:-results combine}"
 
 DEFAULT_HOST="midway3.rcc.uchicago.edu"
 DEFAULT_REPO="/project/ranganathanr/nadavbg/Potts_Models"
@@ -82,7 +96,7 @@ done
 
 HOST="${CLI_HOST:-${SBM_MIDWAY_HOST:-${DEFAULT_HOST}}}"
 REPO="${CLI_REPO:-${SBM_MIDWAY_REPO:-${DEFAULT_REPO}}}"
-# Strip a trailing slash so "${REPO}/results" is well-formed.
+# Strip a trailing slash so "${REPO}/<tree>" is well-formed for each synced tree.
 REPO="${REPO%/}"
 
 # --- ssh connection sharing (multiplexing) ----------------------------------
@@ -151,35 +165,63 @@ fi
 # Mirrored by both the manifest (find below) and rsync (--exclude). A divergence
 # is caught loudly by the post-transfer verify (a manifest entry that did not
 # land prints FAILED), never silent.
+# rsync --exclude patterns for ONE tree. This set MUST mirror find_durable()'s
+# prunes for the same tree, or the post-transfer verify FAILs on a manifested
+# file rsync skipped. combine/ additionally drops the heavy/regenerable DCAlign
+# scratch so only the small per-model alignments.tsv (+ meta.json) travels.
 rsync_excludes() {
+    local root="$1"
     # Always-excluded caches/junk.
     printf '%s\n' '__pycache__/' '.snakemake/' '.DS_Store' '*.pyc'
     if [[ "${WITH_FIGS}" -eq 0 ]]; then
         printf '%s\n' 'figs/' 'mpnn_tmp/'
     fi
-}
-
-# Emit a NUL-separated list of durable files under results/ (cwd = repo root).
-find_durable() {
-    if [[ "${WITH_FIGS}" -eq 1 ]]; then
-        find results -type d \( -name __pycache__ -o -name .snakemake \) -prune -o \
-             -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' -print
-    else
-        find results -type d \( -name figs -o -name mpnn_tmp -o -name __pycache__ -o -name .snakemake \) -prune -o \
-             -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' -print
+    if [[ "${root}" == "combine" ]]; then
+        # work/   ~7-8 GB/model of BP-solver scratch (deleted by the finalizer)
+        # shards/ raw per-shard TSVs, already merged into alignments.tsv
+        # logs/   machine-local job logs (scoring regenerates its own on the Mac)
+        # *.tar.zst  the finalizer's archives (not needed to score)
+        printf '%s\n' 'work/' 'shards/' 'logs/' '*.tar.zst'
     fi
 }
 
-# Build results/SHA256SUMS locally (cwd = repo root). Deterministic order.
+# Emit a newline-separated list of durable files under ONE tree (cwd = repo
+# root). The prunes mirror rsync_excludes() for the same tree.
+find_durable() {
+    local root="$1"
+    local prune=(-name __pycache__ -o -name .snakemake)
+    if [[ "${WITH_FIGS}" -eq 0 ]]; then
+        prune+=(-o -name figs -o -name mpnn_tmp)
+    fi
+    local extra=()
+    if [[ "${root}" == "combine" ]]; then
+        prune+=(-o -name work -o -name shards -o -name logs)
+        extra=(! -name '*.tar.zst')
+    fi
+    find "${root}" -type d \( "${prune[@]}" \) -prune -o \
+         -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' "${extra[@]}" -print
+}
+
+# Build <tree>/SHA256SUMS locally for each present tree (cwd = repo root,
+# entries repo-root-relative). Deterministic order. Skips an absent tree; dies
+# only if none of SYNC_ROOTS is present.
 build_local_manifest() {
     ( cd "${REPO_ROOT}"
-      [[ -d results ]] || die "no results/ directory at ${REPO_ROOT}."
       local files; files="$(mktemp)"
       trap 'rm -f "${files}"' EXIT   # EXIT, not RETURN: this runs in a ( ) subshell
-      find_durable | LC_ALL=C sort > "${files}"
-      [[ -s "${files}" ]] || die "no durable files found under results/ (nothing to sync)."
-      tr '\n' '\0' < "${files}" | xargs -0 "${SHA_BIN[@]}" > results/SHA256SUMS
-      log "wrote results/SHA256SUMS ($(wc -l < results/SHA256SUMS | tr -d ' ') files)"
+      local root present=0
+      for root in "${SYNC_ROOTS[@]}"; do
+          [[ -d "${root}" ]] || continue
+          find_durable "${root}" | LC_ALL=C sort > "${files}"
+          if [[ ! -s "${files}" ]]; then
+              warn "${root}/ has no durable files — skipping its manifest."
+              continue
+          fi
+          tr '\n' '\0' < "${files}" | xargs -0 "${SHA_BIN[@]}" > "${root}/SHA256SUMS"
+          log "wrote ${root}/SHA256SUMS ($(wc -l < "${root}/SHA256SUMS" | tr -d ' ') files)"
+          present=$((present+1))
+      done
+      [[ "${present}" -gt 0 ]] || die "none of [${SYNC_ROOTS[*]}] present at ${REPO_ROOT} (nothing to sync)."
     )
 }
 
@@ -187,23 +229,33 @@ build_local_manifest() {
 # script existing remotely. Echoes the remote file count on success.
 build_remote_manifest() {
     setup_mux
-    ssh "${SSH_OPTS[@]}" "${HOST}" 'bash -s' -- "${REPO}" "${WITH_FIGS}" <<'REOF'
+    ssh "${SSH_OPTS[@]}" "${HOST}" 'bash -s' -- "${REPO}" "${WITH_FIGS}" "${SYNC_ROOTS[@]}" <<'REOF'
 set -euo pipefail
-repo="$1"; with_figs="$2"
+repo="$1"; with_figs="$2"; shift 2; roots=("$@")
 cd "$repo" || { echo "ERROR: remote repo not found: $repo" >&2; exit 1; }
-[ -d results ] || { echo "ERROR: no results/ under $repo" >&2; exit 1; }
-if command -v sha256sum >/dev/null 2>&1; then SHA="sha256sum"; else SHA="shasum -a 256"; fi
-files="$(mktemp)"; trap 'rm -f "$files"' EXIT
-if [ "$with_figs" -eq 1 ]; then
-    find results -type d \( -name __pycache__ -o -name .snakemake \) -prune -o \
-         -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' -print
-else
-    find results -type d \( -name figs -o -name mpnn_tmp -o -name __pycache__ -o -name .snakemake \) -prune -o \
-         -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' -print
-fi | LC_ALL=C sort > "$files"
-[ -s "$files" ] || { echo "ERROR: no durable files under $repo/results" >&2; exit 1; }
-tr '\n' '\0' < "$files" | xargs -0 $SHA > results/SHA256SUMS
-wc -l < results/SHA256SUMS
+if command -v sha256sum >/dev/null 2>&1; then SHA=(sha256sum); else SHA=(shasum -a 256); fi
+present=0
+for root in "${roots[@]}"; do
+    [ -d "$root" ] || continue
+    prune=(-name __pycache__ -o -name .snakemake)
+    [ "$with_figs" -eq 0 ] && prune+=(-o -name figs -o -name mpnn_tmp)
+    extra=()
+    if [ "$root" = "combine" ]; then
+        prune+=(-o -name work -o -name shards -o -name logs)
+        extra=(! -name '*.tar.zst')
+    fi
+    files="$(mktemp)"
+    find "$root" -type d \( "${prune[@]}" \) -prune -o \
+         -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' "${extra[@]}" -print \
+         | LC_ALL=C sort > "$files"
+    if [ -s "$files" ]; then
+        tr '\n' '\0' < "$files" | xargs -0 "${SHA[@]}" > "$root/SHA256SUMS"
+        present=$((present+1))
+    fi
+    rm -f "$files"
+done
+[ "$present" -gt 0 ] || { echo "ERROR: none of [${roots[*]}] under $repo" >&2; exit 1; }
+echo "$present"
 REOF
 }
 
@@ -213,15 +265,20 @@ check_failures() { grep -c 'FAILED' || true; }
 
 verify_local() {
     ( cd "${REPO_ROOT}"
-      [[ -f results/SHA256SUMS ]] || die "no results/SHA256SUMS locally (run 'hash', 'push', or 'pull' first)."
-      local out rc=0
-      out="$("${SHA_BIN[@]}" -c results/SHA256SUMS 2>&1)" || rc=$?
-      local fails; fails="$(printf '%s\n' "${out}" | check_failures)"
-      if [[ "${rc}" -ne 0 || "${fails}" -ne 0 ]]; then
-          printf '%s\n' "${out}" | grep 'FAILED' >&2 || true
-          die "local verify FAILED: ${fails} file(s) reported FAILED (checksum exit ${rc}). See lines above."
-      fi
-      log "local verify OK ($(wc -l < results/SHA256SUMS | tr -d ' ') files)"
+      local root checked=0
+      for root in "${SYNC_ROOTS[@]}"; do
+          [[ -f "${root}/SHA256SUMS" ]] || continue
+          local out rc=0
+          out="$("${SHA_BIN[@]}" -c "${root}/SHA256SUMS" 2>&1)" || rc=$?
+          local fails; fails="$(printf '%s\n' "${out}" | check_failures)"
+          if [[ "${rc}" -ne 0 || "${fails}" -ne 0 ]]; then
+              printf '%s\n' "${out}" | grep 'FAILED' >&2 || true
+              die "local verify FAILED for ${root}/: ${fails} file(s) reported FAILED (checksum exit ${rc}). See lines above."
+          fi
+          log "local verify OK: ${root}/ ($(wc -l < "${root}/SHA256SUMS" | tr -d ' ') files)"
+          checked=$((checked+1))
+      done
+      [[ "${checked}" -gt 0 ]] || die "no <tree>/SHA256SUMS locally (run 'hash', 'push', or 'pull' first)."
     )
 }
 
@@ -231,21 +288,24 @@ verify_local() {
 # silently retry-on-failure and could mask a real mismatch.
 verify_remote() {
     setup_mux
-    log "remote verify on ${HOST}:${REPO}/results ..."
+    log "remote verify on ${HOST}:${REPO} (${SYNC_ROOTS[*]}) ..."
     local out rc=0
-    out="$(ssh "${SSH_OPTS[@]}" "${HOST}" 'bash -s' -- "${REPO}" <<'REOF'
+    out="$(ssh "${SSH_OPTS[@]}" "${HOST}" 'bash -s' -- "${REPO}" "${SYNC_ROOTS[@]}" <<'REOF'
 set -uo pipefail
-cd "$1" || { echo "verify: cannot cd to remote repo $1" >&2; exit 12; }
-[ -f results/SHA256SUMS ] || { echo "verify: results/SHA256SUMS missing on remote" >&2; exit 8; }
-if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum -c results/SHA256SUMS
-else
-    shasum -a 256 -c results/SHA256SUMS
-fi
+repo="$1"; shift; roots=("$@")
+cd "$repo" || { echo "verify: cannot cd to remote repo $repo" >&2; exit 12; }
+if command -v sha256sum >/dev/null 2>&1; then SHA=(sha256sum); else SHA=(shasum -a 256); fi
+checked=0
+for root in "${roots[@]}"; do
+    [ -f "$root/SHA256SUMS" ] || continue
+    "${SHA[@]}" -c "$root/SHA256SUMS" || exit 1
+    checked=$((checked+1))
+done
+[ "$checked" -gt 0 ] || { echo "verify: no <tree>/SHA256SUMS on remote" >&2; exit 8; }
 REOF
     )" || rc=$?
     if [[ "${rc}" -ne 0 ]]; then
-        printf '%s\n' "${out}" | grep -iE 'FAILED|No such|missing|cannot' >&2 || printf '%s\n' "${out}" >&2
+        printf '%s\n' "${out}" | grep -iE 'FAILED|No such|missing|cannot|verify:' >&2 || printf '%s\n' "${out}" >&2
         die "remote verify FAILED (exit ${rc}) on ${HOST}. See lines above."
     fi
     log "remote verify OK"
@@ -264,8 +324,8 @@ build_rsync_args() {
     fi
     [[ "${DRY_RUN}" -eq 1 ]] && RSYNC_ARGS+=(-n)
     [[ "${MIRROR}"  -eq 1 ]] && RSYNC_ARGS+=(--delete)
-    local pat
-    while IFS= read -r pat; do RSYNC_ARGS+=("--exclude=${pat}"); done < <(rsync_excludes)
+    # Per-tree --exclude patterns are appended in do_push/do_pull (they differ
+    # by tree), so RSYNC_ARGS holds only the tree-independent flags here.
     # Route rsync's ssh through the shared master so the transfer reuses the
     # one authenticated connection (no second Duo/password prompt).
     [[ -n "${SSH_CTL}" ]] && RSYNC_ARGS+=(-e "ssh -o ControlMaster=auto -o ControlPath=${SSH_CTL} -o ControlPersist=60")
@@ -287,8 +347,9 @@ print_summary() {
     log "----------------------------------------------------------------"
     log "sync_models ${action}$([[ ${DRY_RUN} -eq 1 ]] && echo ' (dry-run)')"
     log "  host        : ${HOST}"
-    log "  remote path : ${REPO}/results"
-    log "  local path  : ${REPO_ROOT}/results"
+    log "  trees       : ${SYNC_ROOTS[*]} (only those present are transferred)"
+    log "  remote repo : ${HOST}:${REPO}"
+    log "  local repo  : ${REPO_ROOT}"
     [[ -n "${RSYNC_VER}" ]] && log "  rsync       : ${RSYNC} — ${RSYNC_VER}"
     log "  scope       : $([[ ${WITH_FIGS} -eq 1 ]] && echo 'everything (--with-figs)' || echo 'durable only')"
     log "  git HEAD    : $(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo '?')$( [[ -n "$(git -C "${REPO_ROOT}" status --porcelain 2>/dev/null)" ]] && echo ' (dirty)')"
@@ -301,8 +362,16 @@ do_push() {
     build_rsync_args
     print_summary push
     build_local_manifest
-    log "rsync up: ${REPO_ROOT}/results/ -> ${HOST}:${REPO}/results/"
-    "${RSYNC}" "${RSYNC_ARGS[@]}" "${REPO_ROOT}/results/" "${HOST}:${REPO}/results/"
+    local root pat synced=0
+    for root in "${SYNC_ROOTS[@]}"; do
+        [[ -d "${REPO_ROOT}/${root}" ]] || { log "skip ${root}/ (absent on Mac)"; continue; }
+        local args=("${RSYNC_ARGS[@]}")
+        while IFS= read -r pat; do args+=("--exclude=${pat}"); done < <(rsync_excludes "${root}")
+        log "rsync up: ${REPO_ROOT}/${root}/ -> ${HOST}:${REPO}/${root}/"
+        "${RSYNC}" "${args[@]}" "${REPO_ROOT}/${root}/" "${HOST}:${REPO}/${root}/"
+        synced=$((synced+1))
+    done
+    [[ "${synced}" -gt 0 ]] || die "no trees present on Mac to push."
     if [[ "${DRY_RUN}" -eq 1 ]]; then
         log "dry-run: skipped remote verify."
         return 0
@@ -320,10 +389,27 @@ do_pull() {
     setup_mux              # one auth here; remote manifest + rsync reuse it
     build_rsync_args
     print_summary pull
-    log "rebuilding manifest on ${HOST} ..."
+    log "rebuilding manifest(s) on ${HOST} ..."
     build_remote_manifest >/dev/null
-    log "rsync down: ${HOST}:${REPO}/results/ -> ${REPO_ROOT}/results/"
-    "${RSYNC}" "${RSYNC_ARGS[@]}" "${HOST}:${REPO}/results/" "${REPO_ROOT}/results/"
+    # Which trees exist on the remote? One round-trip over the shared connection
+    # (repo path + roots passed as positional args, not interpolated into the
+    # remote command); rsync of an absent source dir would otherwise error out.
+    local remote_roots
+    remote_roots="$(ssh "${SSH_OPTS[@]}" "${HOST}" 'bash -s' -- "${REPO}" "${SYNC_ROOTS[@]}" <<'REOF'
+repo="$1"; shift
+cd "$repo" 2>/dev/null || exit 0
+for r in "$@"; do [ -d "$r" ] && printf '%s\n' "$r"; done
+REOF
+    )"
+    [[ -n "${remote_roots}" ]] || die "none of [${SYNC_ROOTS[*]}] present on ${HOST}:${REPO}."
+    local root pat
+    while IFS= read -r root; do
+        [[ -n "${root}" ]] || continue
+        local args=("${RSYNC_ARGS[@]}")
+        while IFS= read -r pat; do args+=("--exclude=${pat}"); done < <(rsync_excludes "${root}")
+        log "rsync down: ${HOST}:${REPO}/${root}/ -> ${REPO_ROOT}/${root}/"
+        "${RSYNC}" "${args[@]}" "${HOST}:${REPO}/${root}/" "${REPO_ROOT}/${root}/"
+    done <<< "${remote_roots}"
     if [[ "${DRY_RUN}" -eq 1 ]]; then
         log "dry-run: skipped local verify."
         return 0
@@ -336,30 +422,37 @@ do_pull() {
     log "pull complete and verified."
 }
 
-# Diff local vs remote manifests; report only-local / only-remote / mismatch.
+# Diff local vs remote manifests per tree; report only-local / only-remote /
+# mismatch, totalled across trees.
 do_status() {
     print_summary status
     build_local_manifest
-    log "rebuilding manifest on ${HOST} ..."
+    log "rebuilding manifest(s) on ${HOST} ..."
     build_remote_manifest >/dev/null
     local lt rt remote_raw; lt="$(mktemp)"; rt="$(mktemp)"; remote_raw="$(mktemp)"
     trap 'rm -f "${lt}" "${rt}" "${remote_raw}"' RETURN
     # Normalize each manifest to "path<TAB>hash", sorted by path.
     normalize() { awk '{h=$1; $1=""; sub(/^[ \t]+/,""); print $0"\t"h}' | LC_ALL=C sort; }
-    normalize < "${REPO_ROOT}/results/SHA256SUMS" > "${lt}"
-    ssh "${SSH_OPTS[@]}" "${HOST}" "cat ${REPO}/results/SHA256SUMS" > "${remote_raw}"
-    normalize < "${remote_raw}" > "${rt}"
-
-    local report; report="$(LC_ALL=C join -t"$(printf '\t')" -a1 -a2 -e '__ABSENT__' -o '0,1.2,2.2' "${lt}" "${rt}")"
-    local only_local only_remote mismatch ok
-    only_local=0; only_remote=0; mismatch=0; ok=0
-    while IFS=$'\t' read -r path lh rh; do
-        [[ -z "${path}" ]] && continue
-        if   [[ "${lh}" == "__ABSENT__" ]]; then only_remote=$((only_remote+1)); printf '  only on Midway : %s\n' "${path}" >&2
-        elif [[ "${rh}" == "__ABSENT__" ]]; then only_local=$((only_local+1));  printf '  only on Mac    : %s\n' "${path}" >&2
-        elif [[ "${lh}" != "${rh}" ]];        then mismatch=$((mismatch+1));    printf '  HASH MISMATCH  : %s\n' "${path}" >&2
-        else ok=$((ok+1)); fi
-    done <<< "${report}"
+    local ok=0 only_local=0 only_remote=0 mismatch=0 root
+    for root in "${SYNC_ROOTS[@]}"; do
+        if [[ -f "${REPO_ROOT}/${root}/SHA256SUMS" ]]; then
+            normalize < "${REPO_ROOT}/${root}/SHA256SUMS" > "${lt}"
+        else : > "${lt}"; fi
+        ssh "${SSH_OPTS[@]}" "${HOST}" 'bash -s' -- "${REPO}" "${root}" > "${remote_raw}" <<'REOF'
+cat "$1/$2/SHA256SUMS" 2>/dev/null || true
+REOF
+        if [[ -s "${remote_raw}" ]]; then normalize < "${remote_raw}" > "${rt}"; else : > "${rt}"; fi
+        [[ -s "${lt}" || -s "${rt}" ]] || continue
+        local report; report="$(LC_ALL=C join -t"$(printf '\t')" -a1 -a2 -e '__ABSENT__' -o '0,1.2,2.2' "${lt}" "${rt}")"
+        local path lh rh
+        while IFS=$'\t' read -r path lh rh; do
+            [[ -z "${path}" ]] && continue
+            if   [[ "${lh}" == "__ABSENT__" ]]; then only_remote=$((only_remote+1)); printf '  only on Midway : %s\n' "${path}" >&2
+            elif [[ "${rh}" == "__ABSENT__" ]]; then only_local=$((only_local+1));   printf '  only on Mac    : %s\n' "${path}" >&2
+            elif [[ "${lh}" != "${rh}" ]];        then mismatch=$((mismatch+1));     printf '  HASH MISMATCH  : %s\n' "${path}" >&2
+            else ok=$((ok+1)); fi
+        done <<< "${report}"
+    done
     log "----------------------------------------------------------------"
     log "status: ${ok} in sync, ${only_local} only on Mac, ${only_remote} only on Midway, ${mismatch} mismatched"
     if [[ "${mismatch}" -gt 0 ]]; then

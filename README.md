@@ -291,6 +291,8 @@ snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --co
 
 Combine runs land under **`combine/<run_name>/`** — a separate (git-ignored) tree from the single-model `results/`, so dual-model runs never mix with single-model ones.
 
+**Where it runs.** `map`, `marginal`, and `in_frame` run entirely on your Mac. Only `method: dcalign` needs the Midway cluster — its alignment is ~700× slower and is sharded there — after which you pull the small cache back and score locally. That end-to-end Mac→Midway→Mac sequence is the runbook **`docs/PIPELINE.md`**.
+
 ### Write a combine config
 
 Copy `config/params_combine-CM-PPIC.yaml`. The schema is validated by `src/SBM/combine_config.py` (unknown keys are an error). Fields, with defaults:
@@ -334,11 +336,12 @@ To score **your own sequences** instead of the models' training/synthetic sets, 
 | method | what it does | when |
 | --- | --- | --- |
 | `map` | **(default)** Viterbi-align to each model, full Potts energy on that single best path; same procedure for both models | you want the single best alignment + comparable `E_A`, `E_B` |
+| `dcalign` | couplings-aware alignment by DCAlign (uses the full `J`, not just conservation), then full Potts energy in-frame; runs on Midway, cached on disk | the most accurate cross-family alignment — runbook in `docs/PIPELINE.md` |
 | `marginal` | free energy `−log Σ_a e^(−E(x,a))` by importance sampling; reports ESS + MC stderr | the principled model-evidence; accounts for alignment ambiguity |
 | `in_frame` | exact Potts sum; requires the sequence already be in the model's frame | sequences already aligned to a model |
 | `auto` | `in_frame` (original MSA alignment) for a sequence's home model, `marginal` for the other | fast per-model scoring — **but** `E_A`/`E_B` use different aligners, so *not* comparable (it warns) |
 
-`map` is currently the *fields*-MAP (Viterbi under the HMM, which aligns using conservation but ignores the couplings `J`), so the alignment it picks is good but not guaranteed energy-optimal; a couplings-aware aligner (DCAlign) is the planned upgrade — see `docs/initiate_two_model_energy.md` §10.2.
+`map` is the *fields*-MAP (Viterbi under the HMM, which aligns using conservation but ignores the couplings `J`), so the alignment it picks is good but not guaranteed energy-optimal. The couplings-aware upgrade — `method: dcalign` — is **implemented and validated** (phase-1, flat insertion prior; the informed insertion prior is the deferred phase-2 fix): DCAlign chooses the alignment using the full `J`. Because it is ~700× slower it runs on Midway and is cached on disk; the end-to-end Mac→Midway→Mac sequence is the runbook `docs/PIPELINE.md` (spec: `docs/initiate_two_model_energy.md` §10.9).
 
 ### What you get
 
@@ -371,7 +374,7 @@ The two frames are independent (different lengths, not column-aligned). A native
 
 ### Reading the ESS (only for `method: marginal`)
 
-ESS comes out of the importance-sampling pass, so it is reported only when you run `method: marginal` (the default `map` is a deterministic single alignment with no ESS). The marginal estimate is only as good as its ESS. **A low ESS is not always a problem:** when a sequence aligns essentially one way (e.g. a native in its own family), the alignment posterior is sharply peaked, ESS is near 1 *by construction*, and the marginal energy still agrees with the MAP and in-frame energies. A low ESS on a genuinely ambiguous cross-family alignment, on the other hand, means the estimate is dominated by one lucky sample and should be treated as an upper bound — raise `n_samples`, or upgrade to a Potts-aware proposal (DCAlign) / annealed importance sampling. Either way the run **warns loudly** and records the ESS in `scores.tsv`, `scores_detail.json`, and `manifest.json`; nothing is hidden.
+ESS comes out of the importance-sampling pass, so it is reported only when you run `method: marginal` (the default `map` is a deterministic single alignment with no ESS). The marginal estimate is only as good as its ESS. **A low ESS is not always a problem:** when a sequence aligns essentially one way (e.g. a native in its own family), the alignment posterior is sharply peaked, ESS is near 1 *by construction*, and the marginal energy still agrees with the MAP and in-frame energies. A low ESS on a genuinely ambiguous cross-family alignment, on the other hand, means the estimate is dominated by one lucky sample and should be treated as an upper bound — raise `n_samples`, or switch to the couplings-aware `method: dcalign` (now available; runs on Midway, see `docs/PIPELINE.md`) or annealed importance sampling. Either way the run **warns loudly** and records the ESS in `scores.tsv`, `scores_detail.json`, and `manifest.json`; nothing is hidden.
 
 ---
 

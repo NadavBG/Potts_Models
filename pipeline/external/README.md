@@ -22,7 +22,7 @@ finalizer validates + compresses the result.
 | `run_dcalign_align.sh` | login node | git-pull, preflight, plan shards, submit array + gather, write `.shard_jids` |
 | `sbatch_dcalign_shard.sh` | compute node (array) | align one `(model, shard)`; resumable; no network |
 | `sbatch_dcalign_gather.sh` | compute node | merge shards → `cache/<model>/alignments.tsv` + provenance |
-| `finalize_dcalign_push.sh` | login node | sacct-validate, reclaim space, optional `--push` |
+| `finalize_dcalign_push.sh` | login node | sacct-validate, reclaim space (cache leaves Midway via rsync, not git) |
 
 The Python entrypoints they call live in `scripts/wf/run_dcalign_shard.py`
 (modes `plan` / `run`) and `scripts/wf/run_dcalign_gather.py`; the Julia driver
@@ -44,10 +44,14 @@ snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalig
 # 1. Submit the align step (login node).
 bash pipeline/external/run_dcalign_align.sh $RUN_ROOT          # or: ... $RUN_ROOT <n_shards>
 
-# 2. When the gather job emails END, finalize (login node).
-bash pipeline/external/finalize_dcalign_push.sh $RUN_ROOT      # add --push to commit the cache
+# 2. When the gather job emails END, finalize (login node): validate + reclaim space.
+bash pipeline/external/finalize_dcalign_push.sh $RUN_ROOT
 
-# 3. Run the cheap score step (reads the cache).
+# 3. Score on the Mac: pull the durable cache, then run the combine pipeline locally.
+#    (Scoring is Julia-free — it just reads alignments.tsv. See docs/PIPELINE.md.)
+#    Run these ON THE MAC, and re-set RUN_ROOT there (it was a Midway shell var above).
+RUN_ROOT=combine/combine-CM-PPIC-dcalign/iter-001-baseline     # on the Mac
+scripts/sync_models.sh pull                                    # Midway -> Mac
 snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalign.yaml \
     --config run_root=$RUN_ROOT --cores 4 all
 ```

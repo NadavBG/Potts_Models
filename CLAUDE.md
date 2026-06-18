@@ -43,8 +43,9 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | Energy of a sequence under one/two models | `src/SBM/energy/` — `model.load_model` (loads + re-gauges), `potts.potts_energy` (in-frame, wraps `compute_energies`), `hmm.ProfileHMM` (alignment proposal: forward / Viterbi / FFBS), `score.score_sequence` / `score.score_two_models` (`method ∈ {in_frame, map, marginal, dcalign}`). Spec: `docs/initiate_two_model_energy.md` |
 | The two-model scoring CLI | `scripts/score_two_models.py` (single sequence or batch FASTA → `E_A`, `E_B`, `E_tot` + diagnostics; `--method`, `--weights`, `--n-samples`, `--seed`) |
 | The two-model `combine` pipeline | `Snakefile.combine` driven by `config/params_combine-*.yaml` (validated by `src/SBM/combine_config.py`); run with `python scripts/iter.py run <name> "<tag>" --snakefile Snakefile.combine`. See "Combine pipeline" below. |
-| The DCAlign couplings-aware align step (cluster) | bridge `src/SBM/utils/dcalign_score.py` (mirrors `mpnn_score.py`) + Julia driver `src/SBM/julia/run_dcalign.jl` (run with `--project=<DCAlign clone>`); cluster wrappers `pipeline/external/run_dcalign_align.sh` (login driver) + `sbatch_dcalign_{shard,gather}.sh` + `finalize_dcalign_push.sh`; Python entrypoints `scripts/wf/run_dcalign_shard.py` (`plan`/`run`) + `run_dcalign_gather.py`. See `pipeline/external/README.md`. |
-| Model transfer Mac ↔ Midway | `scripts/sync_models.sh` (checksummed rsync; `push`/`pull`/`verify`/`status`). Models are **not** in git. See "Model transfer" below and `docs/MODEL_SYNC.md`. |
+| The DCAlign couplings-aware align step (cluster) | bridge `src/SBM/utils/dcalign_score.py` (mirrors `mpnn_score.py`) + Julia driver `src/SBM/julia/run_dcalign.jl` (run with `--project=<DCAlign clone>`); cluster wrappers `pipeline/external/run_dcalign_align.sh` (login driver) + `sbatch_dcalign_{shard,gather}.sh` + `finalize_dcalign_push.sh` (validate + reclaim space; no longer git-pushes); Python entrypoints `scripts/wf/run_dcalign_shard.py` (`plan`/`run`) + `run_dcalign_gather.py`. See `pipeline/external/README.md` (cluster mechanics). |
+| The end-to-end MSA→DCAlign→combine runbook (Mac/Midway split) | `docs/PIPELINE.md` |
+| Model transfer Mac ↔ Midway (models **and** DCAlign caches) | `scripts/sync_models.sh` (checksummed rsync; `push`/`pull`/`verify`/`status`; covers both `results/` and `combine/`). Not in git. See "Model transfer" below and `docs/MODEL_SYNC.md`. |
 
 `src/SBM/__init__.py` is empty by design — users import submodules directly (`SBM.SBM_GD.SBM_proteins`, `SBM.utils.utils`, `SBM.provenance`).
 
@@ -88,6 +89,8 @@ uv pip install -e ".[plotting,analysis,dev,workflow]"
 The `workflow` extra adds Snakemake + PyYAML for the pipeline (below). It installs into this same uv venv — **not** conda — and the Snakefile deliberately has no `conda:` directive.
 
 `pip install -e .` works equivalently. Runtime deps are pinned in `pyproject.toml`; `requirements.lock` records exact pins for reproducible installs (`uv pip sync requirements.lock` then `uv pip install -e . --no-deps`).
+
+**Where compute runs (Mac-primary).** Default to running everything on the Mac: training, sampling, figures, MPNN, MSA stats, and combine *scoring* (`map`/`marginal`/`in_frame`, and the `dcalign` score branch, which just reads a cache). The Midway cluster is used for **one** thing — the DCAlign couplings-aware *alignment* (`method: dcalign`), which is ~700× slower and is sharded over a Slurm array. That alignment writes a cache; you `sync_models.sh pull` it to the Mac and score locally. So when something here mentions Midway/`sbatch`/Julia, it almost always means the DCAlign alignment step specifically — not the rest of the pipeline. End-to-end runbook: `docs/PIPELINE.md`.
 
 **macOS toolchain.** AppleClang has no OpenMP, so `pyproject.toml` forces `cmake/macos_llvm.cmake`, which hard-codes `/opt/homebrew/opt/llvm` and `libomp`. `brew install llvm libomp ninja cmake` is required; Intel-Mac or non-Homebrew prefixes need the toolchain file edited. On Linux, `python3-dev`, GCC/G++ with OpenMP, CMake, and Ninja are sufficient.
 
@@ -150,25 +153,31 @@ snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC.yaml -
 - **Methods** (`scoring.method`): `map` (**default** for combine; Viterbi/fields-MAP — the single best alignment per model, same procedure for both → comparable `E_A`/`E_B`), `marginal` (importance-sampling free energy, spec §3.1 — the only mode that yields ESS + MC stderr; warns when ESS < threshold), `in_frame` (exact Potts sum, spec §2), and `auto` (in-frame via the original MSA alignment for a sequence's home model, marginal for the other — **breaks A/B comparability, so it warns**), and `dcalign` (couplings-aware alignment by DCAlign, spec §10.9; the upgrade over fields-MAP). `map` is *fields*-MAP (ignores couplings when choosing the alignment); `dcalign` uses the full couplings. Because DCAlign is ~700× slower (median 19 s/seq), the expensive Julia alignment runs **out-of-process on the cluster** (`pipeline/external/`, sbatch array) and is **cached on disk** under `combine/<run>/dcalign/cache/<model>/alignments.tsv`; the `dcalign` score branch is then a thin cache-reader that recomputes the energy in-frame via `potts_energy` (gauge-consistent — the in-frame recompute vs DCAlign's own energy agrees ≤5e-7, a standing manifest canary). So `score_sequence` never shells out to Julia. Phase-1 uses a flat insertion prior (`lambda_spec="flat"`); the informed `deltan_prior` is the deferred phase-2 fix (spec §10.8 Blocker 1). The HMM proposal is a **self-contained numpy profile HMM** (`src/SBM/energy/hmm.py`) with match emissions from `h`, validated against brute force — no HMMER/pyhmmer dependency.
 - **Reuse, don't reinvent:** in-frame energy is `SBM.utils.utils.compute_energies` (the canonical batched sum); the gauge is `Zero_Sum_Gauge` (re-applied defensively on load — idempotent). Both models are loaded in the zero-sum gauge so `E_A + E_B` is well-defined; the two keep their native lengths (CM L=96, PPIC L=91) — never trimmed/padded.
 - **Efficiency:** `query.cap_per_group` (seeded subsample, drop logged) bounds the marginal cost on large naturals (e.g. ~26k PPIC seqs); per-(sequence,model) seeds derive from the master seed in stable record order, so the marginal run is reproducible.
-- **Note on real-data ESS:** the fields-only proposal gives low ESS on the cross-family term for these strongly-coupled models (flagged, not hidden). For natives that is benign (the alignment posterior is sharply peaked, so marginal ≈ MAP ≈ in-frame); a genuinely poor cross-fit also reads as low ESS. DCAlign / annealed IS is the documented upgrade path.
+- **Note on real-data ESS:** the fields-only proposal gives low ESS on the cross-family term for these strongly-coupled models (flagged, not hidden). For natives that is benign (the alignment posterior is sharply peaked, so marginal ≈ MAP ≈ in-frame); a genuinely poor cross-fit also reads as low ESS. `method: dcalign` (now implemented; the alignment runs on Midway, then scoring is local — see `docs/PIPELINE.md`) or annealed IS is the upgrade path.
 
 ## Model transfer (Mac ↔ Midway)
 
 Trained models (`results/<fam>/<iter>/`, ~0.5 GB each, 4.4 GB total) are **not in
 git** — too large for git/Git-LFS. They move between the Mac and Midway via
-`scripts/sync_models.sh`, a checksummed `rsync` wrapper, and are meant to exist on
-both machines so larger cross-model comparisons can run on the cluster. Full doc:
-`docs/MODEL_SYNC.md`.
+`scripts/sync_models.sh`, a checksummed `rsync` wrapper. The **same** wrapper also
+moves the `combine/` DCAlign cache (Midway produces it; you pull it to the Mac to
+score) — it syncs **two trees**, `results/` and `combine/`. Full doc:
+`docs/MODEL_SYNC.md`; the workflow it serves is `docs/PIPELINE.md`.
 
 - `push` (Mac→Midway) / `pull` (Midway→Mac) / `status` (diff both sides, no
-  transfer) / `verify [--remote]` / `hash`.
-- **Durable-only by default:** syncs `model.npy`, `inputs/`, `synthetic/*.npy` +
-  JSON, `masks/`, `mpnn_scores.json`, and the provenance JSON; **excludes** the
-  regenerable `figs/` (incl. the 203 MB `figs/inputs/stats_*.npy` caches) and
-  `mpnn_tmp/`. `--with-figs` mirrors everything.
+  transfer) / `verify [--remote]` / `hash`. All iterate over both trees; a tree
+  absent on one side is skipped (override the list with `SBM_SYNC_ROOTS`).
+- **Durable-only by default.** `results/`: `model.npy`, `inputs/`,
+  `synthetic/*.npy` + JSON, `masks/`, `mpnn_scores.json`, provenance JSON;
+  excludes `figs/` + `mpnn_tmp/`. `combine/`: `cache/<model>/alignments.tsv` +
+  `meta.json`, `query/`, config, scores/manifests; **excludes** the ~7–8 GB/model
+  `work/` scratch, raw `shards/`, `logs/`, and `*.tar.zst`. `--with-figs` mirrors
+  everything.
 - **Two-layer integrity:** rsync's own per-file check, **plus** an independent
-  `results/SHA256SUMS` manifest verified on the destination after transfer (a
-  mismatched/missing file prints `FAILED` and exits non-zero — never silent).
+  per-tree manifest (`results/SHA256SUMS`, `combine/SHA256SUMS`) verified on the
+  destination after transfer (a mismatched/missing file prints `FAILED` and exits
+  non-zero — never silent). The rsync excludes and manifest prunes are kept in
+  lock-step per tree so verify never flags a deliberately-skipped file.
 - Config: `SBM_MIDWAY_HOST` (default `midway3.rcc.uchicago.edu`), `SBM_MIDWAY_REPO`
   (default `/project/ranganathanr/nadavbg/Potts_Models`), optional gitignored
   `scripts/sync_models.local.sh`. Models land at the relative `run_dir` paths the

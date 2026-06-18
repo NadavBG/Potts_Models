@@ -1,13 +1,22 @@
-# Model transfer: Mac ↔ Midway (checksummed rsync)
+# Artifact transfer: Mac ↔ Midway (checksummed rsync)
 
-Trained models are large binary `.npy` blobs (`model.npy` ~47 MB; ~4.4 GB across
-all families). They do **not** live in git. They are synced between the Mac and
-Midway with `scripts/sync_models.sh`, which wraps `rsync` and adds an independent
-SHA-256 verification pass so a corrupted or truncated transfer fails loudly
-instead of silently producing a wrong model on the cluster.
+`scripts/sync_models.sh` syncs the large, gitignored artifacts that don't belong
+in git between the Mac and Midway, wrapping `rsync` with an independent SHA-256
+verification pass so a corrupted or truncated transfer fails loudly instead of
+silently producing a wrong file on the far side. It covers **two trees**:
 
-Every model is meant to exist on **both** machines, so a larger cross-model
-comparison can run on Midway while the originals stay on the Mac.
+- **`results/`** — trained models (`model.npy` ~47 MB; ~4.4 GB across all
+  families). Meant to exist on both machines so the cluster alignment can read
+  them.
+- **`combine/`** — two-model runs, including the **DCAlign cache**
+  (`cache/<model>/alignments.tsv`) the Mac reads to score. The cluster produces
+  it; you pull it back and score on the Mac.
+
+Each tree gets its own `<tree>/SHA256SUMS` manifest. A tree absent on one side
+is skipped (a fresh Mac has no `combine/` until a run); a command fails only if
+neither tree is present. Override the tree list with
+`SBM_SYNC_ROOTS="results ..."`. The Mac-primary / Midway-for-DCAlign workflow
+that motivates all this is the runbook `docs/PIPELINE.md`.
 
 ## Why not Git-LFS
 
@@ -17,7 +26,7 @@ here: each model run is ~0.5 GB, which blows past GitHub LFS free quotas (1 GB
 storage / 1 GB monthly bandwidth) and bloats every clone. rsync moves only the
 bytes that changed, costs nothing, and keeps the binaries out of git history.
 
-## What gets synced
+## What gets synced — `results/` (models)
 
 By default, **durable artifacts only** — the small files needed to reproduce or
 score a model, not the regenerable figure caches:
@@ -35,25 +44,50 @@ Durable-only is ~50–60 MB/run vs ~0.5 GB/run. Figures regenerate from `model.n
 + `synthetic/` via `scripts/render_sbm.sh` / `render_figures.py`. Pass `--with-figs`
 to mirror everything (e.g. archiving a finished run).
 
+## What gets synced — `combine/` (DCAlign cache)
+
+A combine run's DCAlign output is dominated by per-shard scratch that is huge and
+fully regenerable. Sync keeps only the small durable cache + run metadata and
+drops the rest:
+
+| Synced (durable) | Skipped (scratch / regenerable) |
+|---|---|
+| `dcalign/cache/<model>/alignments.tsv` (the gathered result) | `dcalign/cache/<model>/work/` (~7–8 GB/model BP-solver scratch) |
+| `dcalign/cache/<model>/meta.json` (provenance) | `dcalign/cache/<model>/shards/` (raw per-shard TSVs, merged into `alignments.tsv`) |
+| `config_snapshot.yaml`, `models.json`, `query/` | `dcalign/logs/` + top-level `logs/` (machine-local job logs) |
+| `dcalign/{shards_manifest,gather_status}.json`, `.shard_jids` | `*.tar.zst` (the finalizer's archives) |
+| `scores.tsv`, `scores_detail.json`, `manifest.json`, `alignments.txt` (after scoring) | `figs/` (regenerable; `--with-figs` to include) |
+
+The whole point: the alignment runs on Midway (~15 GB scratch), but only
+~0.5 MB/run needs to come back for the Mac to score. The score step reads
+`alignments.tsv` and recomputes energies in-frame — no Julia, no cluster. The
+end-to-end sequence is in `docs/PIPELINE.md`.
+
+The exclude patterns (`work/`, `shards/`, `logs/`, `*.tar.zst`) and the
+manifest prunes are kept in lock-step inside `sync_models.sh` so the
+post-transfer verify never flags a manifested file that was deliberately
+skipped.
+
 ## The checksum guarantee
 
 Two independent layers protect against silent corruption:
 
 1. **rsync's own per-file rolling+MD5 check** during transfer.
-2. **An independent `results/SHA256SUMS` manifest, verified on the destination
-   after the transfer.** This proves every durable file's *content* matches the
-   source — independent of rsync's transfer logic. It also catches a partial
-   sync or a manifested file that rsync failed to deliver: an entry that did not
-   land (or landed corrupted) prints `FAILED` and the command exits non-zero.
-   (It checks only files *in* the manifest, so it will not flag an extra file
-   that an exclude rule failed to drop — that is a wasted-bandwidth concern, not
-   a corruption one.)
+2. **An independent `<tree>/SHA256SUMS` manifest per synced tree, verified on the
+   destination after the transfer.** This proves every durable file's *content*
+   matches the source — independent of rsync's transfer logic. It also catches a
+   partial sync or a manifested file that rsync failed to deliver: an entry that
+   did not land (or landed corrupted) prints `FAILED` and the command exits
+   non-zero. (It checks only files *in* the manifest, so it will not flag an
+   extra file that an exclude rule failed to drop — that is a wasted-bandwidth
+   concern, not a corruption one.)
 
-`results/SHA256SUMS` is standard `sha256sum` format with repo-root-relative paths
-(e.g. `results/CM-bm-dense/iter-002-base-model/model.npy`), so it verifies
-identically on macOS (`sha256sum` or `shasum -a 256`) and Linux. It lives under
-the gitignored `results/`, travels with the rsync, and is a standing record you
-can re-check any time with `verify`.
+Each manifest (`results/SHA256SUMS`, `combine/SHA256SUMS`) is standard
+`sha256sum` format with repo-root-relative paths (e.g.
+`results/CM-bm-dense/iter-002-base-model/model.npy`), so it verifies identically
+on macOS (`sha256sum` or `shasum -a 256`) and Linux. Each lives under its
+gitignored tree, travels with the rsync, and is a standing record you can
+re-check any time with `verify`.
 
 ## First-time setup
 
@@ -131,9 +165,9 @@ source — review the `--dry-run` output first).
 
 - Run `scripts/sync_models.sh push --dry-run` once to confirm the file list and
   destination, then `push` for real.
-- This push unblocks **Tier-2** of the two-model energy work (real CM/PPIC models
-  on Midway for actual `sbatch` DCAlign submission) — see
-  `docs/initiate_two_model_energy.md` §10.9 and `pipeline/external/README.md`.
+- Where this fits end to end — push models to Midway, run the DCAlign alignment
+  there, pull the cache back, score on the Mac — is the runbook
+  `docs/PIPELINE.md` (cluster mechanics in `pipeline/external/README.md`).
 - If `/project` quota becomes tight, point `SBM_MIDWAY_REPO`'s `results/` at a
   scratch-backed dir via a symlink on Midway; the script only cares about the
   final path, not whether it is a real dir or a symlink.

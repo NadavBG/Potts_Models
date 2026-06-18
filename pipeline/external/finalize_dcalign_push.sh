@@ -1,50 +1,34 @@
 #!/usr/bin/env bash
-# Login-node finalizer for a DCAlign align run (spec §10.9). Run after the
-# gather job mails END.
+# Login-node finalizer for a DCAlign align run (spec §10.9). Run on a Midway
+# login node after the gather job mails END. (The name keeps a historical
+# "_push"; it no longer touches git — see the transport note below.)
 #
-# Usage (on a Midway login node):
-#   bash pipeline/external/finalize_dcalign_push.sh <run_root> [--push]
+# Usage:
+#   bash pipeline/external/finalize_dcalign_push.sh <run_root>
 #
-# What it does, always:
+# What it does:
 #   1. Read <run_root>/dcalign/.shard_jids and verify every job's sacct State is
 #      COMPLETED. Abort if any is still PENDING/RUNNING/FAILED/CANCELLED.
 #   2. Confirm gather produced cache/<model>/alignments.tsv for both models.
 #   3. Reclaim space: delete the transient per-shard model binaries
 #      (cache/<model>/work/), then tar+zstd the raw shard TSVs and logs.
 #
-# With --push (opt-in; combine/ is gitignored, so this force-adds):
-#   4. git add -f the small DURABLE cache (alignments.tsv, meta.json,
-#      gather_status.json, shards_manifest.json + the compressed shards/logs),
-#      then git pull --rebase and git push. Without --push it just prints what
-#      it would commit (pushing is irreversible, so it is never the default).
-#
-# Compute happens on Midway and the cheap `score` step also runs here, so the
-# alignment cache normally does NOT need to leave Midway — --push is only for
-# preserving an expensive run across machines.
+# It does NOT move the cache off Midway, and combine/ stays out of git. Scoring
+# runs on the Mac, so pull the small durable cache there with the rsync wrapper:
+#   scripts/sync_models.sh pull        # brings cache/<model>/alignments.tsv (+ meta.json)
+# then score + render locally. Full runbook: docs/PIPELINE.md.
 
 set -euo pipefail
 IFS=$'\n\t'
 
-export GIT_SSL_CAINFO="${GIT_SSL_CAINFO:-/etc/pki/tls/certs/ca-bundle.crt}"
-
-PUSH=0
-ARGS=()
-for a in "$@"; do
-    case "${a}" in
-        --push) PUSH=1 ;;
-        *) ARGS+=("${a}") ;;
-    esac
-done
-if [[ ${#ARGS[@]} -ne 1 ]]; then
-    echo "Usage: $0 <run_root> [--push]" >&2
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 <run_root>" >&2
     exit 2
 fi
-RUN_ROOT="$(realpath "${ARGS[0]}")"
+RUN_ROOT="$(realpath "$1")"
 DCALIGN_DIR="${RUN_ROOT}/dcalign"
 JIDS_FILE="${DCALIGN_DIR}/.shard_jids"
 [[ -f "${JIDS_FILE}" ]] || { echo "ERROR: ${JIDS_FILE} not found (run run_dcalign_align.sh first)." >&2; exit 2; }
-
-REPO_DIR="$(git -C "${RUN_ROOT}" rev-parse --show-toplevel)"
 
 # --- Step 1: validate every job COMPLETED -----------------------------------
 JID_LIST="$(paste -sd, "${JIDS_FILE}")"
@@ -94,35 +78,13 @@ if [[ -d "${DCALIGN_DIR}/logs" ]]; then
     echo "  ${DCALIGN_DIR}/dcalign_logs.tar.zst"
 fi
 
-# --- Step 4: optional git push (force, since combine/ is gitignored) ---------
-DURABLE=()
-while IFS= read -r f; do DURABLE+=("${f}"); done < <(
-    find "${DCALIGN_DIR}" \( -name alignments.tsv -o -name meta.json \
-        -o -name gather_status.json -o -name shards_manifest.json \
-        -o -name '*.tar.zst' \) -type f
-)
-if [[ "${PUSH}" -ne 1 ]]; then
-    echo
-    echo "(--push not given) durable artifacts that WOULD be committed (git add -f):"
-    printf '  %s\n' "${DURABLE[@]}"
-    echo "Re-run with --push to commit + push them."
-    exit 0
-fi
-
+# --- Done: point at the rsync transport (no git) -----------------------------
 echo
-echo "git add -f durable artifacts + pull --rebase + push..."
-cd "${REPO_DIR}"
-git add -f "${DURABLE[@]}"
-if git diff --cached --quiet; then
-    echo "  nothing to commit."
-else
-    git commit -m "DCAlign align cache: $(basename "$(dirname "${RUN_ROOT}")")/$(basename "${RUN_ROOT}")
-
-Gathered alignments + provenance from chain $(head -1 "${JIDS_FILE}")..$(tail -1 "${JIDS_FILE}").
-
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
-fi
-BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-git pull --rebase --quiet origin "${BRANCH}"
-git push origin "${BRANCH}"
-echo "done."
+echo "finalize complete. Durable cache (what scoring needs) is at:"
+for align in "${ALIGN_FILES[@]}"; do
+    echo "  ${align}"
+done
+echo
+echo "Scoring runs on the Mac. Pull the durable cache there with rsync:"
+echo "  scripts/sync_models.sh pull"
+echo "then run the combine pipeline locally — see docs/PIPELINE.md."

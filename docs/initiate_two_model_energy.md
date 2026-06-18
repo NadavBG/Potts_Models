@@ -253,6 +253,11 @@ Propose the architecture and confirm §8 before starting step 1.
 This section is the decision record for the implementation that now lives in the
 repo. It resolves §8 and documents every choice made beyond the spec.
 
+> **Operational runbook:** for the step-by-step sequence of actually running a
+> combine score (including the DCAlign path: train on the Mac → align on Midway
+> → score on the Mac), see `docs/PIPELINE.md`. This section is the *why*; that is
+> the *how*.
+
 ### 10.1 Answers to the §8 open questions
 
 1. **Model file format.** Models are the project's `model.npy` — a pickled dict with
@@ -511,7 +516,8 @@ Built and validated `method="dcalign"` per §10.9. **Phase-2 (informed insertion
 - **Cluster (chosen mechanism: `Make_Alignment`-style sbatch, not a Snakemake Slurm profile):**
   `pipeline/external/run_dcalign_align.sh` (login driver: git-pull, preflight, `plan`, submit
   `--array=0-(2N-1)` shard tasks + an `afterok` gather), `sbatch_dcalign_{shard,gather}.sh`,
-  `finalize_dcalign_push.sh` (sacct-validate, compress, opt-in `--push`). Entrypoints
+  `finalize_dcalign_push.sh` (sacct-validate, compress; the cache moves to the Mac by
+  rsync via `scripts/sync_models.sh pull`, not git — see `docs/PIPELINE.md`). Entrypoints
   `scripts/wf/run_dcalign_shard.py` (`plan`/`run`, round-robin shards, resume-skip) +
   `run_dcalign_gather.py`. Account/partition `pi-ranganathanr`/`caslake`.
 - **Validation:** Tier-0 (handoff round-trip, branch = in-frame, cache I/O, config bounds) and
