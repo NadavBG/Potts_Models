@@ -1,0 +1,267 @@
+"""Build the DCAlign warm-start fixed-point probe (iter-003 Phase-B, §10.x).
+
+The probe asks, per worse-than-native home pair: if DCAlign's belief propagation
+is *initialised at the native frame* (instead of randomly), does it STAY there
+(native is a stable fixed point — BP just never lands in its basin from random
+starts → **case A**, a search/init problem → anneal) or does it flow to the same
+worse frame the production run found (native is not a fixed point of DCAlign's
+objective → **case B**, the objective genuinely prefers the other frame → stop
+tuning)? The alignment runs the warm-start driver
+(``src/SBM/julia/run_dcalign_warmstart.jl``), which calls DCAlign as a pinned,
+unmodified library — the clone is never edited (no Mac↔Midway fork divergence).
+
+This script stages a **self-contained** probe run dir: per-model in-dirs with the
+model binaries (~30 MB each), ``seed.ins`` (deltan prior), the raw queries and the
+length-L native frames to warm-start from. Midway then just runs ``julia
+run_dcalign_warmstart.jl <in_dir> <out_tsv>`` per model — no cluster-side staging
+logic to port (the binaries are small enough to push). Resource params
+(cpus/mem/array) are set Midway-side, not here.
+
+By default the curated set is read from the multi-seed sweep's ``roles.json`` so
+the warm-start probe runs on the *same* 24 sequences (16 hardest worse-than-native
++ 8 already-recovered controls) as the seed sweep — directly comparable. Frames,
+models and the seed MSA come from the canonical iter-002 source run.
+
+Usage::
+
+    python scripts/build_dcalign_warmstart.py \
+        --src-run-dir combine/combine-CM-PPIC-dcalign/iter-002-nonuniform-prior \
+        --roles combine/combine-CM-PPIC-dcalign-seedsweep/roles.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import logging
+import subprocess
+from pathlib import Path
+
+import numpy as np
+
+import SBM.provenance as provenance
+from SBM.energy import datasets
+from SBM.energy.encoding import GAP
+from SBM.energy.model import load_model, load_seed_msa
+from SBM.utils.dcalign_score import (
+    ALPHABET,
+    _ints_to_str,
+    _write_queries,
+    _write_seed_ins,
+    model_to_dcalign_arrays,
+)
+
+log = logging.getLogger(__name__)
+
+#: Pinned DCAlign defaults for the probe (match the iter-002 production run).
+DEFAULT_MAXITER = 2000
+DEFAULT_PCOUNT = 1e-3
+DEFAULT_LAMBDA_SPEC = "deltan"
+DEFAULT_SEED = 0
+
+
+def _git_commit(repo: Path) -> str | None:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    return out.stdout.strip() or None
+
+
+def _resolve_clone(explicit: Path | None) -> Path | None:
+    import os
+    if explicit is not None:
+        return Path(explicit).expanduser()
+    env = os.environ.get("DCALIGN_PATH")
+    return Path(env).expanduser() if env else None
+
+
+def load_roles(path: Path) -> dict[str, str]:
+    roles = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(roles, dict) or not roles:
+        raise ValueError(f"{path} is not a non-empty id->role map")
+    return roles
+
+
+def stage_model_indir(
+    model, records: list[datasets.QueryRecord], in_dir: Path,
+    *, maxiter: int, seed: int, pcount: float, lambda_spec: str,
+) -> dict:
+    """Write one self-contained warm-start in-dir for ``model``'s home pairs.
+
+    Mirrors :func:`SBM.utils.dcalign_score.align_sequences` staging (model
+    binaries + ``seed.ins`` + ``queries.fasta``) and adds ``native.fasta`` — the
+    length-L home-model frame to warm-start BP from, one record per query id.
+    """
+    in_dir.mkdir(parents=True, exist_ok=True)
+    raw_seqs, native_lines, ids = [], [], []
+    for r in records:
+        if r.ints.size != model.L:
+            raise ValueError(
+                f"{r.id}: native frame length {r.ints.size} != L={model.L} for {model.name}")
+        raw_seqs.append(r.ints[r.ints != GAP])  # gap-free residues, in order
+        native_lines.append(f">{r.id}\n{_ints_to_str(r.ints)}")
+        ids.append(r.id)
+
+    _write_queries(raw_seqs, ids, in_dir / "queries.fasta")
+    (in_dir / "native.fasta").write_text("\n".join(native_lines) + "\n", encoding="utf-8")
+
+    J_dca, h_dca = model_to_dcalign_arrays(model)
+    (in_dir / "model_J.bin").write_bytes(J_dca.astype("<f8").tobytes(order="F"))
+    (in_dir / "model_h.bin").write_bytes(h_dca.astype("<f8").tobytes(order="F"))
+
+    if lambda_spec != "flat":
+        msa = load_seed_msa(model.source)
+        if msa.ndim != 2 or msa.shape[1] != model.L:
+            raise ValueError(
+                f"seed MSA for {model.name!r} has shape {msa.shape}, expected (N, L={model.L})")
+        _write_seed_ins(msa, in_dir / "seed.ins")
+
+    (in_dir / "meta.json").write_text(
+        json.dumps({
+            "L": int(model.L), "q": int(model.q), "maxiter": int(maxiter),
+            "seed": int(seed), "pcount": float(pcount), "lambda_spec": str(lambda_spec),
+            "alphabet": ALPHABET,
+        }, indent=2),
+        encoding="utf-8",
+    )
+    log.info("staged %d home pair(s) for %r -> %s", len(ids), model.name, in_dir)
+    return {"model": model.name, "n_queries": len(ids), "ids": ids,
+            "model_sha256": model.sha256, "in_dir": str(in_dir)}
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--src-run-dir", type=Path,
+                   default=Path("combine/combine-CM-PPIC-dcalign/iter-002-nonuniform-prior"),
+                   help="canonical source: models.json + query/ + dcalign cache (default iter-002)")
+    p.add_argument("--roles", type=Path,
+                   default=Path("combine/combine-CM-PPIC-dcalign-seedsweep/roles.json"),
+                   help="id->role curated set (default: reuse the seed sweep's, for comparability)")
+    p.add_argument("--out-root", type=Path,
+                   default=Path("combine/combine-CM-PPIC-dcalign-warmstart"),
+                   help="probe run dir to create")
+    p.add_argument("--dcalign-path", type=Path, default=None,
+                   help="DCAlign clone (for recording the pinned commit); else $DCALIGN_PATH")
+    p.add_argument("--maxiter", type=int, default=DEFAULT_MAXITER)
+    p.add_argument("--pcount", type=float, default=DEFAULT_PCOUNT)
+    p.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    p.add_argument("--lambda-spec", default=DEFAULT_LAMBDA_SPEC, choices=("deltan", "flat"))
+    args = p.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    started_at = dt.datetime.now(dt.timezone.utc)
+
+    src = args.src_run_dir
+    models_json = src / "models.json"
+    model_entries = json.loads(models_json.read_text(encoding="utf-8"))["models"]
+    models = {m["name"]: load_model(m["model_path"], name=m["name"]) for m in model_entries}
+
+    roles = load_roles(args.roles)
+    records = datasets.read_query_fasta(src / "query" / "query.fasta", src / "query" / "groups.json")
+    by_id = {r.id: r for r in records}
+    missing = [sid for sid in roles if sid not in by_id]
+    if missing:
+        raise ValueError(f"{len(missing)} curated id(s) not in {src}/query: {missing[:5]}")
+
+    # Group curated home pairs by their home model (skip any without a home model).
+    per_model: dict[str, list[datasets.QueryRecord]] = {name: [] for name in models}
+    skipped = []
+    for sid in roles:
+        r = by_id[sid]
+        if r.origin_model in per_model:
+            per_model[r.origin_model].append(r)
+        else:
+            skipped.append(sid)
+    if skipped:
+        log.warning("skipped %d curated id(s) with no home model: %s", len(skipped), skipped[:5])
+
+    out_root = args.out_root
+    out_root.mkdir(parents=True, exist_ok=True)
+    staged = []
+    for name, recs in per_model.items():
+        if not recs:
+            log.warning("model %r has no curated home pairs; skipping", name)
+            continue
+        staged.append(stage_model_indir(
+            models[name], recs, out_root / name,
+            maxiter=args.maxiter, seed=args.seed, pcount=args.pcount,
+            lambda_spec=args.lambda_spec))
+
+    # Run-dir level provenance + contract files.
+    (out_root / "models.json").write_text(models_json.read_text(encoding="utf-8"), encoding="utf-8")
+    (out_root / "roles.json").write_text(json.dumps(roles, indent=2) + "\n", encoding="utf-8")
+    (out_root / "query").mkdir(exist_ok=True)
+    # Canonical query set = raw queries + groups for the curated ids (provenance).
+    curated_ids = [sid for sid in roles if sid in by_id and by_id[sid].origin_model in models]
+    raw = [by_id[sid].ints[by_id[sid].ints != GAP] for sid in curated_ids]
+    _write_queries(raw, curated_ids, out_root / "query" / "query.fasta")
+    groups = json.loads((src / "query" / "groups.json").read_text(encoding="utf-8"))
+    (out_root / "query" / "groups.json").write_text(
+        json.dumps({sid: groups[sid] for sid in curated_ids if sid in groups}, indent=2) + "\n",
+        encoding="utf-8")
+
+    clone = _resolve_clone(args.dcalign_path)
+    clone_commit = _git_commit(clone) if clone is not None else None
+    finished_at = dt.datetime.now(dt.timezone.utc)
+    options = {
+        "maxiter": args.maxiter, "pcount": args.pcount, "seed": args.seed,
+        "lambda_spec": args.lambda_spec, "src_run_dir": str(src), "roles": str(args.roles),
+        "dcalign_clone_commit": clone_commit,
+        "dcalign_clone_remote": "https://github.com/infernet-h2020/DCAlign",
+        "n_curated": len(curated_ids), "n_recover": sum(1 for v in roles.values() if v == "recover"),
+        "n_control": sum(1 for v in roles.values() if v == "control"),
+        "staged": staged,
+    }
+    manifest = provenance.build_run_manifest(
+        run_id="build_dcalign_warmstart", command_line=provenance.current_command_line(),
+        inputs={"models_json": models_json, "roles": args.roles,
+                "query_fasta": src / "query" / "query.fasta"},
+        options=options, seed=args.seed, started_at=started_at, finished_at=finished_at,
+        output_path=out_root / "models.json",
+        extra={"model_sha256": {m["name"]: m.get("model_sha256") for m in model_entries}},
+    )
+    provenance.save_run_manifest(manifest, out_root / "warmstart_manifest.json")
+
+    note = (
+        f"# DCAlign warm-start fixed-point probe\n\n"
+        f"Curated set ({len(curated_ids)}: "
+        f"{options['n_recover']} hardest worse-than-native + {options['n_control']} controls) "
+        f"reused from the multi-seed sweep for direct comparability.\n"
+        f"Source frames/models: `{src}`. Prior: `{args.lambda_spec}`, pcount={args.pcount}, "
+        f"maxiter={args.maxiter}.\n\n"
+        f"DCAlign clone is a PINNED, UNMODIFIED dependency — commit `{clone_commit}` "
+        f"(infernet-h2020/DCAlign). The warm-start lives entirely in our driver "
+        f"`src/SBM/julia/run_dcalign_warmstart.jl`; the clone is not edited, so the Mac and "
+        f"Midway clones cannot diverge. Verify the Midway clone is at the same commit before running.\n\n"
+        f"Reading the result: BP starts at the native frame and runs DCAlign's real schedule. "
+        f"If it STAYS at native (ΔE≈0, high col-agreement) the native frame is a stable fixed point "
+        f"the production random-init runs simply missed (case A → anneal). If it flows to the cached "
+        f"worse frame, native is not a fixed point of DCAlign's objective (case B → stop tuning).\n"
+    )
+    (out_root / "iteration_note.md").write_text(note, encoding="utf-8")
+
+    # Midway hand-off (resources are cluster-side: cpus=1 per task, fan over the array;
+    # the iter-002-pcsweep OOM was cpus=4/mem=8G).
+    print("\n=== built warm-start probe ===")
+    for s in staged:
+        print(f"  {s['model']}: {s['n_queries']} home pairs -> {s['in_dir']}")
+    print(f"\nclone pin: {clone_commit} (verify Midway clone matches)\n")
+    print("Midway loop (set JULIA_NUM_THREADS / cpus cluster-side):")
+    print("  bash scripts/sync_models.sh push")
+    for s in staged:
+        ind = s["in_dir"]
+        print(f"  julia --project=$DCALIGN_PATH src/SBM/julia/run_dcalign_warmstart.jl "
+              f"{ind} {ind}/warmstart_out.tsv")
+    print("  bash scripts/sync_models.sh pull")
+    print(f"  .venv/bin/python scripts/analyze_dcalign_warmstart.py --run-dir {out_root}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -837,3 +837,59 @@ inference.** A source audit of the clone pins the mechanism and the right knobs:
   a meaningful fraction of the hardest ⇒ build the in-Julia multi-seed loop and run the full set at
   the smallest K the curve justifies; recovers ≈0 with low spread ⇒ multi-seed refuted, next is
   annealing.
+
+### 10.17 iter-003 Phase-B — multi-seed REFUTED; warm-start fixed-point probe (2026-06-29)
+
+**Multi-seed result (the §10.16 sweep ran on Midway): refuted.** `dcalign_presweep score
+--aggregate min` over seeds 0–5 (canary intact — seed-0 reproduces iter-002 to 4.6e-9):
+**0/16 worse pairs recovered** at K=6, identical to 0/16 at K=1. **14/16 are byte-identical
+across all 6 seeds** (median ΔE seed-spread = 0.0); the 2 movers swing widely (max spread 46 a.u.)
+but their best seed still sits ΔE≈7 a.u. above native — the seed shuffles BP between *wrong*
+basins, never into native's. The seeds genuinely perturb the **initial condition** (not just sweep
+order): source-confirmed `Random.seed!(seed)` at `palign_bplc.jl:16` → `rand`-initialised messages
+in `initialize_all!` (`iterate_bplc.jl:57,65`), and Julia 1.12.6 ⇒ task-local RNG ⇒ each seed is a
+distinct, reproducible random start. So 14/16 are robust to initialisation: **stable wrong BP fixed
+points.** Multi-seed-min is not the lever.
+
+**Why the offline objective diagnostic was abandoned.** The clean "evaluate DCAlign's objective at
+native vs the DCAlign frame" idea assumed a decomposable `E_Potts + E_prior`. Source audit: DCAlign
+has **no closed-form per-alignment prior cost** — the reported energy (`compute_potts_en`,
+`utils.jl`) is *pure Potts*, and the insertion prior Λ enters **only** inside the BP messages
+(`central!`), multiplied into **every coupling term** (loops `j ∈ 1:i-2`, `i+2:L`) — i.e. Λ is
+**all-pairs**, O(L²)≈4000 terms for L≈90, not a light chain gap-penalty. The implied posterior is
+`P(A) ∝ exp(−E_Potts(A))·Π Λ[i,j,Δn]`, so `Φ(A) = E_Potts − Σ_pairs log Λ` is well-defined — but
+reconstructing it offline means summing ~4000 floored-histogram log-terms with no DCAlign function
+to validate against (a small systematic per-term error flips the sign). Untrustworthy.
+
+**The trustworthy test instead: a warm-start fixed-point probe.** Let DCAlign's *own* inference be
+the oracle — initialise BP at the native frame, run its real schedule, and watch its dynamics:
+
+- **Stays at native** (ΔE_warm ≤ tol) ⇒ native is a reachable fixed point the random-init runs
+  missed → **case A** (search/init problem; anneal or native-biased init is the lever).
+- **Drifts to the worse frame** ⇒ native is not a fixed point of DCAlign's objective → **case B**
+  (the objective genuinely prefers it; search-tuning is futile — accept the residual / change method).
+
+- **In-driver, clone untouched.** Feasibility-checked: every BP primitive (`Jh`/`PBF`/`Alg`/`Data`/
+  `AllVar`, `onesweep!`, `compute_en`, `decodeposterior`, `decimate_post`, `check_solution`) is
+  reachable via the `DCAlign.` prefix, and `onesweep!` is standalone. So the warm start lives
+  entirely in our `src/SBM/julia/run_dcalign_warmstart.jl` — a faithful replica of `palign`+`update!`
+  with the random `initialize_all!` swapped for a native-frame delta init. The clone is a **pinned,
+  read-only dependency** (commit `cab443ffad133e6e68eff8e50b11e8fc59178dbd`,
+  `infernet-h2020/DCAlign`) on Mac and Midway alike — no fork, no Mac↔Midway divergence (the repo-mgmt
+  question the user raised).
+- **Tooling.** `scripts/build_dcalign_warmstart.py` stages a self-contained probe run dir (per-model
+  binaries + `seed.ins` + raw queries + length-L `native.fasta`); `SBM.energy.dcalign_warmstart`
+  (`analyze_warmstart_record`/`summarize_warmstart`, case-A/B verdict) +
+  `scripts/analyze_dcalign_warmstart.py` + `utils_dcalign_warmstart_plot` read the pulled cache and
+  compare warm-start vs native vs the iter-002 random-init frame. Tests:
+  `tests/test_dcalign_warmstart.py` (62 passed overall). Validated locally: the `(x,n)` encode→decode
+  round-trips exactly (5 gap patterns), `warmstart_one` runs on the real CM model (flat Λ), and the
+  analysis canary — ΔE vs the random-init frame — reproduces the iter-002 residual (41.809) exactly.
+- **Built (awaiting Midway).** `combine/combine-CM-PPIC-dcalign-warmstart/{CM-bm-dense,PPIC-dense}/`
+  — the **same 24 home pairs** as the seed sweep (16 worse + 8 controls), `deltan`/pcount 0.001/
+  maxiter 2000. The `deltan` Λ needs GZip (macOS-broken) so the probe runs on Midway; the deltan
+  branch is byte-identical to the production driver's. Resources are cluster-side (`cpus=1`/task).
+  Controls are a probe sanity check — warm-started at native they must stay; a `control_drift` means
+  the probe, not the science, is suspect. Decision gate: most worse pairs **stay** ⇒ case A (build
+  the annealing/native-init lever); most **drift** ⇒ case B (DCAlign's objective can't be made to
+  prefer native by search-tuning — stop tuning DCAlign).
