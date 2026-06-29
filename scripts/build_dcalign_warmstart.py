@@ -239,6 +239,11 @@ def main(argv: list[str] | None = None) -> int:
         f"(infernet-h2020/DCAlign). The warm-start lives entirely in our driver "
         f"`src/SBM/julia/run_dcalign_warmstart.jl`; the clone is not edited, so the Mac and "
         f"Midway clones cannot diverge. Verify the Midway clone is at the same commit before running.\n\n"
+        f"COMPUTE NODE ONLY — do NOT run the driver on the Midway login node. Submit the array job "
+        f"`pipeline/external/sbatch_dcalign_warmstart.sh` from the login node; it dispatches a 2-task "
+        f"array (one per model, cpus=4/mem=12G/time=2h, runs concurrently) to compute nodes and enforces "
+        f"the clone pin. Each task is real compute (12 seqs, ~10 min at cpus=4, ~4.5 GB peak like the "
+        f"production deltan align). Edit the #SBATCH lines there if resources need tuning.\n\n"
         f"Reading the result: BP starts at the native frame and runs DCAlign's real schedule. "
         f"If it STAYS at native (ΔE≈0, high col-agreement) the native frame is a stable fixed point "
         f"the production random-init runs simply missed (case A → anneal). If it flows to the cached "
@@ -251,14 +256,14 @@ def main(argv: list[str] | None = None) -> int:
     print("\n=== built warm-start probe ===")
     for s in staged:
         print(f"  {s['model']}: {s['n_queries']} home pairs -> {s['in_dir']}")
-    print(f"\nclone pin: {clone_commit} (verify Midway clone matches)\n")
-    print("Midway loop (set JULIA_NUM_THREADS / cpus cluster-side):")
-    print("  bash scripts/sync_models.sh push")
-    for s in staged:
-        ind = s["in_dir"]
-        print(f"  julia --project=$DCALIGN_PATH src/SBM/julia/run_dcalign_warmstart.jl "
-              f"{ind} {ind}/warmstart_out.tsv")
-    print("  bash scripts/sync_models.sh pull")
+    print(f"\nclone pin: {clone_commit} (the sbatch enforces this on Midway)\n")
+    print("Hand-off — submit the array from the Midway LOGIN node (it dispatches to compute nodes):")
+    print("  bash scripts/sync_models.sh push                       # Mac -> Midway")
+    print("  ssh $SBM_MIDWAY_HOST ; cd <repo> ; mkdir -p logs       # then on Midway:")
+    print(f"  sbatch pipeline/external/sbatch_dcalign_warmstart.sh {out_root}")
+    print("  #   2-task array (CM, PPIC) cpus=4/mem=12G/time=2h, concurrent; ~10 min each.")
+    print("  squeue --me                                            # wait until both tasks clear")
+    print("  bash scripts/sync_models.sh pull                       # Midway -> Mac, then:")
     print(f"  .venv/bin/python scripts/analyze_dcalign_warmstart.py --run-dir {out_root}")
     return 0
 
