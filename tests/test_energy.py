@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
 
 import numpy as np
 import pytest
@@ -620,6 +621,244 @@ def test_write_seed_ins_is_model_frame_a2m(tmp_path):
     # A stray -1 (load_fasta's non-canonical sentinel) must fail loud, not map to 'Y'.
     with pytest.raises(ValueError, match="0..20"):
         _write_seed_ins(np.array([[1, -1, 3, 4]], dtype=np.int64), tmp_path / "bad2.ins")
+
+
+# ── iter-003 residual anatomy (SBM.energy.dcalign_residual) ────────────────
+
+
+def _f(arr):
+    return np.array(arr, dtype=np.int64)
+
+
+def test_group_kind():
+    from SBM.energy.dcalign_residual import group_kind
+
+    assert group_kind("CM-bm-dense/natural") == "natural"
+    assert group_kind("CM-bm-dense/synthetic-T1") == "synthetic"
+    assert group_kind("CM-bm-dense/synthetic-T0.75") == "synthetic"
+
+
+def test_classify_frames_recovered():
+    from SBM.energy.dcalign_residual import classify_frames
+
+    native = _f([1, 0, 5, 9, 2, 11])
+    g = classify_frames(native, native)
+    assert g.label == "recovered" and g.n_disagree == 0
+
+
+def test_classify_frames_terminal():
+    """Disagreement confined to a terminus, agreeing core intact → terminal."""
+    from SBM.energy.dcalign_residual import classify_frames
+
+    native = _f([0, 2, 3, 4, 5, 6, 7, 0])
+    dca = _f([1, 2, 3, 4, 5, 6, 7, 0])  # only the N-terminal column differs
+    g = classify_frames(native, dca)
+    assert g.label == "terminal"
+    assert g.lead_disagree == 1 and g.trail_disagree == 0 and g.interior_disagree == 0
+
+
+def test_classify_frames_register_shift():
+    """Same residues displaced by a constant column offset → register_shift."""
+    from SBM.energy.dcalign_residual import classify_frames
+
+    native = _f([1, 2, 3, 4, 0, 0, 0, 0])
+    dca = _f([0, 0, 1, 2, 3, 4, 0, 0])  # +2 columns
+    g = classify_frames(native, dca)
+    assert g.label == "register_shift"
+    assert g.best_shift == 2 and np.isclose(g.best_shift_frac, 1.0)
+
+
+def test_classify_frames_gap_redistribution():
+    """Scattered internal gap differences, no single shift explains them."""
+    from SBM.energy.dcalign_residual import classify_frames
+
+    native = _f([1, 0, 2, 0, 3, 0, 4, 0])  # residues on even columns
+    dca = _f([1, 2, 3, 4, 0, 0, 0, 0])  # left-packed
+    g = classify_frames(native, dca)
+    assert g.label == "gap_redistribution"
+    assert g.best_shift_frac < 0.5
+
+
+def test_analyze_record_labels_and_failed():
+    from SBM.energy.datasets import QueryRecord
+    from SBM.energy.dcalign_residual import analyze_record
+    from SBM.utils.dcalign_score import DCAlignResult
+
+    L = 8
+    model = make_model(L, seed=303)
+    native = _f([1, 2, 3, 4, 0, 0, 0, 0])
+    record = QueryRecord(id="q0", group="test/natural", origin_model=model.name, ints=native)
+
+    shifted = _f([0, 0, 1, 2, 3, 4, 0, 0])
+    dca = DCAlignResult("q0", ints_to_seq(shifted), potts_energy(shifted, model), True, False, 5)
+    row = analyze_record(record, model, dca)
+    assert row.ok and row.kind == "natural" and row.label == "register_shift"
+    assert row.n_residues_native == 4 and row.n_residues_dcalign == 4
+
+    # An empty frame is flagged failed, never silently dropped.
+    bad = analyze_record(record, model, DCAlignResult("q0", "", float("nan"), False, False, 0))
+    assert not bad.ok and bad.label == "failed"
+
+
+def test_decompose_anatomy_and_verdict():
+    from SBM.energy.dcalign_residual import (
+        ResidualRow,
+        anatomy,
+        build_verdict,
+        decompose,
+        insertion_free_check,
+    )
+
+    def mk(delta, kind, label, ok=True, model="CM"):
+        grp = "natural" if kind == "natural" else "synthetic-T1"
+        return ResidualRow(
+            sequence_id="x", model=model, group=f"{model}/{grp}", kind=kind,
+            delta_e=delta, col_agreement=0.9, n_residues_native=90, n_residues_dcalign=90,
+            used_decimation=False, converged=True, n_disagree=3, lead_disagree=0,
+            trail_disagree=0, interior_disagree=3, best_shift=2, best_shift_frac=0.8,
+            label=label, n_int_native=5, n_ext_native=1, n_int_dcalign=5, n_ext_dcalign=1,
+            dn_int=0, dn_ext=0, lever="prior_only", mu_floor=float("nan"), ok=ok,
+        )
+
+    rows = [
+        mk(5.0, "natural", "register_shift"),
+        mk(3.0, "natural", "terminal"),
+        mk(0.1, "natural", "recovered"),  # within tol → not worse
+        mk(8.0, "synthetic", "gap_redistribution"),
+        mk(9.0, "synthetic", "gap_redistribution"),
+        mk(float("nan"), "natural", "failed", ok=False),
+    ]
+    dec = decompose(rows, equal_tol=1.0)
+    assert dec["overall"]["n_worse"] == 4
+    assert dec["by_kind"]["natural"]["n_worse"] == 2
+    assert dec["by_kind"]["synthetic"]["n_worse"] == 2
+    assert dec["by_kind"]["natural"]["n_failed"] == 1
+
+    anat = anatomy(rows, equal_tol=1.0)
+    assert np.isclose(anat["by_kind"]["natural"]["frac_prior_shaped"], 1.0)
+    assert np.isclose(anat["by_kind"]["synthetic"]["frac_prior_shaped"], 0.0)
+
+    # Natural tail entirely prior-shaped → GO recommendation.
+    assert "Recommendation: GO" in build_verdict(dec, anat)
+
+    ifc = insertion_free_check(rows, {"CM": 96})
+    assert ifc["CM"]["max_n_residues"] == 90 and ifc["CM"]["insertion_free"]
+
+
+def test_gap_profile():
+    """Interior vs terminal gap split mirrors DCAlign's μint/μext regions."""
+    from SBM.energy.dcalign_residual import gap_profile
+
+    # residues at cols 2,4 → one interior gap (col 3); cols 0,1,5,6 terminal.
+    assert gap_profile(_f([0, 0, 1, 0, 2, 0, 0])) == (1, 4)
+    assert gap_profile(_f([1, 2, 3, 4])) == (0, 0)        # gapless
+    assert gap_profile(_f([0, 0, 0])) == (0, 3)           # all gaps → all terminal
+    assert gap_profile(_f([0, 5, 0])) == (0, 2)           # single residue → no interior
+    assert gap_profile(_f([5, 0, 0, 6])) == (2, 0)        # gaps strictly between residues
+
+
+def test_lever_bucket_and_mu_floor():
+    """A per-column μ penalty helps native only where native has fewer gaps."""
+    from SBM.energy.dcalign_residual import (
+        MU_ADDRESSABLE,
+        MU_COUNTERPRODUCTIVE,
+        PRIOR_ONLY,
+        lever_bucket,
+        mu_floor,
+    )
+
+    assert lever_bucket(0, 0) == PRIOR_ONLY              # equal gap counts ⇒ μ neutral
+    assert lever_bucket(-2, 0) == MU_ADDRESSABLE         # native fewer interior ⇒ μint helps
+    assert lever_bucket(0, -1) == MU_ADDRESSABLE         # native fewer terminal ⇒ μext helps
+    assert lever_bucket(-2, 3) == MU_ADDRESSABLE         # a helping direction exists (μint)
+    assert lever_bucket(2, 1) == MU_COUNTERPRODUCTIVE    # native more gaps everywhere ⇒ μ hurts
+    assert lever_bucket(1, 0) == MU_COUNTERPRODUCTIVE
+
+    assert math.isclose(mu_floor(6.0, -2, 0), 3.0)       # ΔE / |dn_int|
+    assert math.isclose(mu_floor(6.0, -2, -3), 2.0)      # best knob = larger |dn| (ext)
+    assert math.isnan(mu_floor(6.0, 0, 0))               # not addressable
+    assert math.isnan(mu_floor(6.0, 1, 2))
+
+
+def test_analyze_record_gap_counts_and_lever():
+    """The canonical residual: same residues + same gap counts, gap moved → prior_only."""
+    from SBM.energy.datasets import QueryRecord
+    from SBM.energy.dcalign_residual import analyze_record
+    from SBM.utils.dcalign_score import DCAlignResult
+
+    L = 8
+    model = make_model(L, seed=304)
+    native = _f([1, 0, 2, 3, 0, 0, 0, 0])      # interior gap at col 1
+    record = QueryRecord(id="q0", group="test/natural", origin_model=model.name, ints=native)
+    dca_ints = _f([1, 2, 0, 3, 0, 0, 0, 0])    # same residues {1,2,3}, gap shifted to col 2
+    dca = DCAlignResult("q0", ints_to_seq(dca_ints), potts_energy(dca_ints, model), True, False, 7)
+
+    row = analyze_record(record, model, dca)
+    assert (row.n_int_native, row.n_ext_native) == (1, 4)
+    assert (row.n_int_dcalign, row.n_ext_dcalign) == (1, 4)
+    assert row.dn_int == 0 and row.dn_ext == 0
+    assert row.lever == "prior_only" and math.isnan(row.mu_floor)
+
+    # Failed branch keeps the (computable) native counts; DCAlign side is sentinel.
+    bad = analyze_record(record, model, DCAlignResult("q0", "", float("nan"), False, False, 0))
+    assert not bad.ok and bad.lever == "failed"
+    assert bad.n_int_native == 1 and bad.n_int_dcalign == -1
+
+
+def test_addressability_and_lever_verdict():
+    from SBM.energy.dcalign_residual import (
+        MU_ADDRESSABLE,
+        MU_COUNTERPRODUCTIVE,
+        PRIOR_ONLY,
+        ResidualRow,
+        addressability,
+        lever_verdict,
+    )
+
+    def mk(delta, kind, lever, dn_int=0, dn_ext=0, mu=float("nan"), model="CM", ok=True):
+        grp = "natural" if kind == "natural" else "synthetic-T1"
+        return ResidualRow(
+            sequence_id="x", model=model, group=f"{model}/{grp}", kind=kind,
+            delta_e=delta, col_agreement=0.9, n_residues_native=90, n_residues_dcalign=90,
+            used_decimation=False, converged=True, n_disagree=2, lead_disagree=0,
+            trail_disagree=0, interior_disagree=2, best_shift=0, best_shift_frac=0.0,
+            label="gap_redistribution", n_int_native=5, n_ext_native=1,
+            n_int_dcalign=5 - dn_int, n_ext_dcalign=1 - dn_ext, dn_int=dn_int, dn_ext=dn_ext,
+            lever=lever, mu_floor=mu, ok=ok,
+        )
+
+    rows = [
+        mk(5.0, "natural", PRIOR_ONLY),
+        mk(3.0, "natural", PRIOR_ONLY),
+        mk(2.0, "natural", PRIOR_ONLY),
+        mk(4.0, "natural", MU_ADDRESSABLE, dn_int=-2, mu=2.0),
+        mk(9.0, "synthetic", MU_ADDRESSABLE, dn_ext=-3, mu=3.0),
+        mk(8.0, "synthetic", MU_COUNTERPRODUCTIVE, dn_int=1),
+        mk(0.2, "natural", PRIOR_ONLY),  # within tol → not worse, excluded
+        mk(float("nan"), "natural", "failed", ok=False),  # failed → excluded
+    ]
+    addr = addressability(rows, equal_tol=1.0)
+    o = addr["overall"]
+    assert o["n_worse"] == 6
+    assert o["buckets"] == {PRIOR_ONLY: 3, MU_ADDRESSABLE: 2, MU_COUNTERPRODUCTIVE: 1}
+    assert np.isclose(o["frac_prior_only"], 0.5)
+    assert np.isclose(o["mu_floor_median"], 2.5)  # median of {2.0, 3.0}
+
+    nat = addr["by_kind"]["natural"]
+    assert nat["n_worse"] == 4 and nat["buckets"][PRIOR_ONLY] == 3
+    assert nat["mu_addressable_via_int"] == 1
+
+    # Natural target majority prior_only ⇒ pcount indicated (despite 49%-style
+    # overall splits being pulled down by synthetics).
+    assert "pcount" in lever_verdict(addr)
+
+    # Natural target majority mu_addressable (via μint) ⇒ μint sweep indicated;
+    # and the empty case is graceful.
+    mu_rows = [mk(5.0, "natural", MU_ADDRESSABLE, dn_int=-2, mu=2.5),
+               mk(6.0, "natural", MU_ADDRESSABLE, dn_int=-1, mu=6.0)]
+    v_mu = lever_verdict(addressability(mu_rows, equal_tol=1.0))
+    assert "μint gap penalty" in v_mu
+    assert "nothing to tune" in lever_verdict(addressability([], equal_tol=1.0))
 
 
 # ── DCAlign integration, Tier 1 (needs julia + a DCAlign clone) ───────────────

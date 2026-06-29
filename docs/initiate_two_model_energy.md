@@ -677,3 +677,163 @@ now accepts `"deltan"` in addition to `"flat"`.
   overrides. Each shard rebuilds the (deterministic) prior independently — redundant across a model's
   shards and on every resume, but dwarfed by the ~200 s/seq align cost; a build-once-and-stage-Λ
   design is the obvious optimization if the seed grows much larger.
+
+### 10.14 iter-003 Phase-0 residual diagnostic — the insertion escalation is the wrong tool (2026-06-28, Mac)
+
+§10.13's success gate named an escalation if `deltan` under-fixed CM: build a model-frame profile
+HMM and `hmmalign` raw sequences to recover **literal insertions** for the prior (§10.13
+"Escalation"). Before paying for that (a cross-project pull of full-length sequences from
+Make_Alignment + HMMER), a **Phase-0 diagnostic gate** characterized the iter-002 worse-than-native
+residual directly from the cached alignments (no new DCAlign run). Decision: **NO-GO** — the residual
+is gap-placement, not insertion-shaped, so a literal-insertion seed cannot fix it.
+
+- **Tooling (new, tested).** `SBM.energy.dcalign_residual` (pure logic: natural/synthetic
+  decomposition + a geometric frame-disagreement classifier — `terminal` / `register_shift` /
+  `gap_redistribution`), `scripts/analyze_dcalign_residual.py` (CLI; writes
+  `<run>/analysis/residual_rows.tsv` + `residual_analysis.json` + `residual_anatomy.pdf` +
+  manifest), `SBM.utils.utils_dcalign_residual_plot`. The classifier reuses
+  `dcalign_baseline.compare_record`/`column_agreement`; covered in `tests/test_energy.py`
+  (hand-built terminal/register/gap-redistribution frame pairs with known labels).
+- **Result (iter-002, `equal_tol=1`).** 249/1800 home pairs worse-than-native: **40 natural, 209
+  synthetic (84%)**. Synthetic are L-frame MCMC samples with no insertions → structurally out of
+  reach for any insertion prior. **`register_shift == 0` across all 3600 alignments** — not one
+  block/column displacement. Natural tail: 39/40 `gap_redistribution`, 1 `terminal`, 0
+  `register_shift`; mean `col_agreement` 0.94 (a few residues placed in different columns *around
+  gaps*, costly under the couplings). `insertion_free` confirmed: `max_n_residues == L` (96/91), so
+  a literal-insertion seed could act only through the prior Λ, never the queries.
+- **Why NO-GO.** The §10.13 escalation targets register/insertion errors; the residual has none. A
+  worse-than-native frame from a couplings-aware minimizer means the **non-Potts terms (prior Λ +
+  gap penalties) over-penalize the native gap arrangement** and steer DCAlign to a higher-Potts-energy
+  frame. The indicated lever is a **non-Potts term** — gap-penalty (`μint`/`μext`) *or* the prior
+  weight (`pcount`). A cheap objective-decomposition (Potts vs prior vs gap terms on the 40 natural
+  failures) should precede any knob choice. **→ §10.15 ran that decomposition and the answer is
+  `pcount`, not `μint`/`μext`.**
+- **Status.** iter-003 paused after Phase-0 per user decision ("stop and record"). The Phase-1
+  insertion-seed plumbing (`deltan_ins` / `seed_a2m`, HMMER `hmmbuild --hand` + `hmmalign`, raw-hit
+  extraction) is **not built** — shelved unless this verdict is revisited. Artifacts:
+  `combine/combine-CM-PPIC-dcalign/iter-002-nonuniform-prior/analysis/`.
+
+### 10.15 iter-003 lever hunt — Phase-A predicted `pcount`; Phase-B refuted it (the residual is a DCAlign inference failure) (2026-06-28)
+
+§10.14's "indicated lever is `μint`/`μext`" was a guess; this is the objective-decomposition it called
+for. Reading DCAlign's actual objective (the `palign` signature + `central!` in the clone's
+`iterate_bplc.jl`, vs `src/SBM/julia/run_dcalign.jl`) shows it was the **wrong knob**:
+
+- **`μint`/`μext` penalize gap *count* per column** (scalar `palign` kwargs, default `0.0`;
+  `run_dcalign.jl` never passes them, so iter-002 ran at μ=0): `−μint` per interior gap column,
+  `−μext` per terminal gap column. **The prior Λ decides gap *placement*.** DCAlign's reported
+  `dcalign_energy` is the *pure Potts* energy (`compute_potts_en`; the in-frame recompute canary ≤5e-7
+  proves it carries no μ/prior term) — so on every worse pair the **native frame already wins the
+  Potts energy**, and only the prior Λ (annealed `Λ^β`) overrode it. The knob that flattens Λ so the
+  lower-Potts native frame wins is **`pcount`** (the DCAlign `Alg` constructor blends
+  `(1−pcount)·Λ + pcount`), which is **already plumbed** (`ScoringConfig`→`meta.json`→`palign`).
+- **Tooling (extends §10.14).** `SBM.energy.dcalign_residual` gains `gap_profile` (interior/terminal
+  gap split, mirroring the μint/μext regions), `lever_bucket` + `mu_floor`, an `addressability`
+  aggregator, and `lever_verdict`; surfaced by `scripts/analyze_dcalign_residual.py`
+  (`residual_analysis.json["addressability"]` + `lever_verdict`, a third figure panel) and covered in
+  `tests/test_energy.py`. Per worse pair it buckets the lever: **`prior_only`** (equal gap counts in
+  both frames ⇒ μ is *provably* neutral; only `pcount` can move it), **`mu_addressable`** (native has
+  fewer gaps in some class ⇒ a μ knob *could* help — candidate only; `mu_floor = ΔE/|Δn|` is a *lower*
+  bound that ignores the native-disfavouring prior), **`mu_counterproductive`**.
+- **Result (iter-002).** Of 249 worse pairs: 121 `prior_only`, 128 `mu_addressable`, 0
+  `mu_counterproductive`. Read by the recovery **target** (the natural ground states; synthetics are
+  diagnostic): the **natural tail is 85% `prior_only`** (CM-natural **94%**, 31/33). `mu_addressable`
+  is almost entirely via **μext** (126/128), concentrated in synthetics, at candidate-only floors
+  (natural median μ_floor ≈ 29 a.u. — implausibly large, and a lower bound). The overall 49%
+  `prior_only` that a naive reading would call "μ-shaped" is a synthetic-count artifact. Invariant
+  checks: `prior_only ⟺ (Δn_int=0 ∧ Δn_ext=0)` exactly; the canonical CM pair (94/94 residues, ΔE 6.6)
+  is `prior_only`; 246/249 worse pairs have equal residue count. **Verdict: tune `pcount`** (the only
+  knob that touches the natural target *and* the prior_only synthetics); μ is at best a weak secondary
+  candidate for some synthetics.
+- **Phase-B pre-screen (built for Midway; awaiting the cluster run).** A `pcount` sweep
+  (`[0.001, 0.01, 0.05, 0.1, 0.2, 0.5]`, 0.001 = the iter-002 canary) over a curated subset of
+  iter-002 home pairs — **all 249 worse-than-native pairs (40 natural + 209 synthetic)** as the
+  recovery set + 80 seeded currently-good controls (per model × kind) — every other DCAlign setting
+  pinned to iter-002 (`deltan` prior, seed 0, maxiter 2000). The goal is DCAlign finding **each
+  sequence's** energy minimum, so synthetics count equally with naturals: every worse-than-native
+  pair is the aligner returning a higher-energy frame than an available reference, i.e. a real
+  minimization failure. This also makes `pcount` the *universal* lever — at μ=0 the prior Λ is the
+  only non-Potts term and the native frame already wins the (pure-Potts) reported energy on every
+  worse pair, so the prior alone caused all 249; flattening it (`pcount`) is what can move them
+  (`μ` is at most an alternative knob for the `mu_addressable` subset, with the side-effect cost).
+  Decision metric: the largest `pcount` recovering the most worse pairs (reported split by kind)
+  with **no** control regression; `ΔE < 0` ("beat native" — a strictly lower minimum) is reported
+  separately and watched on naturals (a lower-energy but non-biological frame is good-for-min but
+  may hurt downstream biological scoring).
+- **macOS blocker (why it runs on Midway, not the Mac).** DCAlign *loads* locally (`using DCAlign`
+  in ~1 s), but its `deltan_prior` reads `seed.ins` through `FastaIO → GZip.jl`, and **GZip 0.6.2
+  ccalls `gzopen64`, a symbol macOS's zlib does not export** (`dlsym … gzopen64: symbol not found`).
+  GZip 0.7.1 fixes it and works on this Mac, but **FastaIO 1.1.0 (latest) hard-caps GZip at
+  `"0.5,0.6"`**, so the fix can never be selected without patching sibling source. This is the same
+  class of macOS-toolchain issue that makes Midway the home of the DCAlign align step; per user
+  decision the pre-screen runs there. (The `flat` prior would run locally but changes the prior,
+  confounding the pcount signal — not a valid pre-screen.)
+- **Tooling (new).** `scripts/pcount_presweep.py` (`build` → one cluster-ready run dir per pcount
+  under `combine/combine-CM-PPIC-dcalign-pcsweep/pc<val>/`, reusing the existing
+  `pipeline/external/run_dcalign_align.sh` machinery; `score` → reads the synced per-pcount caches,
+  scores every curated home pair in-frame via `dcalign_residual.analyze_record`, writes
+  `presweep_rows.tsv` + `presweep_summary.json` + `presweep.pdf`) and the figure
+  `SBM.utils.utils_pcount_presweep_plot`. The *scoring* half is GZip-free and runs on the Mac; only
+  the alignment needs Linux. *(Later generalized + renamed to `scripts/dcalign_presweep.py` /
+  `SBM.utils.utils_dcalign_presweep_plot` — any `scoring.*` knob, `--scoring-key`; see §10.16. The
+  archived pcsweep re-scores byte-identically under the generalized scorer.)*
+- **Result (2026-06-28) — `pcount` is REFUTED; the residual is a DCAlign *inference* failure.** The
+  sweep ran on Midway (a shard OOM broke the `afterok` gather, recovered with
+  `run_dcalign_gather.py --allow-missing`; common fully-scored set = 286 home pairs, 226 recover +
+  60 control). Canary intact: pc0.001 reproduces iter-002 (recover 226/226 worse, control 0/60
+  worse). Raising `pcount` **does not recover the failing pairs** (fraction still worse 1.00 → 0.92
+  across 0.001→0.5; ≤19/226 ever recovered, 1–2/36 naturals; recover median ΔE *rises* 10.6 → 36
+  a.u.) and **progressively destroys the good pairs** (control fraction-worse 0.00 → 0.88, median ΔE
+  0 → 49). Recommended `pcount` = 0.001 (change nothing). **Why the §10.15 prediction was wrong:**
+  it assumed DCAlign returns the *argmin* of Potts+prior, so flattening the prior would let the
+  lower-Potts native frame win. But DCAlign is **approximate BP + decimation**, not exact
+  optimization — even with a near-flat prior it cannot reach the native frame, so the bottleneck is
+  the search/convergence, and the prior was *regularizing* it (flattening hurts). This refutes
+  **both** proposed levers (μint/μext §10.14 *and* pcount §10.15): the worse-than-native residual is
+  DCAlign's inference failing to find the minimum for these sequences, not a prior/gap-penalty bias.
+  Next options: **(A)** per-sequence `min{E_dcalign, E_native/MAP}` for home pairs — we already hold
+  the witness frame, so this eliminates the home-pair residual by construction (the cross-model term
+  still rides on DCAlign); **(B)** improve DCAlign's inference on the failing set (more `maxiter`,
+  slower annealing `Δβ↓`/`Δt↑`, damping, multi-seed per-sequence min). Artifacts:
+  `combine/combine-CM-PPIC-dcalign-pcsweep/presweep_{rows.tsv,summary.json}` + `presweep.pdf`.
+
+### 10.16 iter-003 Phase-B — the residual is BP basin-selection; multi-seed pre-screen (2026-06-29)
+
+§10.15 left two options. **Option (A) (per-sequence `min{E_dcalign, E_native/MAP}`) is rejected** by
+the user: the naturals here are only controls — the real goal is finding the optimal mapping when the
+ground state is *unknown*, so a known-frame fallback doesn't serve it. We pursue **(B): fix DCAlign's
+inference.** A source audit of the clone pins the mechanism and the right knobs:
+
+- **The failure is basin-selection in BP, not decimation.** In `iterate_bplc.jl`, BP runs with
+  β-annealing (`β=1.0` start, `+Δβ` every `Δt` sweeps; `palign` defaults `Δβ=0.05`, `Δt=10`), and
+  `decimate_post` is a *one-shot greedy decode that fires only when BP's argmax violates ordering
+  constraints*. The failing sequences "converge cleanly," so decimation never runs — the wrong frame
+  comes entirely from **which basin BP's annealed marginals land in**.
+- **Knobs that change the basin** (`palign` signature `src/palign_bplc.jl`): `seed` (random message
+  init + sweep order + Λ noise; default 0 — **already plumbed** as `ScoringConfig.dcalign_seed`),
+  annealing slowness `Δβ`↓/`Δt`↑ (not plumbed), `damp` (not plumbed). `maxiter`/`thP` change *when*
+  BP stops, **not** the basin — so the user's "raising maxiter is the wrong move" is confirmed;
+  decimation granularity is not tunable and doesn't engage here.
+- **This pass tests `seed` only** (zero new code). The per-sequence **min ΔE over K seeds** *is* the
+  production multi-seed-min, so a positive result both validates the fix and sizes its cost (the
+  recovery-vs-K curve = smallest K needed); and the per-sequence **ΔE seed-spread** diagnoses the
+  next step — high spread ⇒ seeds reach different basins (annealing likely helps too); near-zero ⇒ a
+  seed-robust wrong attractor (multi-seed refuted ⇒ annealing/`Δβ` is next, and needs plumbing).
+- **Tooling.** `scripts/pcount_presweep.py` → **`scripts/dcalign_presweep.py`** (and
+  `utils_pcount_presweep_plot` → `utils_dcalign_presweep_plot`), generalized to sweep **any**
+  `scoring.*` knob: `build --scoring-key <k> --tag-prefix <p> --values …` writes one run dir per
+  value with `scoring.<k>` overridden (coerced to the field's native type) + a `sweep_meta.json` so
+  `score` is self-describing; `--hardest` curates the **largest-ΔE** worse pairs (vs seeded random).
+  `score --aggregate {none,min,auto}`: `none` = the per-value comparison (the pcount use case);
+  `min` (auto for `dcalign_seed`) = the multi-seed-min recovery-vs-K curve, per-sequence seed-spread,
+  plus the **seed-0 canary** (baseline reproduces the source iter's ΔE ≤5e-7). Back-compat verified: the
+  archived pcsweep re-scores byte-identically. New logic covered in `tests/test_dcalign_presweep.py`.
+- **The short test (built; awaiting Midway).** `combine/combine-CM-PPIC-dcalign-seedsweep/seed{0..5}/`
+  — 24 curated iter-002 home pairs (**16 hardest-by-ΔE recover**, ~4 per model×{natural,synthetic},
+  with 8 controls), seeds 0–5, all else pinned to iter-002 (`deltan`, pcount 0.001, maxiter 2000). Cost
+  is ~200 s/seq ×2 models, so the subset is deliberately small (~N·50 s ≈ 20 min wall if the 6 seed
+  arrays run concurrently). **Midway resources are set cluster-side** — `cpus=1` per task, fan out
+  over the array (the iter-002-pcsweep OOM was `cpus=4`/`mem=8G`). Decision gate: min-over-6 recovers
+  a meaningful fraction of the hardest ⇒ build the in-Julia multi-seed loop and run the full set at
+  the smallest K the curve justifies; recovers ≈0 with low spread ⇒ multi-seed refuted, next is
+  annealing.
