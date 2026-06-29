@@ -231,17 +231,40 @@ def main(argv: list[str] | None = None) -> int:
     records = _records_from_args(args)
 
     dcalign_caches: dict[str, dict[str, DCAlignResult]] = {}
+    dcalign_partial: dict[str, bool] = {}
     if args.method == "dcalign":
         if args.dcalign_cache is None:
             parser.error("--method dcalign requires --dcalign-cache DIR (combine/<run>/dcalign/cache)")
         dcalign_caches = _load_dcalign_caches(args.dcalign_cache, [model_A.name, model_B.name])
+        for name in (model_A.name, model_B.name):
+            meta = _load_dcalign_meta(args.dcalign_cache, name)
+            dcalign_partial[name] = bool(meta and meta.get("partial"))
+            if dcalign_partial[name]:
+                log.warning(
+                    "model %r has a PARTIAL DCAlign cache (%s of %s requested ids missing); "
+                    "query sequences with no cached alignment will be SKIPPED, not scored.",
+                    name, meta.get("n_missing", "?"), meta.get("n_requested", "?"),
+                )
 
     log.info("scoring %d sequence(s) under %r (L=%d) and %r (L=%d), method=%s",
              len(records), model_A.name, model_A.L, model_B.name, model_B.L, args.method)
 
     rows: list[dict] = []
     detail: list[dict] = []
+    skipped: list[dict] = []
     for r_idx, record in enumerate(records):
+        if args.method == "dcalign":
+            absent = [m.name for m in (model_A, model_B)
+                      if record.id not in dcalign_caches.get(m.name, {})]
+            # Tolerate an absent alignment only when every cache that lacks it
+            # self-declares partial; otherwise fall through to the loud ValueError
+            # in _score_one (a complete cache must cover every query id).
+            if absent and all(dcalign_partial.get(name) for name in absent):
+                log.warning("skipping %r: no DCAlign alignment under %s (partial cache)",
+                            record.id, ", ".join(absent))
+                skipped.append({"sequence_id": record.id, "group": record.group,
+                                "missing_under": absent})
+                continue
         per_model: dict[str, ScoreResult] = {}
         for j, (model, hmm) in enumerate(((model_A, hmm_A), (model_B, hmm_B))):
             seed_rj = None if args.seed is None else args.seed + 2 * r_idx + j
@@ -280,7 +303,10 @@ def main(argv: list[str] | None = None) -> int:
         })
 
     finished_at = dt.datetime.now(dt.timezone.utc)
-    _emit(rows, detail, args, model_A, model_B, w_A, w_B, started_at, finished_at)
+    if skipped:
+        log.warning("skipped %d of %d query sequence(s) with no DCAlign alignment (partial cache)",
+                    len(skipped), len(records))
+    _emit(rows, detail, args, model_A, model_B, w_A, w_B, started_at, finished_at, skipped=skipped)
     return 0
 
 
@@ -294,7 +320,7 @@ def _tsv_row(r: dict) -> str:
     )
 
 
-def _emit(rows, detail, args, model_A, model_B, w_A, w_B, started_at, finished_at) -> None:
+def _emit(rows, detail, args, model_A, model_B, w_A, w_B, started_at, finished_at, skipped=None) -> None:
     if args.output is not None:
         lines = [_TSV_HEADER] + [_tsv_row(r) for r in rows]
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
@@ -307,7 +333,7 @@ def _emit(rows, detail, args, model_A, model_B, w_A, w_B, started_at, finished_a
         _write_alignments(detail, model_A, model_B, args.alignments)
         log.info("wrote alignments report: %s", args.alignments)
     if args.manifest is not None:
-        _write_manifest(rows, args, model_A, model_B, w_A, w_B, started_at, finished_at)
+        _write_manifest(rows, args, model_A, model_B, w_A, w_B, started_at, finished_at, skipped=skipped)
     # stdout summary (primary CLI output)
     for d in detail[:10]:
         print(f"{d['sequence_id']}\tE_{model_A.name}={d['E_A']:.4f}\t"
@@ -355,7 +381,7 @@ def _write_alignments(detail: list[dict], model_A: PottsModel, model_B: PottsMod
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_manifest(rows, args, model_A, model_B, w_A, w_B, started_at, finished_at) -> None:
+def _write_manifest(rows, args, model_A, model_B, w_A, w_B, started_at, finished_at, skipped=None) -> None:
     ess_A = [r["ess"] for r in rows if r["model"] == model_A.name and r["ess"] is not None]
     ess_B = [r["ess"] for r in rows if r["model"] == model_B.name and r["ess"] is not None]
 
@@ -370,6 +396,9 @@ def _write_manifest(rows, args, model_A, model_B, w_A, w_B, started_at, finished
         "n_rows": len(rows),
         "ess_summary": {model_A.name: _ess_stats(ess_A), model_B.name: _ess_stats(ess_B)},
     }
+    if skipped:
+        extra["n_skipped_no_alignment"] = len(skipped)
+        extra["skipped_no_alignment"] = skipped[:50]
     if args.method == "dcalign":
         extra["dcalign"] = _dcalign_manifest_block(rows, args, model_A, model_B)
 
