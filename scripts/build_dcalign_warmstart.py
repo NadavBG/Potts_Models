@@ -90,16 +90,18 @@ def load_roles(path: Path) -> dict[str, str]:
 
 def stage_model_indir(
     model, records: list[datasets.QueryRecord], in_dir: Path,
-    init_frames: dict[str, np.ndarray], *, maxiter: int, seed: int, pcount: float,
-    lambda_spec: str, init_mode: str,
+    init_frames: dict[str, np.ndarray] | None, *, maxiter: int, seed: int, pcount: float,
+    lambda_spec: str, init_mode: str, beta0: float,
 ) -> dict:
-    """Write one self-contained warm-start in-dir for ``model``'s home pairs.
+    """Write one self-contained in-dir for ``model``'s home pairs.
 
     Mirrors :func:`SBM.utils.dcalign_score.align_sequences` staging (model
-    binaries + ``seed.ins`` + ``queries.fasta``) and adds ``init.fasta`` — the
-    length-L frame BP warm-starts from (native or fields-MAP per ``init_mode``),
-    one per query id. The init must be insert-free (non-gap count == raw query
-    length); the (x,n) warm start cannot represent inserts.
+    binaries + ``seed.ins`` + ``queries.fasta``). If ``init_frames`` is given,
+    also writes ``init.fasta`` — the length-L frame BP warm-starts from (native or
+    fields-MAP per ``init_mode``), which must be insert-free (non-gap count == raw
+    query length; the (x,n) warm start cannot represent inserts). If ``init_frames
+    is None`` (``init_mode="random"``), no init file is written and the driver
+    starts BP from a random init (the anneal-from-hot sweep, ``beta0 < 1``).
     """
     in_dir.mkdir(parents=True, exist_ok=True)
     raw_seqs, init_lines, ids = [], [], []
@@ -108,18 +110,20 @@ def stage_model_indir(
             raise ValueError(
                 f"{r.id}: native frame length {r.ints.size} != L={model.L} for {model.name}")
         raw = r.ints[r.ints != GAP]  # gap-free residues, in order (the query)
-        frame = np.asarray(init_frames[r.id], dtype=np.int64)
-        n_match = int(np.count_nonzero(frame != GAP))
-        if frame.size != model.L or n_match != raw.size:
-            raise ValueError(
-                f"{r.id}: {init_mode} init frame must be length L={model.L} and insert-free "
-                f"({raw.size} residues); got length {frame.size} with {n_match} residues")
         raw_seqs.append(raw)
-        init_lines.append(f">{r.id}\n{_ints_to_str(frame)}")
         ids.append(r.id)
+        if init_frames is not None:
+            frame = np.asarray(init_frames[r.id], dtype=np.int64)
+            n_match = int(np.count_nonzero(frame != GAP))
+            if frame.size != model.L or n_match != raw.size:
+                raise ValueError(
+                    f"{r.id}: {init_mode} init frame must be length L={model.L} and insert-free "
+                    f"({raw.size} residues); got length {frame.size} with {n_match} residues")
+            init_lines.append(f">{r.id}\n{_ints_to_str(frame)}")
 
     _write_queries(raw_seqs, ids, in_dir / "queries.fasta")
-    (in_dir / "init.fasta").write_text("\n".join(init_lines) + "\n", encoding="utf-8")
+    if init_frames is not None:
+        (in_dir / "init.fasta").write_text("\n".join(init_lines) + "\n", encoding="utf-8")
 
     J_dca, h_dca = model_to_dcalign_arrays(model)
     (in_dir / "model_J.bin").write_bytes(J_dca.astype("<f8").tobytes(order="F"))
@@ -136,13 +140,72 @@ def stage_model_indir(
         json.dumps({
             "L": int(model.L), "q": int(model.q), "maxiter": int(maxiter),
             "seed": int(seed), "pcount": float(pcount), "lambda_spec": str(lambda_spec),
-            "init_mode": str(init_mode), "alphabet": ALPHABET,
+            "init_mode": str(init_mode), "beta0": float(beta0), "alphabet": ALPHABET,
         }, indent=2),
         encoding="utf-8",
     )
     log.info("staged %d home pair(s) for %r -> %s", len(ids), model.name, in_dir)
     return {"model": model.name, "n_queries": len(ids), "ids": ids,
             "model_sha256": model.sha256, "in_dir": str(in_dir)}
+
+
+def _iteration_note(args, beta0: float, clone_commit: str | None, src: Path,
+                    n_curated: int, n_recover: int, n_control: int) -> str:
+    """The per-run-dir iteration_note.md, worded for the init mode."""
+    if args.init == "random":
+        title = f"DCAlign anneal-from-hot run (random init, beta0={beta0:g})"
+        init_desc = (f"random BP messages, annealed from beta0={beta0:g} UP to the physical "
+                     "temperature (beta>=1) — the couplings-aware search the §10.17 native "
+                     "warm-start showed is needed (multi-seed and fields-MAP init both failed)")
+        reading = ("Reading: from a random start on the beta0-smoothed landscape cooled to beta=1, "
+                   "does BP REACH native quality (delta_E~0)? Across the sweep, the smallest beta0 "
+                   "that recovers most worse pairs is the production anneal schedule.")
+    elif args.init == "map":
+        title = "DCAlign fields-MAP-init test"
+        init_desc = "the fields-MAP / Viterbi frame (production-legal — no ground truth)"
+        reading = ("Reading: BP from the fields-MAP frame. REACHES native quality for most worse "
+                   "pairs => MAP-init is the production recipe; else fall back to annealing.")
+    else:
+        title = "DCAlign warm-start fixed-point probe"
+        init_desc = "the native home-model frame"
+        reading = ("Reading: BP from native. STAYS at native => case A (a reachable fixed point the "
+                   "random-init runs missed); flows to the worse frame => case B (stop tuning).")
+    return (
+        f"# {title}\n\n"
+        f"Init: {init_desc}.\n"
+        f"Curated set ({n_curated}: {n_recover} hardest worse-than-native + {n_control} controls) "
+        f"reused from the multi-seed sweep for comparability.\n"
+        f"Source frames/models: `{src}`. Prior `{args.lambda_spec}`, pcount={args.pcount}, "
+        f"maxiter={args.maxiter}, beta0={beta0:g}.\n\n"
+        f"DCAlign clone PINNED + UNMODIFIED (commit `{clone_commit}`, infernet-h2020/DCAlign); the "
+        f"warm-start lives in our driver `src/SBM/julia/run_dcalign_warmstart.jl` (clone not edited "
+        f"=> no Mac<->Midway divergence). The sbatch enforces the pin.\n\n"
+        f"COMPUTE NODE ONLY — submit `pipeline/external/sbatch_dcalign_warmstart.sh` from the login "
+        f"node (2-task array per model, cpus=4/mem=12G/time=2h). Do NOT run the driver on the login "
+        f"node.\n\n{reading}\n"
+    )
+
+
+def _print_handoff(args, clone_commit, out_root: Path, is_sweep: bool, runs: list) -> None:
+    print(f"\n=== built (init={args.init}, {'sweep' if is_sweep else 'single'}) ===")
+    for beta0, rd in runs:
+        print(f"  beta0={beta0:g} -> {rd}")
+    print(f"\nclone pin: {clone_commit} (the sbatch enforces this on Midway)\n")
+    print("Hand-off — submit from the Midway LOGIN node (it dispatches to compute nodes):")
+    print("  bash scripts/sync_models.sh push")
+    if is_sweep:
+        print("  # on Midway — one 2-task array per beta0 dir, all concurrent:")
+        print(f"  for d in {out_root}/beta*/ ; do "
+              f"sbatch pipeline/external/sbatch_dcalign_warmstart.sh \"$d\" ; done")
+        print("  squeue --me                                # wait for all to clear, then on the Mac:")
+        print("  bash scripts/sync_models.sh pull")
+        print(f"  .venv/bin/python scripts/analyze_dcalign_warmstart.py "
+              f"--sweep-root {out_root} --init-kind random")
+    else:
+        print(f"  sbatch pipeline/external/sbatch_dcalign_warmstart.sh {out_root}")
+        print("  squeue --me ; bash scripts/sync_models.sh pull   # then, on the Mac:")
+        print(f"  .venv/bin/python scripts/analyze_dcalign_warmstart.py "
+              f"--run-dir {out_root} --init-kind {args.init}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -163,9 +226,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pcount", type=float, default=DEFAULT_PCOUNT)
     p.add_argument("--seed", type=int, default=DEFAULT_SEED)
     p.add_argument("--lambda-spec", default=DEFAULT_LAMBDA_SPEC, choices=("deltan", "flat"))
-    p.add_argument("--init", default="native", choices=("native", "map"),
-                   help="warm-start frame: native (home-model frame, the fixed-point probe) or "
-                        "map (fields-MAP/Viterbi frame, the production-usable init test)")
+    p.add_argument("--init", default="native", choices=("native", "map", "random"),
+                   help="BP init: native (home-model frame, the fixed-point probe), map "
+                        "(fields-MAP/Viterbi frame), or random (no init file — the anneal-from-hot "
+                        "sweep, paired with --beta0/--beta0-values < 1)")
+    p.add_argument("--beta0", type=float, default=1.0,
+                   help="starting inverse-temperature for the BP anneal (1.0 = DCAlign's behaviour; "
+                        "<1 starts on the smoothed landscape and ramps up)")
+    p.add_argument("--beta0-values", type=float, nargs="+", default=None,
+                   help="sweep these beta0 values -> one self-contained run dir per value under "
+                        "<out-root>/beta<v>/ (overrides --beta0)")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -195,122 +265,89 @@ def main(argv: list[str] | None = None) -> int:
     if skipped:
         log.warning("skipped %d curated id(s) with no home model: %s", len(skipped), skipped[:5])
 
-    # Build the per-id warm-start init frame (length-L, insert-free): the native
-    # home-model frame, or the fields-MAP/Viterbi frame (production-legal — no
-    # ground truth). The MAP path is built once per model from h + seed MSA.
-    init_frames: dict[str, np.ndarray] = {}
-    for name, recs in per_model.items():
-        if not recs:
-            continue
-        if args.init == "map":
-            hmm = ProfileHMM.from_model(models[name], load_seed_msa(models[name].source))
-        for r in recs:
-            if args.init == "native":
-                init_frames[r.id] = r.ints
-            else:
-                raw = r.ints[r.ints != GAP]
-                init_frames[r.id] = hmm.path_to_frame(hmm.viterbi(raw), raw)
+    # Per-id init frame (length-L, insert-free) for native/map; random init writes
+    # no init file (init_frames stays None). The MAP path is built once per model.
+    init_frames: dict[str, np.ndarray] | None
+    if args.init == "random":
+        init_frames = None
+    else:
+        init_frames = {}
+        for name, recs in per_model.items():
+            if not recs:
+                continue
+            if args.init == "map":
+                hmm = ProfileHMM.from_model(models[name], load_seed_msa(models[name].source))
+            for r in recs:
+                if args.init == "native":
+                    init_frames[r.id] = r.ints
+                else:
+                    raw_ints = r.ints[r.ints != GAP]
+                    init_frames[r.id] = hmm.path_to_frame(hmm.viterbi(raw_ints), raw_ints)
 
-    out_root = args.out_root
-    out_root.mkdir(parents=True, exist_ok=True)
-    staged = []
-    for name, recs in per_model.items():
-        if not recs:
-            log.warning("model %r has no curated home pairs; skipping", name)
-            continue
-        staged.append(stage_model_indir(
-            models[name], recs, out_root / name, init_frames,
-            maxiter=args.maxiter, seed=args.seed, pcount=args.pcount,
-            lambda_spec=args.lambda_spec, init_mode=args.init))
-
-    # Run-dir level provenance + contract files.
-    (out_root / "models.json").write_text(models_json.read_text(encoding="utf-8"), encoding="utf-8")
-    (out_root / "roles.json").write_text(json.dumps(roles, indent=2) + "\n", encoding="utf-8")
-    (out_root / "query").mkdir(exist_ok=True)
-    # Canonical query set = raw queries + groups for the curated ids (provenance).
     curated_ids = [sid for sid in roles if sid in by_id and by_id[sid].origin_model in models]
     raw = [by_id[sid].ints[by_id[sid].ints != GAP] for sid in curated_ids]
-    _write_queries(raw, curated_ids, out_root / "query" / "query.fasta")
     groups = json.loads((src / "query" / "groups.json").read_text(encoding="utf-8"))
-    (out_root / "query" / "groups.json").write_text(
-        json.dumps({sid: groups[sid] for sid in curated_ids if sid in groups}, indent=2) + "\n",
-        encoding="utf-8")
-
     clone = _resolve_clone(args.dcalign_path)
     clone_commit = _git_commit(clone) if clone is not None else None
-    finished_at = dt.datetime.now(dt.timezone.utc)
-    options = {
-        "maxiter": args.maxiter, "pcount": args.pcount, "seed": args.seed,
-        "init_mode": args.init,
-        "lambda_spec": args.lambda_spec, "src_run_dir": str(src), "roles": str(args.roles),
-        "dcalign_clone_commit": clone_commit,
-        "dcalign_clone_remote": "https://github.com/infernet-h2020/DCAlign",
-        "n_curated": len(curated_ids), "n_recover": sum(1 for v in roles.values() if v == "recover"),
-        "n_control": sum(1 for v in roles.values() if v == "control"),
-        "staged": staged,
-    }
-    manifest = provenance.build_run_manifest(
-        run_id="build_dcalign_warmstart", command_line=provenance.current_command_line(),
-        inputs={"models_json": models_json, "roles": args.roles,
-                "query_fasta": src / "query" / "query.fasta"},
-        options=options, seed=args.seed, started_at=started_at, finished_at=finished_at,
-        output_path=out_root / "models.json",
-        extra={"model_sha256": {m["name"]: m.get("model_sha256") for m in model_entries}},
-    )
-    provenance.save_run_manifest(manifest, out_root / "warmstart_manifest.json")
+    n_recover = sum(1 for v in roles.values() if v == "recover")
+    n_control = sum(1 for v in roles.values() if v == "control")
 
-    is_map = args.init == "map"
-    title = ("DCAlign fields-MAP-init test (production lever)" if is_map
-             else "DCAlign warm-start fixed-point probe")
-    init_desc = ("the fields-MAP / Viterbi frame (production-legal — no ground truth; the §10.17 "
-                 "fixed-point probe showed a good *near*-native start reaches native quality)"
-                 if is_map else "the native home-model frame")
-    reading = (
-        ("Reading the result: BP starts at the fields-MAP frame and runs DCAlign's real schedule. "
-         "If it REACHES native quality (ΔE≈0) for most worse pairs, MAP-init + couplings-aware BP is "
-         "the production recipe — adopt it as the dcalign align mode and run the full combine. If it "
-         "does not, the MAP start is too far from native's basin → fall back to an annealing sweep.")
-        if is_map else
-        ("Reading the result: BP starts at the native frame and runs DCAlign's real schedule. "
-         "If it STAYS at native (ΔE≈0) the native frame is a stable fixed point the production "
-         "random-init runs missed (case A → anneal / better init). If it flows to the cached worse "
-         "frame, native is not a fixed point of DCAlign's objective (case B → stop tuning)."))
-    note = (
-        f"# {title}\n\n"
-        f"Init frame: {init_desc}.\n"
-        f"Curated set ({len(curated_ids)}: "
-        f"{options['n_recover']} hardest worse-than-native + {options['n_control']} controls) "
-        f"reused from the multi-seed sweep for direct comparability.\n"
-        f"Source frames/models: `{src}`. Prior: `{args.lambda_spec}`, pcount={args.pcount}, "
-        f"maxiter={args.maxiter}.\n\n"
-        f"DCAlign clone is a PINNED, UNMODIFIED dependency — commit `{clone_commit}` "
-        f"(infernet-h2020/DCAlign). The warm-start lives entirely in our driver "
-        f"`src/SBM/julia/run_dcalign_warmstart.jl`; the clone is not edited, so the Mac and "
-        f"Midway clones cannot diverge. Verify the Midway clone is at the same commit before running.\n\n"
-        f"COMPUTE NODE ONLY — do NOT run the driver on the Midway login node. Submit the array job "
-        f"`pipeline/external/sbatch_dcalign_warmstart.sh` from the login node; it dispatches a 2-task "
-        f"array (one per model, cpus=4/mem=12G/time=2h, runs concurrently) to compute nodes and enforces "
-        f"the clone pin. Each task is real compute (12 seqs, ~10 min at cpus=4, ~4.5 GB peak like the "
-        f"production deltan align). Edit the #SBATCH lines there if resources need tuning.\n\n"
-        f"{reading}\n"
-    )
-    (out_root / "iteration_note.md").write_text(note, encoding="utf-8")
+    def _stage_run(run_dir: Path, beta0: float) -> None:
+        """Stage one self-contained run dir (per-model in-dirs + provenance) at beta0."""
+        run_dir.mkdir(parents=True, exist_ok=True)
+        staged = []
+        for name, recs in per_model.items():
+            if not recs:
+                log.warning("model %r has no curated home pairs; skipping", name)
+                continue
+            staged.append(stage_model_indir(
+                models[name], recs, run_dir / name, init_frames,
+                maxiter=args.maxiter, seed=args.seed, pcount=args.pcount,
+                lambda_spec=args.lambda_spec, init_mode=args.init, beta0=beta0))
+        (run_dir / "models.json").write_text(models_json.read_text(encoding="utf-8"), encoding="utf-8")
+        (run_dir / "roles.json").write_text(json.dumps(roles, indent=2) + "\n", encoding="utf-8")
+        (run_dir / "query").mkdir(exist_ok=True)
+        _write_queries(raw, curated_ids, run_dir / "query" / "query.fasta")
+        (run_dir / "query" / "groups.json").write_text(
+            json.dumps({sid: groups[sid] for sid in curated_ids if sid in groups}, indent=2) + "\n",
+            encoding="utf-8")
+        options = {
+            "maxiter": args.maxiter, "pcount": args.pcount, "seed": args.seed,
+            "init_mode": args.init, "beta0": beta0, "lambda_spec": args.lambda_spec,
+            "src_run_dir": str(src), "roles": str(args.roles), "dcalign_clone_commit": clone_commit,
+            "dcalign_clone_remote": "https://github.com/infernet-h2020/DCAlign",
+            "n_curated": len(curated_ids), "n_recover": n_recover, "n_control": n_control,
+            "staged": staged,
+        }
+        manifest = provenance.build_run_manifest(
+            run_id="build_dcalign_warmstart", command_line=provenance.current_command_line(),
+            inputs={"models_json": models_json, "roles": args.roles,
+                    "query_fasta": src / "query" / "query.fasta"},
+            options=options, seed=args.seed, started_at=started_at,
+            finished_at=dt.datetime.now(dt.timezone.utc), output_path=run_dir / "models.json",
+            extra={"model_sha256": {m["name"]: m.get("model_sha256") for m in model_entries}})
+        provenance.save_run_manifest(manifest, run_dir / "warmstart_manifest.json")
+        (run_dir / "iteration_note.md").write_text(
+            _iteration_note(args, beta0, clone_commit, src, len(curated_ids), n_recover, n_control),
+            encoding="utf-8")
 
-    # Midway hand-off (resources are cluster-side: cpus=1 per task, fan over the array;
-    # the iter-002-pcsweep OOM was cpus=4/mem=8G).
-    print(f"\n=== built warm-start probe (init={args.init}) ===")
-    for s in staged:
-        print(f"  {s['model']}: {s['n_queries']} home pairs -> {s['in_dir']}")
-    print(f"\nclone pin: {clone_commit} (the sbatch enforces this on Midway)\n")
-    print("Hand-off — submit the array from the Midway LOGIN node (it dispatches to compute nodes):")
-    print("  bash scripts/sync_models.sh push                       # Mac -> Midway")
-    print("  ssh $SBM_MIDWAY_HOST ; cd <repo> ; mkdir -p logs       # then on Midway:")
-    print(f"  sbatch pipeline/external/sbatch_dcalign_warmstart.sh {out_root}")
-    print("  #   2-task array (CM, PPIC) cpus=4/mem=12G/time=2h, concurrent; ~10 min each.")
-    print("  squeue --me                                            # wait until both tasks clear")
-    print("  bash scripts/sync_models.sh pull                       # Midway -> Mac, then:")
-    print(f"  .venv/bin/python scripts/analyze_dcalign_warmstart.py --run-dir {out_root} "
-          f"--init-kind {args.init}")
+    beta0_list = args.beta0_values if args.beta0_values is not None else [args.beta0]
+    is_sweep = args.beta0_values is not None
+    out_root = args.out_root
+    out_root.mkdir(parents=True, exist_ok=True)
+    runs = [(b, (out_root / f"beta{b:g}") if is_sweep else out_root) for b in beta0_list]
+    for beta0, rd in runs:
+        _stage_run(rd, beta0)
+
+    if is_sweep:
+        (out_root / "sweep_meta.json").write_text(json.dumps({
+            "kind": "annealsweep", "init": args.init, "beta0_values": beta0_list,
+            "maxiter": args.maxiter, "pcount": args.pcount, "lambda_spec": args.lambda_spec,
+            "src_run_dir": str(src), "dcalign_clone_commit": clone_commit,
+            "run_dirs": {f"{b:g}": str(rd) for b, rd in runs},
+        }, indent=2) + "\n", encoding="utf-8")
+
+    _print_handoff(args, clone_commit, out_root, is_sweep, runs)
     return 0
 
 

@@ -893,3 +893,50 @@ the oracle — initialise BP at the native frame, run its real schedule, and wat
   the probe, not the science, is suspect. Decision gate: most worse pairs **stay** ⇒ case A (build
   the annealing/native-init lever); most **drift** ⇒ case B (DCAlign's objective can't be made to
   prefer native by search-tuning — stop tuning DCAlign).
+
+### 10.18 iter-003 Phase-B — CASE A confirmed; fields-MAP init refuted; anneal-from-hot sweep (2026-06-29)
+
+**Warm-start probe RESULT: CASE A.** Controls 8/8 stayed (0 drift — probe sound). Of the 16 worse
+pairs, **9 STAYED at native** (ΔE≤1) and 5 more drifted only slightly (e.g. CM-syn-140 7.6 vs 50 from
+random init; PPIC-215 2.4 vs 30) — **median ΔE collapsed ~30 → 0.32 a.u.** when BP starts at native.
+Only 2/16 snapped back to the production frame. So the native basin **is reachable and (near-)stable**;
+the production random-init search just never lands in it. There is a small (~1–2/16) genuine case-B
+tail — don't expect a full 16/16 from any lever.
+
+**Fields-MAP init (Test 1) REFUTED — and disqualified.** `--init map` (Viterbi frame from `hmm.py`,
+production-legal, all 24 insert-free so usable directly) recovered only **1/16**, median ΔE **25.4**
+(≈ unchanged from production). Worse, it **regressed good cases**: PPIC-269 went 3.1 → 13. Why: the
+fields-MAP frame *ignores couplings*, which is the exact signal that distinguishes native from the
+wrong frame — so for ~6 pairs the MAP frame **is** the production wrong frame (CM276's MAP frame
+recomputes to the production energy −253.26). A couplings-blind init can't escape the couplings-blind
+basin, and a lever that can regress good pairs is unusable in production. Confirms the prediction.
+
+**The principled lever: anneal-from-hot (Test 2, built; awaiting Midway).** Key schedule fact from
+the clone: DCAlign's `update!` starts at `β=1.0` and only ever *increases* β (sharpening) — it
+**never anneals from a hot, smooth landscape**, so random init commits to a basin at the physical
+temperature and sharpening locks it in. The fix is to start at `β₀ < 1` (smoothed, fewer basins),
+equilibrate, then ramp β up to 1 — letting the **full couplings** guide the trajectory into the
+native basin (which §10.18's warm start proved is reachable). `palign` can't do this, but our
+warm-start driver already replicates the schedule, so a third init mode was added there (clone still
+untouched):
+
+- **Driver** `run_dcalign_warmstart.jl` generalized: `run_bp!(init_margs, beta0, …)` — `init_margs
+  === nothing` ⇒ stock random init; `β` starts at `beta0` (scaling `J,h,Λ`) and ramps up by `Δβ`,
+  with convergence **only accepted once `β ≥ 1`** (never decode above the physical temperature). With
+  a warm init and `beta0=1.0` it's byte-identical to the §10.17 probe. RNG is now seeded
+  (`Random.seed!(seed)`, mirroring `palign`) so the random-init anneal is reproducible — smoke-tested
+  (same seed → identical frame).
+- **Build/analysis** `build_dcalign_warmstart.py --init random --beta0-values …` writes one
+  self-contained run dir per β₀ (`beta<v>/`, no init file) + `sweep_meta.json`;
+  `analyze_dcalign_warmstart.py --sweep-root …` tabulates recovery-vs-β₀, picks the best β₀, and
+  emits `annealsweep_summary.json` + `annealsweep.pdf` (`render_annealsweep`). `--init-kind random`
+  sets the verdict wording. 15 warm-start tests pass; the random+anneal path validated on the real
+  CM model (flat Λ): all 12 seqs converge, iter counts show the hot-then-cool behaviour (141 easy,
+  422–625 hard).
+- **Built:** `combine/combine-CM-PPIC-dcalign-annealsweep/beta{0.1,0.3,0.5,1.0}/` — same 24 home
+  pairs, `deltan`/pcount 0.001, `maxiter 8000` (a finer ramp genuinely needs more sweeps to reach
+  β=1 — this is *not* the "maxiter-alone doesn't help" that was correctly rejected; β₀=1.0 is the
+  in-sweep canary = current behaviour). One 2-task sbatch array per β₀ dir, all concurrent on Midway.
+  Decision gate: a β₀ that recovers most of the 16 ⇒ that β₀ is the production anneal schedule (plumb
+  into the combine `dcalign` align path, run the full combine, ship); none works ⇒ annealing is
+  exhausted, **ship the combine as-is** and document the ~14% home-pair residual as a method limit.

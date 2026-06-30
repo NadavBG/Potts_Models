@@ -101,51 +101,111 @@ def build_rows(run_dir: Path, src_run_dir: Path, equal_tol: float) -> list[Warms
     return rows
 
 
+def _analyze_one(run_dir: Path, src_run_dir: Path, equal_tol: float, init_kind: str,
+                 out_dir: Path, started_at) -> dict:
+    """Analyse one run dir: write rows TSV + analysis JSON + figure + manifest; return summary."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rows = build_rows(run_dir, src_run_dir, equal_tol)
+    if not rows:
+        raise ValueError(f"no warm-start rows produced for {run_dir}")
+    summary = summarize_warmstart(rows, equal_tol=equal_tol, init_kind=init_kind)
+    rows_tsv = out_dir / "warmstart_rows.tsv"
+    _write_tsv(rows, rows_tsv)
+    (out_dir / "warmstart_analysis.json").write_text(json.dumps(summary, indent=2) + "\n",
+                                                      encoding="utf-8")
+    from SBM.utils import utils_dcalign_warmstart_plot
+    utils_dcalign_warmstart_plot.render_warmstart(rows_tsv, out_dir / "warmstart.pdf",
+                                                  equal_tol=equal_tol)
+    manifest = provenance.build_run_manifest(
+        run_id="analyze_dcalign_warmstart", command_line=provenance.current_command_line(),
+        inputs={"run_dir": run_dir, "src_run_dir": src_run_dir},
+        options={"equal_tol": equal_tol, "init_kind": init_kind}, seed=None,
+        started_at=started_at, finished_at=dt.datetime.now(dt.timezone.utc), output_path=rows_tsv,
+        extra={"analysis": summary})
+    provenance.save_run_manifest(manifest, out_dir / "warmstart_manifest.json")
+    return summary
+
+
+def _sweep_verdict(table: list[dict], best: dict, baseline: dict | None) -> str:
+    base_txt = (f"baseline beta0=1.0 recovered {baseline['n_stayed_native']}/{baseline['n']}"
+                if baseline else "no beta0=1.0 baseline in the sweep")
+    drift = sum(t["n_control_drift"] for t in table)
+    drift_txt = "" if drift == 0 else f" WARNING: {drift} control drift(s) across the sweep."
+    if best["frac_stayed_native"] >= 0.5:
+        return (f"ANNEAL-FROM-HOT WORKS: beta0={best['beta0']:g} recovered "
+                f"{best['n_stayed_native']}/{best['n']} worse pairs ({base_txt}). Set beta0="
+                f"{best['beta0']:g} as the production anneal schedule and run the full combine."
+                + drift_txt)
+    return (f"ANNEAL-FROM-HOT did not close it: best beta0={best['beta0']:g} recovered only "
+            f"{best['n_stayed_native']}/{best['n']} ({base_txt}). Annealing is exhausted — ship the "
+            f"combine as-is and document the residual as a method limit." + drift_txt)
+
+
+def run_sweep(sweep_root: Path, src_run_dir: Path, equal_tol: float, init_kind: str,
+              started_at) -> dict:
+    """Analyse every beta0 run dir in a sweep, tabulate recovery-vs-beta0, pick the best."""
+    meta = json.loads((sweep_root / "sweep_meta.json").read_text(encoding="utf-8"))
+    table = []
+    for bstr, rd in sorted(meta["run_dirs"].items(), key=lambda kv: float(kv[0])):
+        rd = Path(rd)
+        summ = _analyze_one(rd, src_run_dir, equal_tol, init_kind, rd / "analysis", started_at)
+        rec = summ["recover"]["overall"]
+        table.append({
+            "beta0": float(bstr), "n": rec["n_ok"], "n_stayed_native": rec["n_stayed_native"],
+            "frac_stayed_native": rec["frac_stayed_native"],
+            "median_delta_e_warm": rec["median_delta_e_warm"],
+            "n_control_drift": summ["control"]["n_control_drift"],
+        })
+    best = max(table, key=lambda d: (d["frac_stayed_native"],
+               -(d["median_delta_e_warm"] if d["median_delta_e_warm"] is not None else 1e18)))
+    baseline = next((r for r in table if abs(r["beta0"] - 1.0) < 1e-9), None)
+    verdict = _sweep_verdict(table, best, baseline)
+    summary = {"kind": "annealsweep", "equal_tol": equal_tol, "init_kind": init_kind,
+               "by_beta0": table, "best_beta0": best["beta0"], "verdict": verdict}
+    (sweep_root / "annealsweep_summary.json").write_text(json.dumps(summary, indent=2) + "\n",
+                                                         encoding="utf-8")
+    from SBM.utils import utils_dcalign_warmstart_plot
+    utils_dcalign_warmstart_plot.render_annealsweep(table, sweep_root / "annealsweep.pdf",
+                                                    equal_tol=equal_tol)
+    manifest = provenance.build_run_manifest(
+        run_id="analyze_dcalign_annealsweep", command_line=provenance.current_command_line(),
+        inputs={"sweep_root": sweep_root, "src_run_dir": src_run_dir},
+        options={"equal_tol": equal_tol, "init_kind": init_kind}, seed=None,
+        started_at=started_at, finished_at=dt.datetime.now(dt.timezone.utc),
+        output_path=sweep_root / "annealsweep_summary.json", extra={"by_beta0": table})
+    provenance.save_run_manifest(manifest, sweep_root / "annealsweep_manifest.json")
+    print(verdict)
+    return summary
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--run-dir", type=Path, required=True, help="warm-start probe run dir")
+    p.add_argument("--run-dir", type=Path, default=None, help="single warm-start/map/anneal run dir")
+    p.add_argument("--sweep-root", type=Path, default=None,
+                   help="anneal sweep root (beta<v>/ subdirs + sweep_meta.json) — recovery vs beta0")
     p.add_argument("--src-run-dir", type=Path,
                    default=Path("combine/combine-CM-PPIC-dcalign/iter-002-nonuniform-prior"),
                    help="source of native frames + models + random-init cache (default iter-002)")
     p.add_argument("--out-dir", type=Path, default=None, help="default <run-dir>/analysis")
     p.add_argument("--equal-tol", type=float, default=DEFAULT_EQUAL_TOL)
-    p.add_argument("--init-kind", default="native", choices=("native", "map"),
+    p.add_argument("--init-kind", default="native", choices=("native", "map", "random"),
                    help="how BP was initialised (only sets the verdict wording); match the build")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     started_at = dt.datetime.now(dt.timezone.utc)
 
-    run_dir = args.run_dir
-    out_dir = args.out_dir or run_dir / "analysis"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if (args.run_dir is None) == (args.sweep_root is None):
+        p.error("pass exactly one of --run-dir or --sweep-root")
 
-    rows = build_rows(run_dir, args.src_run_dir, args.equal_tol)
-    if not rows:
-        raise ValueError("no warm-start rows produced (no curated home pairs matched)")
-    summary = summarize_warmstart(rows, equal_tol=args.equal_tol, init_kind=args.init_kind)
+    if args.sweep_root is not None:
+        run_sweep(args.sweep_root, args.src_run_dir, args.equal_tol, args.init_kind, started_at)
+        return 0
 
-    rows_tsv = out_dir / "warmstart_rows.tsv"
-    _write_tsv(rows, rows_tsv)
-    (out_dir / "warmstart_analysis.json").write_text(json.dumps(summary, indent=2) + "\n",
-                                                      encoding="utf-8")
-    log.info("wrote analysis JSON: %s", out_dir / "warmstart_analysis.json")
-
-    from SBM.utils import utils_dcalign_warmstart_plot
-    utils_dcalign_warmstart_plot.render_warmstart(
-        rows_tsv, out_dir / "warmstart.pdf", equal_tol=args.equal_tol)
-
-    finished_at = dt.datetime.now(dt.timezone.utc)
-    manifest = provenance.build_run_manifest(
-        run_id="analyze_dcalign_warmstart", command_line=provenance.current_command_line(),
-        inputs={"run_dir": run_dir, "src_run_dir": args.src_run_dir},
-        options={"equal_tol": args.equal_tol}, seed=None,
-        started_at=started_at, finished_at=finished_at, output_path=rows_tsv,
-        extra={"analysis": summary},
-    )
-    provenance.save_run_manifest(manifest, out_dir / "warmstart_manifest.json")
-
+    out_dir = args.out_dir or args.run_dir / "analysis"
+    summary = _analyze_one(args.run_dir, args.src_run_dir, args.equal_tol, args.init_kind,
+                           out_dir, started_at)
     print(summary["verdict"])
     return 0
 

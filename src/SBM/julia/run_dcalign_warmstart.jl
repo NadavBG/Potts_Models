@@ -51,6 +51,7 @@
 using DCAlign
 using OffsetArrays
 using LinearAlgebra
+using Random
 
 const TSV_HEADER = "seq_id\taligned_frame\tdcalign_energy\tconverged\tused_decimation\tn_iter"
 
@@ -179,32 +180,42 @@ end
 
 # ── BP from a warm start: replica of DCAlign.update! (clone cab443ff) ─────────
 
-"""Run DCAlign belief propagation from the `native` warm start.
+"""Run DCAlign belief propagation from a given init and starting temperature β₀.
 
-A faithful copy of `DCAlign.update!` (clone cab443ff) with ONE change: the random
-`initialize_all!` is followed by overwriting the per-column marginals `P/B/F` with
-the native delta state. The annealing schedule (β starts at 1.0 and is cooled by
-`Δβ` every `Δt` sweeps, scaling `J,h,Λ`) and the saturation convergence test are
-reproduced exactly, so the only difference from a production `palign` call is the
-starting point. Returns `(n_iter, flagconv::Symbol)`.
+Generalises `DCAlign.update!` (clone cab443ff). `init_margs === nothing` ⇒ the
+stock random `initialize_all!` (a cold / anneal-from-hot start); otherwise the
+per-column marginals `P/B/F` are overwritten with the supplied delta state (the
+native or fields-MAP warm start). `β` starts at `beta0` (scaling `J,h,Λ`) and the
+schedule ramps it UP by `Δβ` every `Δt` sweeps; convergence (`sat && minp > thP`)
+is **only accepted once `β ≥ 1`** — so for `beta0 < 1` BP first equilibrates on
+the smoothed high-temperature landscape and is then cooled to the physical
+temperature, the anneal-from-hot that DCAlign's own loop (β starts at 1.0, only
+sharpens) never does. With `init_margs` set and `beta0 = 1.0` this is byte-identical
+to the warm-start loop. Returns `(n_iter, flagconv::Symbol)`.
 """
-function run_bp_from_native!(allvar, native_margs, maxiter::Int, Δβ::Float64,
-                             thP::Float64, Δt::Int)
-    DCAlign.initialize_all!(allvar)         # valid normalisation for the scratch buffers
-    L = allvar.pbf.L
-    for i in 1:L
-        allvar.pbf.P[i] .= native_margs[i]
-        allvar.pbf.B[i] .= native_margs[i]
-        allvar.pbf.F[i] .= native_margs[i]
+function run_bp!(allvar, init_margs, beta0::Float64, maxiter::Int, Δβ::Float64,
+                 thP::Float64, Δt::Int)
+    DCAlign.initialize_all!(allvar)         # valid normalisation (+ random start if no warm init)
+    if init_margs !== nothing
+        for i in 1:allvar.pbf.L
+            allvar.pbf.P[i] .= init_margs[i]
+            allvar.pbf.B[i] .= init_margs[i]
+            allvar.pbf.F[i] .= init_margs[i]
+        end
     end
-    β = 1.0
+    β = beta0
+    allvar.jh.J .= β .* allvar.data.J       # start on the β₀-smoothed landscape
+    allvar.jh.h .= β .* allvar.data.h
+    allvar.alg.Λ .= allvar.data.Λ .^ β
     for it in 1:maxiter
         ΔP, ΔB, ΔF = DCAlign.onesweep!(allvar)
         minp, sat = DCAlign.check_solution(allvar)
-        if Δβ > 0.0
-            (sat && minp > thP) && return it, :converged
-        else
-            maximum((ΔP, ΔB, ΔF)) < 1e-4 && return it, :converged
+        if β >= 1.0  # never accept a frame decoded above the physical temperature
+            if Δβ > 0.0
+                (sat && minp > thP) && return it, :converged
+            else
+                maximum((ΔP, ΔB, ΔF)) < 1e-4 && return it, :converged
+            end
         end
         if it % Δt == 0
             β += Δβ
@@ -217,15 +228,18 @@ function run_bp_from_native!(allvar, native_margs, maxiter::Int, Δβ::Float64,
 end
 
 
-"""Warm-start one query at its native frame; returns the TSV row tuple.
+"""Align one query and return the TSV row tuple.
 
-Builds the same `AllVar` `palign` builds (clone cab443ff), warm-starts BP at the
-native frame, decodes exactly as run_dcalign.jl's `align_one` (decodeposterior +
-decimation fallback), and reports the in-frame Potts energy of the settled frame
-under the ORIGINAL (unscaled) `J,h`.
+Builds the same `AllVar` `palign` builds (clone cab443ff), runs BP from the given
+init (`init_frame === nothing` ⇒ random, else warm-start at that length-L frame)
+and starting temperature `beta0`, decodes exactly as run_dcalign.jl's `align_one`
+(decodeposterior + decimation fallback), and reports the in-frame Potts energy of
+the settled frame under the ORIGINAL (unscaled) `J,h`.
 """
-function warmstart_one(header, rawseq, native_frame, J, h, Λ, L::Int, maxiter::Int,
-                       pcount::Float64, Δβ::Float64, thP::Float64, Δt::Int)
+function warmstart_one(header, rawseq, init_frame, beta0::Float64, J, h, Λ, L::Int,
+                       maxiter::Int, pcount::Float64, Δβ::Float64, thP::Float64, Δt::Int,
+                       seed::Int)
+    Random.seed!(seed)   # mirror palign: makes the random init (and any decimation) reproducible
     seq = Seq(String(header), String(rawseq), :amino)
     jh = DCAlign.Jh(deepcopy(J), deepcopy(h))
     pbf = DCAlign.PBF(jh, seq)
@@ -239,8 +253,8 @@ function warmstart_one(header, rawseq, native_frame, J, h, Λ, L::Int, maxiter::
     data = DCAlign.Data(J, h, deepcopy(alg.Λ))
     allvar = DCAlign.AllVar(pbf, jh, seq, alg, data)
 
-    native_margs = native_marginals(String(native_frame), N)
-    niter, conv = run_bp_from_native!(allvar, native_margs, mi, Δβ, thP, Δt)
+    init_margs = init_frame === nothing ? nothing : native_marginals(String(init_frame), N)
+    niter, conv = run_bp!(allvar, init_margs, beta0, mi, Δβ, thP, Δt)
 
     P = copy(allvar.pbf.P)
     out = DCAlign.decodeposterior(P, allvar.seq.strseq, thP=allvar.alg.thP)
@@ -268,24 +282,31 @@ function main()
     q = Int(meta["q"])
     maxiter = Int(meta["maxiter"])
     pcount = Float64(meta["pcount"])
+    seed = haskey(meta, "seed") ? Int(meta["seed"]) : 0
     lambda_spec = String(meta["lambda_spec"])
     Δβ = haskey(meta, "Dbeta") ? Float64(meta["Dbeta"]) : DEFAULT_DBETA
     thP = haskey(meta, "thP") ? Float64(meta["thP"]) : DEFAULT_THP
     Δt = haskey(meta, "Dt") ? Int(meta["Dt"]) : DEFAULT_DT
+    beta0 = haskey(meta, "beta0") ? Float64(meta["beta0"]) : 1.0
 
     J, h = read_model(in_dir, q, L)
     Λ = build_lambda(lambda_spec, L, in_dir)
     queries = read_fasta(joinpath(in_dir, "queries.fasta"))
-    # The warm-start init frame (native OR fields-MAP, set by build_dcalign_warmstart.py).
-    # Prefer init.fasta; fall back to the legacy native.fasta name.
-    init_file = isfile(joinpath(in_dir, "init.fasta")) ? "init.fasta" : "native.fasta"
-    natives = Dict(read_fasta(joinpath(in_dir, init_file)))
-    for (hdr, _) in queries
-        haskey(natives, hdr) || error("$init_file has no frame for query id $hdr")
+    # The init frame (native / fields-MAP, set by build_dcalign_warmstart.py): prefer
+    # init.fasta, fall back to the legacy native.fasta. ABSENT ⇒ random init (the
+    # anneal-from-hot sweep stages no init file).
+    init_path = isfile(joinpath(in_dir, "init.fasta")) ? joinpath(in_dir, "init.fasta") :
+                isfile(joinpath(in_dir, "native.fasta")) ? joinpath(in_dir, "native.fasta") : nothing
+    inits = init_path === nothing ? nothing : Dict(read_fasta(init_path))
+    if inits !== nothing
+        for (hdr, _) in queries
+            haskey(inits, hdr) || error("$(basename(init_path)) has no frame for query id $hdr")
+        end
     end
     println(stderr, "run_dcalign_warmstart: L=$L q=$q maxiter=$maxiter pcount=$pcount " *
-                    "lambda=$lambda_spec Δβ=$Δβ thP=$thP Δt=$Δt n_queries=$(length(queries)) " *
-                    "threads=$(Threads.nthreads())")
+                    "lambda=$lambda_spec beta0=$beta0 Δβ=$Δβ thP=$thP Δt=$Δt " *
+                    "init=$(init_path === nothing ? "random" : basename(init_path)) " *
+                    "n_queries=$(length(queries)) threads=$(Threads.nthreads())")
 
     # Per-query independence + per-row flush mirror run_dcalign.jl (resume contract).
     if Threads.nthreads() > 1
@@ -301,8 +322,9 @@ function main()
         Threads.@threads :dynamic for idx in eachindex(queries)
             header, rawseq = queries[idx]
             row = try
-                warmstart_one(header, rawseq, natives[header], J, h, Λ, L, maxiter,
-                              pcount, Δβ, thP, Δt)
+                init_frame = inits === nothing ? nothing : inits[header]
+                warmstart_one(header, rawseq, init_frame, beta0, J, h, Λ, L, maxiter,
+                              pcount, Δβ, thP, Δt, seed)
             catch e
                 @warn "warm-start failed; recording empty frame" header exception = (e, catch_backtrace())
                 (String(header), "", NaN, false, false, 0)

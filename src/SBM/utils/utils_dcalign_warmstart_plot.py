@@ -89,3 +89,44 @@ def render_warmstart(rows_tsv: Path, out_pdf: Path, *, equal_tol: float = 1.0) -
     plt.close(fig)
     log.info("wrote DCAlign warm-start figure: %s", saved)
     return Path(saved)
+
+
+def render_annealsweep(table: list[dict], out_pdf: Path, *, equal_tol: float = 1.0) -> Path:
+    """Recovery-vs-β₀ for the anneal-from-hot sweep (one row per β₀ run dir).
+
+    Panel A: fraction of worse pairs recovered (``min ΔE ≤ tol`` ⇒ native quality)
+    vs the starting temperature β₀ — the lever curve (β₀=1.0 is DCAlign's current
+    behaviour; lower = hotter start). Panel B: median ΔE vs β₀. A dip in median /
+    rise in recovery as β₀ falls is the anneal-from-hot working.
+    """
+    plt.style.use("lab-paper")
+    rows = sorted(table, key=lambda d: d["beta0"])
+    b = np.array([r["beta0"] for r in rows], dtype=float)
+    frac = np.array([r["frac_stayed_native"] for r in rows], dtype=float)
+    med = np.array([(r["median_delta_e_warm"] if r["median_delta_e_warm"] is not None else np.nan)
+                    for r in rows], dtype=float)
+
+    figsize = (2 * _PANEL_W + _MARGIN_W, _PANEL_H + _MARGIN_H)
+    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=figsize)
+    hi = lab_plotting.LAB_COLORS.get("highlight", "#CC6677")
+
+    ax_a.plot(b, frac, marker="o", color=hi, markersize=5)
+    ax_a.set_ylim(-0.03, 1.03)
+    ax_a.set_xlabel(r"start temperature $\beta_0$ (1.0 = current)")
+    ax_a.set_ylabel(r"recovered ($\Delta E \leq$ tol) (fraction)")
+    ax_a.set_title(r"anneal-from-hot recovery vs $\beta_0$", fontsize="x-small")
+
+    ax_b.plot(b, med, marker="s", color=hi, markersize=5)
+    ax_b.axhline(equal_tol, color=lab_plotting.LAB_COLORS["chrome"], lw=0.8, ls="--")
+    ax_b.set_xlabel(r"start temperature $\beta_0$ (1.0 = current)")
+    ax_b.set_ylabel(r"median $\Delta E$ warm-start (a.u.)")
+    ax_b.set_title(r"residual vs $\beta_0$", fontsize="x-small")
+
+    lab_plotting.panel_label(ax_a, "A")
+    lab_plotting.panel_label(ax_b, "B")
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    saved = lab_plotting.save_figure(
+        fig, out_pdf, extra_metadata={"Keywords": "sbm_figure=dcalign_annealsweep"})
+    plt.close(fig)
+    log.info("wrote DCAlign anneal-sweep figure: %s", saved)
+    return Path(saved)

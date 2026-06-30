@@ -232,22 +232,29 @@ def build_warmstart_verdict(
     drift = sum(1 for r in control if r.label == CONTROL_DRIFT)
     sane = f"Controls: {len(control) - drift}/{len(control)} ok" + (
         "" if drift == 0 else f" — WARNING {drift} drifted (init suspect!)")
-    is_map = init_kind == "map"
-    started = "initialized at the fields-MAP frame" if is_map else "warm-started at native"
-    verb = "REACHED" if is_map else "STAYED at"
+    started = {
+        "map": "initialized at the fields-MAP frame",
+        "random": "annealed from a random hot start",
+    }.get(init_kind, "warm-started at native")
+    verb = "STAYED at" if init_kind == "native" else "REACHED"
+    lever = {
+        "map": "fields-MAP init + couplings-aware BP recovers the min the random-init production "
+               "runs miss — a production-usable lever (no ground truth needed).",
+        "random": "anneal-from-hot recovers the min the fast (beta=1) random-init production runs "
+                  "miss — set this beta0 as the production anneal schedule.",
+    }.get(init_kind, "native is a reachable fixed point the random-init production runs missed. "
+                     "Lever: annealing / native-biased init.")
+    why = {
+        "map": "the fields-MAP init is not close enough to native's basin; try a slower anneal.",
+        "random": "even anneal-from-hot at this beta0 does not reach native; try a hotter start / "
+                  "finer ramp, or accept the residual as a method limit.",
+    }.get(init_kind, "native is not a fixed point of DCAlign's objective — search-tuning cannot "
+                     "recover it.")
     if frac >= 0.5:
-        lever = (
-            "fields-MAP init + couplings-aware BP recovers the min the random-init production runs "
-            "miss — a production-usable lever (no ground truth needed)." if is_map else
-            "native is a reachable fixed point the random-init production runs missed. "
-            "Lever: annealing / native-biased init.")
         verdict = (
             f"CASE A (search/init problem). {n_stayed}/{n} worse pairs {verb} a native-quality "
             f"frame when BP was {started} — {lever} ")
     elif n_stayed == 0:
-        why = ("the fields-MAP init is not close enough to native's basin; try a slower anneal."
-               if is_map else
-               "native is not a fixed point of DCAlign's objective — search-tuning cannot recover it.")
         verdict = (
             f"CASE B. 0/{n} worse pairs {verb} native: BP drifted to a worse frame even when "
             f"{started} ({n_rand} back to the production frame, {n_other} to a third frame). {why} ")
