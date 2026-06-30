@@ -91,7 +91,7 @@ def load_roles(path: Path) -> dict[str, str]:
 def stage_model_indir(
     model, records: list[datasets.QueryRecord], in_dir: Path,
     init_frames: dict[str, np.ndarray] | None, *, maxiter: int, seed: int, pcount: float,
-    lambda_spec: str, init_mode: str, beta0: float,
+    lambda_spec: str, init_mode: str, beta0: float, extra_meta: dict | None = None,
 ) -> dict:
     """Write one self-contained in-dir for ``model``'s home pairs.
 
@@ -136,14 +136,13 @@ def stage_model_indir(
                 f"seed MSA for {model.name!r} has shape {msa.shape}, expected (N, L={model.L})")
         _write_seed_ins(msa, in_dir / "seed.ins")
 
-    (in_dir / "meta.json").write_text(
-        json.dumps({
-            "L": int(model.L), "q": int(model.q), "maxiter": int(maxiter),
-            "seed": int(seed), "pcount": float(pcount), "lambda_spec": str(lambda_spec),
-            "init_mode": str(init_mode), "beta0": float(beta0), "alphabet": ALPHABET,
-        }, indent=2),
-        encoding="utf-8",
-    )
+    meta = {
+        "L": int(model.L), "q": int(model.q), "maxiter": int(maxiter),
+        "seed": int(seed), "pcount": float(pcount), "lambda_spec": str(lambda_spec),
+        "init_mode": str(init_mode), "beta0": float(beta0), "alphabet": ALPHABET,
+    }
+    meta.update(extra_meta or {})  # e.g. {"n_diag_sweeps": 0} for the compute_en readout
+    (in_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     log.info("staged %d home pair(s) for %r -> %s", len(ids), model.name, in_dir)
     return {"model": model.name, "n_queries": len(ids), "ids": ids,
             "model_sha256": model.sha256, "in_dir": str(in_dir)}

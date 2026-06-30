@@ -272,6 +272,41 @@ function warmstart_one(header, rawseq, init_frame, beta0::Float64, J, h, Λ, L::
 end
 
 
+"""Report DCAlign's `compute_en` at the init frame with ZERO BP sweeps (M4 readout).
+
+`compute_en` (clone cab443ff, `iterate_bplc.jl`) argmax-decodes the BP marginals
+and sums the (β-scaled) `J,h` — it is the *Potts* energy of the decoded frame, NOT
+a Λ-inclusive free energy (the prior Λ enters only inside the messages and has no
+closed-form per-alignment cost; §10.17). With the marginals delta-initialised at
+the init frame and `β=1`, the argmax decode IS that frame, so this reports the
+init frame's Potts energy straight from DCAlign — a third gauge canary against our
+numpy `potts_energy`. Reuses the 6-column schema: frame = init frame, energy =
+compute_en, converged = true, n_iter = 0.
+"""
+function diag_one(header, rawseq, init_frame, J, h, Λ, L::Int, maxiter::Int,
+                  pcount::Float64, Δβ::Float64, thP::Float64, Δt::Int, seed::Int)
+    Random.seed!(seed)
+    seq = Seq(String(header), String(rawseq), :amino)
+    jh = DCAlign.Jh(deepcopy(J), deepcopy(h))
+    pbf = DCAlign.PBF(jh, seq)
+    alg = DCAlign.Alg(false, maxiter, DEFAULT_DAMP, Λ, 500, pbf.N, pbf.L, pcount;
+                      thP=thP, Δβ=Δβ, μext=0.0, μint=0.0, Δt=Δt)
+    data = DCAlign.Data(J, h, deepcopy(alg.Λ))
+    allvar = DCAlign.AllVar(pbf, jh, seq, alg, data)
+    DCAlign.initialize_all!(allvar)
+    margs = native_marginals(String(init_frame), pbf.N)
+    for i in 1:allvar.pbf.L
+        allvar.pbf.P[i] .= margs[i]
+        allvar.pbf.B[i] .= margs[i]
+        allvar.pbf.F[i] .= margs[i]
+    end
+    allvar.jh.J .= allvar.data.J        # β = 1 (unscaled)
+    allvar.jh.h .= allvar.data.h
+    en = DCAlign.compute_en(allvar; β=1.0)
+    return (String(header), String(init_frame), en, true, false, 0)
+end
+
+
 function main()
     length(ARGS) >= 2 || error("usage: run_dcalign_warmstart.jl <in_dir> <out_tsv>")
     in_dir = ARGS[1]
@@ -288,6 +323,7 @@ function main()
     thP = haskey(meta, "thP") ? Float64(meta["thP"]) : DEFAULT_THP
     Δt = haskey(meta, "Dt") ? Int(meta["Dt"]) : DEFAULT_DT
     beta0 = haskey(meta, "beta0") ? Float64(meta["beta0"]) : 1.0
+    n_diag_sweeps = haskey(meta, "n_diag_sweeps") ? Int(meta["n_diag_sweeps"]) : -1
 
     J, h = read_model(in_dir, q, L)
     Λ = build_lambda(lambda_spec, L, in_dir)
@@ -306,6 +342,7 @@ function main()
     println(stderr, "run_dcalign_warmstart: L=$L q=$q maxiter=$maxiter pcount=$pcount " *
                     "lambda=$lambda_spec beta0=$beta0 Δβ=$Δβ thP=$thP Δt=$Δt " *
                     "init=$(init_path === nothing ? "random" : basename(init_path)) " *
+                    "$(n_diag_sweeps == 0 ? "MODE=diag(compute_en@init) " : "")" *
                     "n_queries=$(length(queries)) threads=$(Threads.nthreads())")
 
     # Per-query independence + per-row flush mirror run_dcalign.jl (resume contract).
@@ -323,8 +360,14 @@ function main()
             header, rawseq = queries[idx]
             row = try
                 init_frame = inits === nothing ? nothing : inits[header]
-                warmstart_one(header, rawseq, init_frame, beta0, J, h, Λ, L, maxiter,
-                              pcount, Δβ, thP, Δt, seed)
+                if n_diag_sweeps == 0
+                    init_frame === nothing && error("n_diag_sweeps=0 needs an init frame for $header")
+                    diag_one(header, rawseq, init_frame, J, h, Λ, L, maxiter,
+                             pcount, Δβ, thP, Δt, seed)
+                else
+                    warmstart_one(header, rawseq, init_frame, beta0, J, h, Λ, L, maxiter,
+                                  pcount, Δβ, thP, Δt, seed)
+                end
             catch e
                 @warn "warm-start failed; recording empty frame" header exception = (e, catch_backtrace())
                 (String(header), "", NaN, false, false, 0)
