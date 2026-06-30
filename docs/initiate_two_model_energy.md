@@ -911,7 +911,7 @@ wrong frame — so for ~6 pairs the MAP frame **is** the production wrong frame 
 recomputes to the production energy −253.26). A couplings-blind init can't escape the couplings-blind
 basin, and a lever that can regress good pairs is unusable in production. Confirms the prediction.
 
-**The principled lever: anneal-from-hot (Test 2, built; awaiting Midway).** Key schedule fact from
+**Anneal-from-hot (Test 2) — ran; did NOT close it, but the failure is diagnostic.** Key schedule fact from
 the clone: DCAlign's `update!` starts at `β=1.0` and only ever *increases* β (sharpening) — it
 **never anneals from a hot, smooth landscape**, so random init commits to a basin at the physical
 temperature and sharpening locks it in. The fix is to start at `β₀ < 1` (smoothed, fewer basins),
@@ -933,10 +933,104 @@ untouched):
   sets the verdict wording. 15 warm-start tests pass; the random+anneal path validated on the real
   CM model (flat Λ): all 12 seqs converge, iter counts show the hot-then-cool behaviour (141 easy,
   422–625 hard).
-- **Built:** `combine/combine-CM-PPIC-dcalign-annealsweep/beta{0.1,0.3,0.5,1.0}/` — same 24 home
-  pairs, `deltan`/pcount 0.001, `maxiter 8000` (a finer ramp genuinely needs more sweeps to reach
-  β=1 — this is *not* the "maxiter-alone doesn't help" that was correctly rejected; β₀=1.0 is the
-  in-sweep canary = current behaviour). One 2-task sbatch array per β₀ dir, all concurrent on Midway.
-  Decision gate: a β₀ that recovers most of the 16 ⇒ that β₀ is the production anneal schedule (plumb
-  into the combine `dcalign` align path, run the full combine, ship); none works ⇒ annealing is
-  exhausted, **ship the combine as-is** and document the ~14% home-pair residual as a method limit.
+- **Built + ran:** `combine/combine-CM-PPIC-dcalign-annealsweep/beta{0.1,0.3,0.5,1.0}/` — same 24
+  home pairs, `deltan`/pcount 0.001, `maxiter 8000`, β₀=1.0 = in-sweep canary (= current behaviour).
+  One 2-task sbatch array per β₀ dir, all concurrent on Midway.
+
+**Anneal-from-hot RESULT (`annealsweep_summary.json`): 0/16 recovered at every β₀** (0.1, 0.3, 0.5,
+1.0); controls clean. But the per-sequence detail (`scripts/.../anneal_summary`) is the most
+informative result of the whole phase — the 16 split into **two populations**:
+
+- **5 "soft" movers** — annealing pulls them most of the way to native but not across the 1 a.u.
+  line: PPIC-17 53→**7.3**, CM-syn-140 50→**7.6**, PPIC-176 22→**7.7**, PPIC-150 36→**13**, PPIC-112
+  51→**19** (best ΔE over the four β₀). Lower β₀ helps these monotonically (sweep median 35→27.9).
+- **10–11 "hard" cases are byte-identical to production at every β₀** (ΔE unchanged, 27–45 a.u.) —
+  the β₀=0.1 smoothed landscape does not perturb them *at all*.
+
+**The decisive cross-tabulation (the real finding): the hard-immovable set ≈ the sequences that
+STAYED at native under native-init.** CM276, CM90, CM289, CM186, syn-27, PPIC-83, PPIC-232 each sat
+at ΔE≈0 from a native start (native is a *stable fixed point* for them) yet sit at ΔE 27–44 here,
+identical to production, at every β₀. That is a **deep-but-narrow basin** signature: native is a
+stable attractor with a *small basin of attraction*; only an init already inside it converges there,
+while annealing from a random/smooth start falls into the **wide wrong basin** every time — and
+temperature cannot find a narrow basin (it is entropically disfavoured at every T in [0.1, 1]). This
+is *not* "the residual is inevitable": native is provably reachable (9/16 stayed). It says the lever
+is **initialisation into the native basin**, not temperature — and the init must be **couplings-aware**
+(fields-MAP failed precisely because it is couplings-blind). See §10.19 for the threads this opens.
+
+### 10.19 iter-003 Phase-B — state of play + threads for tomorrow (2026-06-29 EOD)
+
+Working hypothesis going in: **native is a deep-but-narrow BP basin.** It is provably reachable
+(native-init: 9/16 stay, median ΔE 30→0.32), but no production-legal *search* we have tried lands in
+it, because its basin of attraction is small. This is a tractable problem — find a couplings-aware
+initialisation that lands inside the native basin — **not** an inevitable residual.
+
+**What we tried this phase and what each ruled out (all on the same 24 curated home pairs = 16
+hardest worse-than-native by ΔE + 8 controls; tooling below):**
+
+| Lever | Knob | Result | What it rules out |
+|---|---|---|---|
+| pcount sweep (§10.15) | prior flattening | ≤8% recover, breaks controls | prior strength is not it |
+| μint/μext (§10.14) | gap-count penalties | provably neutral on the prior_only majority | gap *count* is not it |
+| multi-seed (§10.16/§10.17) | random init seed 0–5 | 0/16; 14/16 identical across 6 seeds | reseeding (same basin distribution) is not it |
+| fields-MAP init (§10.18) | Viterbi warm start | 1/16, *regressed* PPIC-269 3.1→13 | couplings-**blind** init is not it (lands in the wrong basin) |
+| anneal-from-hot (§10.18) | β₀ ∈ {0.1,0.3,0.5,1.0} | 0/16; 5 "soft" 50→7, 10 "hard" unmoved | temperature alone cannot find a narrow basin |
+| native init (§10.17/§10.18) | warm start at ground truth | **9/16 stay**, median ΔE→0.32 | *existence proof* — the basin is real and reachable |
+
+**The two populations (use these for targeted tests, don't re-run the whole 16):**
+
+- **Soft movers (5):** PPIC-17, CM-syn-140, PPIC-176, PPIC-150, PPIC-112 — annealing already pulls
+  these to ΔE 7–19 (from 22–53). They are *close*; a better-tuned schedule may push them across.
+- **Hard immovable (≈10):** CM276, CM90, CM289, CM186, CM-syn-27, CM-syn-186, CM-syn-141, PPIC-215,
+  PPIC-83, PPIC-232 — identical ΔE at every β₀ AND (for the CM ones + PPIC-83/232) native-stable. The
+  narrow-basin core. These need an init *inside* the basin, not a hotter start.
+
+**Threads for tomorrow, ordered by how directly they test the narrow-basin hypothesis:**
+
+1. **Measure the basin width (cheapest, most diagnostic).** Warm-start at *perturbed* native — native
+   with `k` randomly reassigned match/gap columns, `k ∈ {1,2,4,8}` — and see at what `k` BP stops
+   returning to native. This quantifies "how close must an init be," i.e. the basin radius, and tells
+   us whether *any* heuristic init has a realistic shot. Reuses the warm-start driver verbatim
+   (stage perturbed frames as `init.fasta`); no new Julia. **Do this first.**
+2. **Couplings-aware cheap init (the production lever if #1 says the basin isn't microscopic).**
+   Produce a near-native frame *without* ground truth using the **full Potts energy** (the signal
+   fields-MAP lacks): e.g. simulated annealing / greedy descent on `E_potts(frame)` over the
+   alignment DOF (gap placement), or an in-frame Potts argmax pass, then warm-start BP at that frame.
+   If the Potts-energy landscape over frames has native as its min (it does, by construction — native
+   *is* the lower-energy frame), a Potts-only optimiser should approach it, and BP then refines. This
+   is the most promising "get into the basin" route.
+3. **Anneal the soft movers harder (cheap, bounded upside).** For the 5 soft movers only: slower ramp
+   (smaller `Δβ`, larger `Δt` — currently 0.05/10, an ~180-sweep ramp from β₀=0.1) and longer
+   equilibration *at* β₀ before ramping (right now only `Δt`=10 sweeps at the start temperature). Add
+   `Δβ`/`Δt` to `meta.json` (the driver already reads them) — small change. Tests whether the soft
+   tail crosses with a gentler schedule; will *not* move the hard core.
+4. **Hybrid warm-start + anneal.** Warm-start at the couplings-aware init from #2 *and* run a short
+   β₀<1→1 ramp from there, so BP both starts near native and is given room to settle — combines the
+   two levers that each half-worked.
+
+**Open question worth resolving early:** for the ~10 hard cases, is the wrong frame ever actually
+*lower* in DCAlign's full objective (Potts + Σlog Λ) than native? The §10.17 audit showed we can't
+reconstruct that objective reliably offline, but we *can* read it off DCAlign directly: warm-start at
+native, run **0 sweeps**, and record `compute_en` (the free energy incl. the Λ term) at β=1; compare
+to the same at the wrong frame. If native's free energy is lower, the wrong frame is purely a basin
+artefact (search problem, #1–#4 apply). If higher, those specific pairs are genuine objective
+disagreements (the prior really prefers the wrong frame there) and need a prior fix, not a search fix.
+This cleanly partitions the hard set into "search" vs "objective" and should be run alongside #1.
+
+**Tooling state (all built, tested, committed-ready — nothing committed yet):**
+
+- `src/SBM/julia/run_dcalign_warmstart.jl` — `run_bp!(init_margs, beta0, …)`: random **or**
+  warm-start init, β₀-anneal ramp, convergence accepted only at β≥1, RNG-seeded. Reachable-only
+  `DCAlign.` calls; **clone untouched + pinned** `cab443ffad133e6e68eff8e50b11e8fc59178dbd`.
+- `scripts/build_dcalign_warmstart.py` — `--init {native,map,random}`, `--beta0`, `--beta0-values`
+  (sweep → one `beta<v>/` dir each + `sweep_meta.json`); stages self-contained per-model in-dirs.
+- `scripts/analyze_dcalign_warmstart.py` — `--run-dir` (single) or `--sweep-root` (recovery-vs-β₀
+  table + best-β₀ + verdict); `--init-kind {native,map,random}` for wording.
+- `src/SBM/energy/dcalign_warmstart.py` (+ `tests/test_dcalign_warmstart.py`, 15 tests) — three
+  energies/pair (native, warm-start, production random-init), case-A/B classifier, sweep verdict.
+- `src/SBM/utils/utils_dcalign_warmstart_plot.py` — `render_warmstart` + `render_annealsweep`.
+- `pipeline/external/sbatch_dcalign_warmstart.sh` — 2-task array (one per model), enforces the clone
+  pin, cpus=4/mem=12G/time=2h. Run dirs: `combine/combine-CM-PPIC-dcalign-{warmstart,mapinit,annealsweep}/`.
+- **macOS constraint (unchanged):** the `deltan` Λ needs GZip (broken on macOS), so every real run is
+  Midway-side; the Mac validates mechanics with flat Λ. Pull caches with `sync_models.sh`, analyse
+  locally.
