@@ -181,14 +181,17 @@ def _subset_stats(rows: list[WarmstartRow], equal_tol: float) -> dict:
 
 
 def summarize_warmstart(
-    rows: list[WarmstartRow], *, equal_tol: float = DEFAULT_EQUAL_TOL
+    rows: list[WarmstartRow], *, equal_tol: float = DEFAULT_EQUAL_TOL,
+    init_kind: str = "native",
 ) -> dict:
     """Per-role / per-kind warm-start tallies + the case-A/B verdict.
 
     The recover (worse-than-native) rows carry the science; controls are a probe
     sanity check (``n_control_drift`` must be 0). The verdict reads
     ``frac_stayed_native`` over the recover rows: high ⇒ case A (anneal); ≈0 ⇒
-    case B (native unstable; stop tuning).
+    case B (native unstable; stop tuning). ``init_kind`` (``"native"`` for the
+    fixed-point probe, ``"map"`` for the fields-MAP-init production test) only
+    adjusts the verdict wording.
     """
     recover = [r for r in rows if r.role == "recover"]
     control = [r for r in rows if r.role == "control"]
@@ -196,6 +199,7 @@ def summarize_warmstart(
     n_control_drift = sum(1 for r in control if r.label == CONTROL_DRIFT)
     return {
         "equal_tol": equal_tol,
+        "init_kind": init_kind,
         "delta_e_convention": "delta_e_* = E_* - E_native; >0 => worse than native",
         "recover": {
             "overall": _subset_stats(recover, equal_tol),
@@ -203,14 +207,20 @@ def summarize_warmstart(
                         for k in kinds},
         },
         "control": {**_subset_stats(control, equal_tol), "n_control_drift": n_control_drift},
-        "verdict": build_warmstart_verdict(recover, control, equal_tol),
+        "verdict": build_warmstart_verdict(recover, control, equal_tol, init_kind=init_kind),
     }
 
 
 def build_warmstart_verdict(
-    recover: list[WarmstartRow], control: list[WarmstartRow], equal_tol: float
+    recover: list[WarmstartRow], control: list[WarmstartRow], equal_tol: float,
+    *, init_kind: str = "native",
 ) -> str:
-    """One-paragraph case-A/B verdict from the recover rows + control sanity."""
+    """One-paragraph case-A/B verdict from the recover rows + control sanity.
+
+    ``init_kind="native"`` is the fixed-point probe (did native stay?);
+    ``init_kind="map"`` is the production test (did BP reach native quality from
+    the fields-MAP init?). Only the wording differs.
+    """
     ok = [r for r in recover if r.ok]
     if not ok:
         return "No successful worse-than-native warm-starts; nothing to conclude."
@@ -220,22 +230,30 @@ def build_warmstart_verdict(
     n_other = sum(1 for r in ok if r.label == FLOWED_OTHER)
     frac = n_stayed / n
     drift = sum(1 for r in control if r.label == CONTROL_DRIFT)
-    sane = f"Controls: {len(control) - drift}/{len(control)} stayed" + (
-        "" if drift == 0 else f" — WARNING {drift} drifted (probe suspect!)")
+    sane = f"Controls: {len(control) - drift}/{len(control)} ok" + (
+        "" if drift == 0 else f" — WARNING {drift} drifted (init suspect!)")
+    is_map = init_kind == "map"
+    started = "initialized at the fields-MAP frame" if is_map else "warm-started at native"
+    verb = "REACHED" if is_map else "STAYED at"
     if frac >= 0.5:
+        lever = (
+            "fields-MAP init + couplings-aware BP recovers the min the random-init production runs "
+            "miss — a production-usable lever (no ground truth needed)." if is_map else
+            "native is a reachable fixed point the random-init production runs missed. "
+            "Lever: annealing / native-biased init.")
         verdict = (
-            f"CASE A (search/init problem). {n_stayed}/{n} worse pairs STAYED at a native-quality "
-            f"frame when BP was warm-started at native — native is a reachable fixed point the "
-            f"random-init production runs missed. Lever: annealing / native-biased init. ")
+            f"CASE A (search/init problem). {n_stayed}/{n} worse pairs {verb} a native-quality "
+            f"frame when BP was {started} — {lever} ")
     elif n_stayed == 0:
+        why = ("the fields-MAP init is not close enough to native's basin; try a slower anneal."
+               if is_map else
+               "native is not a fixed point of DCAlign's objective — search-tuning cannot recover it.")
         verdict = (
-            f"CASE B (objective prefers the other frame). 0/{n} worse pairs stayed: BP drifted off "
-            f"native even when started there ({n_rand} back to the production frame, {n_other} to a "
-            f"third frame). Native is not a fixed point of DCAlign's objective — search-tuning "
-            f"(annealing, restarts) cannot recover it. ")
+            f"CASE B. 0/{n} worse pairs {verb} native: BP drifted to a worse frame even when "
+            f"{started} ({n_rand} back to the production frame, {n_other} to a third frame). {why} ")
     else:
         verdict = (
-            f"MIXED. {n_stayed}/{n} worse pairs stayed at native (case A), {n - n_stayed} drifted "
-            f"({n_rand} to the production frame, {n_other} elsewhere; case B). Lever is partial — "
-            f"annealing may help the {n_stayed} stable ones. ")
+            f"MIXED. {n_stayed}/{n} worse pairs {verb} a native-quality frame when {started} "
+            f"(case A), {n - n_stayed} drifted ({n_rand} to the production frame, {n_other} "
+            f"elsewhere). Lever is partial. ")
     return verdict + sane + "."

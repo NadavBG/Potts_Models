@@ -110,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="source of native frames + models + random-init cache (default iter-002)")
     p.add_argument("--out-dir", type=Path, default=None, help="default <run-dir>/analysis")
     p.add_argument("--equal-tol", type=float, default=DEFAULT_EQUAL_TOL)
+    p.add_argument("--init-kind", default="native", choices=("native", "map"),
+                   help="how BP was initialised (only sets the verdict wording); match the build")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -122,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     rows = build_rows(run_dir, args.src_run_dir, args.equal_tol)
     if not rows:
         raise ValueError("no warm-start rows produced (no curated home pairs matched)")
-    summary = summarize_warmstart(rows, equal_tol=args.equal_tol)
+    summary = summarize_warmstart(rows, equal_tol=args.equal_tol, init_kind=args.init_kind)
 
     rows_tsv = out_dir / "warmstart_rows.tsv"
     _write_tsv(rows, rows_tsv)

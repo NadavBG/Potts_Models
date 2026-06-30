@@ -34,9 +34,10 @@
 #   model_J.bin      (q,q,L,L) Float64, column-major (DCAlign coupling-major layout)
 #   model_h.bin      (q,L)     Float64, column-major
 #   queries.fasta    >id / raw gap-free residue string per query (A..Y, no gaps)
-#   native.fasta     >id / length-L native frame string (residues + '-' gaps), the
-#                    home-model in-frame alignment to warm-start from. One per query
-#                    id; ids must match queries.fasta.
+#   init.fasta       >id / length-L frame string (residues + '-' gaps) to warm-start
+#                    BP from — the native home-model frame OR the fields-MAP frame,
+#                    set by build_dcalign_warmstart.py. One per query id; ids must
+#                    match queries.fasta. (Legacy name native.fasta is also accepted.)
 #   seed.ins         (lambda_spec="deltan" only) the model-frame seed MSA (a2m)
 #
 # Output (appended to <out_tsv>, one row per query, flushed per row — same 6-column
@@ -275,9 +276,12 @@ function main()
     J, h = read_model(in_dir, q, L)
     Λ = build_lambda(lambda_spec, L, in_dir)
     queries = read_fasta(joinpath(in_dir, "queries.fasta"))
-    natives = Dict(read_fasta(joinpath(in_dir, "native.fasta")))
+    # The warm-start init frame (native OR fields-MAP, set by build_dcalign_warmstart.py).
+    # Prefer init.fasta; fall back to the legacy native.fasta name.
+    init_file = isfile(joinpath(in_dir, "init.fasta")) ? "init.fasta" : "native.fasta"
+    natives = Dict(read_fasta(joinpath(in_dir, init_file)))
     for (hdr, _) in queries
-        haskey(natives, hdr) || error("native.fasta has no frame for query id $hdr")
+        haskey(natives, hdr) || error("$init_file has no frame for query id $hdr")
     end
     println(stderr, "run_dcalign_warmstart: L=$L q=$q maxiter=$maxiter pcount=$pcount " *
                     "lambda=$lambda_spec Δβ=$Δβ thP=$thP Δt=$Δt n_queries=$(length(queries)) " *

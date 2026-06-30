@@ -164,3 +164,19 @@ def test_summarize_mixed_and_control_drift_warned():
 
 def test_verdict_handles_no_successful_rows():
     assert "nothing to conclude" in build_warmstart_verdict([], [], 1.0)
+
+
+def test_verdict_map_init_wording_case_a():
+    rows = [_row("recover", STAYED_NATIVE, 0.0) for _ in range(3)] + \
+           [_row("recover", FLOWED_TO_RAND, 30.0)]
+    out = summarize_warmstart(rows, init_kind="map")
+    assert out["init_kind"] == "map"
+    assert out["verdict"].startswith("CASE A")
+    assert "fields-MAP" in out["verdict"] and "REACHED" in out["verdict"]
+
+
+def test_verdict_map_init_case_b_points_to_anneal():
+    out = summarize_warmstart([_row("recover", FLOWED_TO_RAND, 30.0) for _ in range(4)],
+                              init_kind="map")
+    assert out["verdict"].startswith("CASE B")
+    assert "anneal" in out["verdict"]

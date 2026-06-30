@@ -43,6 +43,7 @@ import numpy as np
 import SBM.provenance as provenance
 from SBM.energy import datasets
 from SBM.energy.encoding import GAP
+from SBM.energy.hmm import ProfileHMM
 from SBM.energy.model import load_model, load_seed_msa
 from SBM.utils.dcalign_score import (
     ALPHABET,
@@ -89,26 +90,36 @@ def load_roles(path: Path) -> dict[str, str]:
 
 def stage_model_indir(
     model, records: list[datasets.QueryRecord], in_dir: Path,
-    *, maxiter: int, seed: int, pcount: float, lambda_spec: str,
+    init_frames: dict[str, np.ndarray], *, maxiter: int, seed: int, pcount: float,
+    lambda_spec: str, init_mode: str,
 ) -> dict:
     """Write one self-contained warm-start in-dir for ``model``'s home pairs.
 
     Mirrors :func:`SBM.utils.dcalign_score.align_sequences` staging (model
-    binaries + ``seed.ins`` + ``queries.fasta``) and adds ``native.fasta`` — the
-    length-L home-model frame to warm-start BP from, one record per query id.
+    binaries + ``seed.ins`` + ``queries.fasta``) and adds ``init.fasta`` — the
+    length-L frame BP warm-starts from (native or fields-MAP per ``init_mode``),
+    one per query id. The init must be insert-free (non-gap count == raw query
+    length); the (x,n) warm start cannot represent inserts.
     """
     in_dir.mkdir(parents=True, exist_ok=True)
-    raw_seqs, native_lines, ids = [], [], []
+    raw_seqs, init_lines, ids = [], [], []
     for r in records:
         if r.ints.size != model.L:
             raise ValueError(
                 f"{r.id}: native frame length {r.ints.size} != L={model.L} for {model.name}")
-        raw_seqs.append(r.ints[r.ints != GAP])  # gap-free residues, in order
-        native_lines.append(f">{r.id}\n{_ints_to_str(r.ints)}")
+        raw = r.ints[r.ints != GAP]  # gap-free residues, in order (the query)
+        frame = np.asarray(init_frames[r.id], dtype=np.int64)
+        n_match = int(np.count_nonzero(frame != GAP))
+        if frame.size != model.L or n_match != raw.size:
+            raise ValueError(
+                f"{r.id}: {init_mode} init frame must be length L={model.L} and insert-free "
+                f"({raw.size} residues); got length {frame.size} with {n_match} residues")
+        raw_seqs.append(raw)
+        init_lines.append(f">{r.id}\n{_ints_to_str(frame)}")
         ids.append(r.id)
 
     _write_queries(raw_seqs, ids, in_dir / "queries.fasta")
-    (in_dir / "native.fasta").write_text("\n".join(native_lines) + "\n", encoding="utf-8")
+    (in_dir / "init.fasta").write_text("\n".join(init_lines) + "\n", encoding="utf-8")
 
     J_dca, h_dca = model_to_dcalign_arrays(model)
     (in_dir / "model_J.bin").write_bytes(J_dca.astype("<f8").tobytes(order="F"))
@@ -125,7 +136,7 @@ def stage_model_indir(
         json.dumps({
             "L": int(model.L), "q": int(model.q), "maxiter": int(maxiter),
             "seed": int(seed), "pcount": float(pcount), "lambda_spec": str(lambda_spec),
-            "alphabet": ALPHABET,
+            "init_mode": str(init_mode), "alphabet": ALPHABET,
         }, indent=2),
         encoding="utf-8",
     )
@@ -152,6 +163,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pcount", type=float, default=DEFAULT_PCOUNT)
     p.add_argument("--seed", type=int, default=DEFAULT_SEED)
     p.add_argument("--lambda-spec", default=DEFAULT_LAMBDA_SPEC, choices=("deltan", "flat"))
+    p.add_argument("--init", default="native", choices=("native", "map"),
+                   help="warm-start frame: native (home-model frame, the fixed-point probe) or "
+                        "map (fields-MAP/Viterbi frame, the production-usable init test)")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -181,6 +195,22 @@ def main(argv: list[str] | None = None) -> int:
     if skipped:
         log.warning("skipped %d curated id(s) with no home model: %s", len(skipped), skipped[:5])
 
+    # Build the per-id warm-start init frame (length-L, insert-free): the native
+    # home-model frame, or the fields-MAP/Viterbi frame (production-legal — no
+    # ground truth). The MAP path is built once per model from h + seed MSA.
+    init_frames: dict[str, np.ndarray] = {}
+    for name, recs in per_model.items():
+        if not recs:
+            continue
+        if args.init == "map":
+            hmm = ProfileHMM.from_model(models[name], load_seed_msa(models[name].source))
+        for r in recs:
+            if args.init == "native":
+                init_frames[r.id] = r.ints
+            else:
+                raw = r.ints[r.ints != GAP]
+                init_frames[r.id] = hmm.path_to_frame(hmm.viterbi(raw), raw)
+
     out_root = args.out_root
     out_root.mkdir(parents=True, exist_ok=True)
     staged = []
@@ -189,9 +219,9 @@ def main(argv: list[str] | None = None) -> int:
             log.warning("model %r has no curated home pairs; skipping", name)
             continue
         staged.append(stage_model_indir(
-            models[name], recs, out_root / name,
+            models[name], recs, out_root / name, init_frames,
             maxiter=args.maxiter, seed=args.seed, pcount=args.pcount,
-            lambda_spec=args.lambda_spec))
+            lambda_spec=args.lambda_spec, init_mode=args.init))
 
     # Run-dir level provenance + contract files.
     (out_root / "models.json").write_text(models_json.read_text(encoding="utf-8"), encoding="utf-8")
@@ -211,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     finished_at = dt.datetime.now(dt.timezone.utc)
     options = {
         "maxiter": args.maxiter, "pcount": args.pcount, "seed": args.seed,
+        "init_mode": args.init,
         "lambda_spec": args.lambda_spec, "src_run_dir": str(src), "roles": str(args.roles),
         "dcalign_clone_commit": clone_commit,
         "dcalign_clone_remote": "https://github.com/infernet-h2020/DCAlign",
@@ -228,8 +259,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     provenance.save_run_manifest(manifest, out_root / "warmstart_manifest.json")
 
+    is_map = args.init == "map"
+    title = ("DCAlign fields-MAP-init test (production lever)" if is_map
+             else "DCAlign warm-start fixed-point probe")
+    init_desc = ("the fields-MAP / Viterbi frame (production-legal — no ground truth; the §10.17 "
+                 "fixed-point probe showed a good *near*-native start reaches native quality)"
+                 if is_map else "the native home-model frame")
+    reading = (
+        ("Reading the result: BP starts at the fields-MAP frame and runs DCAlign's real schedule. "
+         "If it REACHES native quality (ΔE≈0) for most worse pairs, MAP-init + couplings-aware BP is "
+         "the production recipe — adopt it as the dcalign align mode and run the full combine. If it "
+         "does not, the MAP start is too far from native's basin → fall back to an annealing sweep.")
+        if is_map else
+        ("Reading the result: BP starts at the native frame and runs DCAlign's real schedule. "
+         "If it STAYS at native (ΔE≈0) the native frame is a stable fixed point the production "
+         "random-init runs missed (case A → anneal / better init). If it flows to the cached worse "
+         "frame, native is not a fixed point of DCAlign's objective (case B → stop tuning)."))
     note = (
-        f"# DCAlign warm-start fixed-point probe\n\n"
+        f"# {title}\n\n"
+        f"Init frame: {init_desc}.\n"
         f"Curated set ({len(curated_ids)}: "
         f"{options['n_recover']} hardest worse-than-native + {options['n_control']} controls) "
         f"reused from the multi-seed sweep for direct comparability.\n"
@@ -244,16 +292,13 @@ def main(argv: list[str] | None = None) -> int:
         f"array (one per model, cpus=4/mem=12G/time=2h, runs concurrently) to compute nodes and enforces "
         f"the clone pin. Each task is real compute (12 seqs, ~10 min at cpus=4, ~4.5 GB peak like the "
         f"production deltan align). Edit the #SBATCH lines there if resources need tuning.\n\n"
-        f"Reading the result: BP starts at the native frame and runs DCAlign's real schedule. "
-        f"If it STAYS at native (ΔE≈0, high col-agreement) the native frame is a stable fixed point "
-        f"the production random-init runs simply missed (case A → anneal). If it flows to the cached "
-        f"worse frame, native is not a fixed point of DCAlign's objective (case B → stop tuning).\n"
+        f"{reading}\n"
     )
     (out_root / "iteration_note.md").write_text(note, encoding="utf-8")
 
     # Midway hand-off (resources are cluster-side: cpus=1 per task, fan over the array;
     # the iter-002-pcsweep OOM was cpus=4/mem=8G).
-    print("\n=== built warm-start probe ===")
+    print(f"\n=== built warm-start probe (init={args.init}) ===")
     for s in staged:
         print(f"  {s['model']}: {s['n_queries']} home pairs -> {s['in_dir']}")
     print(f"\nclone pin: {clone_commit} (the sbatch enforces this on Midway)\n")
@@ -264,7 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     print("  #   2-task array (CM, PPIC) cpus=4/mem=12G/time=2h, concurrent; ~10 min each.")
     print("  squeue --me                                            # wait until both tasks clear")
     print("  bash scripts/sync_models.sh pull                       # Midway -> Mac, then:")
-    print(f"  .venv/bin/python scripts/analyze_dcalign_warmstart.py --run-dir {out_root}")
+    print(f"  .venv/bin/python scripts/analyze_dcalign_warmstart.py --run-dir {out_root} "
+          f"--init-kind {args.init}")
     return 0
 
 
