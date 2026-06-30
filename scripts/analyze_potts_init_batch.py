@@ -109,9 +109,9 @@ def analyze_diag(run_dir, models, by_id, tol):
                 continue
             frame = seq_to_ints(res.aligned_frame)
             e_numpy = potts_energy(frame, models[name])
-            diff = abs(res.energy - e_numpy)
+            diff = abs(res.dcalign_energy - e_numpy)
             worst = max(worst, diff)
-            rows.append({"sequence_id": sid, "model": name, "compute_en": res.energy,
+            rows.append({"sequence_id": sid, "model": name, "compute_en": res.dcalign_energy,
                          "potts_energy": e_numpy, "abs_diff": diff})
     ok = worst <= 5e-7
     print(f"[{run_dir.name}] compute_en vs potts_energy: max |Δ| = {worst:.2e} "

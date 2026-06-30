@@ -159,13 +159,20 @@ def _summarize(rows: list[dict], tol: float) -> dict:
             return {"n": 0}
         recovered = sum(1 for r in subset if r["delta_e_best"] <= tol)
         beats = sum(1 for r in subset if r["delta_e_best"] < -tol)
+        # delta_e_dcalign is NaN for any pair lacking a DCAlign frame (e.g. controls);
+        # filter explicitly and report the comparison count rather than letting an
+        # all-NaN slice emit a RuntimeWarning and silently produce NaN.
+        dca = np.array([r["delta_e_dcalign"] for r in subset], dtype=float)
+        dca_finite = dca[~np.isnan(dca)]
         return {
             "n": n,
             "n_recovered": recovered, "frac_recovered": recovered / n,
             "n_beats_native": beats,
             "n_exact": sum(1 for r in subset if r["is_global_exact"]),
             "median_delta_e_best": float(np.median([r["delta_e_best"] for r in subset])),
-            "median_delta_e_dcalign": float(np.nanmedian([r["delta_e_dcalign"] for r in subset])),
+            "n_dcalign_compared": int(dca_finite.size),
+            "median_delta_e_dcalign": (float(np.median(dca_finite))
+                                       if dca_finite.size else float("nan")),
         }
 
     recover = [r for r in rows if r["role"] == "recover"]

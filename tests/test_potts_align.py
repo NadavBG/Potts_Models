@@ -22,11 +22,13 @@ from SBM.energy.model import PottsModel
 from SBM.energy.potts import potts_energy
 from SBM.energy.potts_align import (
     EnumerationInfeasible,
+    PTSchedule,
     SASchedule,
     _move_delta,
     enumerate_align,
     perturb_frame,
     potts_align,
+    pt_align,
     sa_align,
 )
 from SBM.utils.utils import MSA_ALPHABET, Zero_Sum_Gauge
@@ -83,21 +85,71 @@ def test_sa_finds_the_global_minimum():
     assert np.array_equal(sa.best_frame, exact.best_frame)
 
 
+def test_pt_finds_the_global_minimum():
+    """Parallel tempering reaches the exact enumerated global min on a tiny model."""
+    model = make_model(8, seed=2)
+    query = np.array([2, 5, 9, 14, 18], dtype=np.int64)  # N=5, C(8,5)=56 frames
+    exact = enumerate_align(query, model)
+    pt = pt_align(query, model, seed=0,
+                  schedule=PTSchedule(n_replicas=6, n_blocks=200, n_restarts=2))
+    assert pt.method == "pt" and not pt.is_global_exact
+    assert math.isclose(pt.best_energy, exact.best_energy, rel_tol=0, abs_tol=1e-9)
+    assert np.array_equal(pt.best_frame, exact.best_frame)
+
+
+def test_pt_schedule_for_gap_count_escalates():
+    from SBM.energy.potts_align import PTSchedule
+    easy = PTSchedule.for_gap_count(8)
+    hard = PTSchedule.for_gap_count(13)
+    assert easy == PTSchedule()                  # moderate g → default
+    assert hard == PTSchedule.thorough()         # g≥13 → heavier budget
+    assert hard.n_blocks > easy.n_blocks and hard.n_restarts >= easy.n_restarts
+    assert easy.teleport_frac == hard.teleport_frac == 0.3
+
+
+def test_pt_is_deterministic_and_requires_seed():
+    model = make_model(9, seed=4)
+    q = np.array([3, 7, 10, 14, 19, 2], dtype=np.int64)
+    sched = PTSchedule(n_replicas=4, n_blocks=50, n_restarts=2)
+    a = pt_align(q, model, seed=11, schedule=sched)
+    b = pt_align(q, model, seed=11, schedule=sched)
+    assert np.array_equal(a.best_frame, b.best_frame) and a.best_energy == b.best_energy
+    with pytest.raises(ValueError):
+        pt_align(q, model, seed=None, schedule=sched)
+
+
+def test_pt_rejects_more_warm_starts_than_replicas():
+    """More init_frames than replicas would silently drop the lowest-index (most
+    relevant) frames in _pt_one; pt_align must refuse loudly instead."""
+    model = make_model(9, seed=4)
+    q = np.array([3, 7, 10, 14, 19, 2], dtype=np.int64)
+    sched = PTSchedule(n_replicas=2, n_blocks=20, n_restarts=1)
+    frames = [enumerate_align(q, model).best_frame for _ in range(3)]  # 3 > 2 replicas
+    with pytest.raises(ValueError, match="init_frames"):
+        pt_align(q, model, seed=0, schedule=sched, init_frames=frames)
+
+
 def test_incremental_delta_matches_full_recompute():
-    model = make_model(10, seed=3)
-    q = np.array([4, 8, 12, 16, 20, 1, 6], dtype=np.int64)  # N=7, L=10
+    """ΔE accumulator vs from-scratch recompute, for BOTH the ±1 local move and the
+    non-local teleport move (|dst-src|>1). The teleport path is the newest code and
+    the one most prone to a pair/self-term double-counting bug, so it must be checked
+    at long jumps, not only adjacent shifts (a wider L leaves room for big gaps)."""
+    model = make_model(14, seed=3)
+    q = np.array([4, 8, 12, 16, 20, 1, 6], dtype=np.int64)  # N=7, L=14 → wide gaps
     rng = np.random.default_rng(7)
     idx = np.arange(model.L)
-    checks = 0
-    for _ in range(200):
+    checks = teleport_checks = 0
+    for _ in range(400):
         cols = np.sort(rng.choice(model.L, size=q.size, replace=False))
         r = int(rng.integers(q.size))
-        direction = 1 if rng.random() < 0.5 else -1
-        dst = int(cols[r]) + direction
-        lo = int(cols[r - 1]) if r > 0 else -1
-        hi = int(cols[r + 1]) if r < q.size - 1 else model.L
-        if not (lo < dst < hi):
+        lo = int(cols[r - 1]) if r > 0 else -1          # exclusive lower bound
+        hi = int(cols[r + 1]) if r < q.size - 1 else model.L  # exclusive upper bound
+        # destination = any empty column strictly between the neighbours (the teleport
+        # move set); ±1 is the special case where the chosen column is adjacent.
+        candidates = [c for c in range(lo + 1, hi) if c != int(cols[r])]
+        if not candidates:
             continue
+        dst = int(rng.choice(candidates))
         frame = np.zeros(model.L, dtype=np.int64)
         frame[cols] = q
         before = potts_energy(frame, model)
@@ -108,7 +160,10 @@ def test_incremental_delta_matches_full_recompute():
         after = potts_energy(after_frame, model)
         assert math.isclose(de, after - before, rel_tol=0, abs_tol=1e-9)
         checks += 1
-    assert checks > 50  # exercised enough legal moves
+        if abs(dst - int(cols[r])) > 1:
+            teleport_checks += 1
+    assert checks > 50           # exercised enough legal moves
+    assert teleport_checks > 20  # and enough of them were teleport-distance jumps
 
 
 def test_sa_is_deterministic():
@@ -121,13 +176,17 @@ def test_sa_is_deterministic():
     assert a.best_energy == b.best_energy
 
 
-def test_dispatch_enumerate_vs_sa():
+def test_dispatch_enumerate_vs_approx():
     model = make_model(20, seed=5)
     sched = SASchedule(enum_max_frames=100, n_restarts=2, n_steps=50)
     small = potts_align(np.array([5], dtype=np.int64), model, seed=0, schedule=sched)
     assert small.method == "enumerate" and small.is_global_exact  # C(20,1)=20
-    big = potts_align(np.array([5, 9], dtype=np.int64), model, seed=0, schedule=sched)
-    assert big.method == "sa"  # C(20,2)=190 > 100
+    big_pt = potts_align(np.array([5, 9], dtype=np.int64), model, seed=0, schedule=sched,
+                         pt_schedule=PTSchedule(n_replicas=4, n_blocks=20))
+    assert big_pt.method == "pt"  # C(20,2)=190 > 100; default fallback is PT
+    big_sa = potts_align(np.array([5, 9], dtype=np.int64), model, seed=0, schedule=sched,
+                         fallback="sa")
+    assert big_sa.method == "sa"
 
 
 def test_output_invariants():

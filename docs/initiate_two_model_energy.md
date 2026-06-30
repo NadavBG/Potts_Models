@@ -1051,36 +1051,52 @@ exact enumeration on a tiny model and check the incremental ΔE against a from-s
 (the brute-force-oracle philosophy of `test_energy.py`).
 
 - **Result on the 24 curated home pairs (`scripts/analyze_potts_align.py`,
-  `combine/combine-CM-PPIC-dcalign-pottsalign/`):** **13/16 worse pairs reach native-or-better with
-  no DCAlign at all; controls 8/8.** The **11 enumerable cases (≤3 gaps, including all 8 PPIC pairs)
+  `combine/combine-CM-PPIC-dcalign-pottsalign/`):** **16/16 worse pairs reach native-or-better with
+  no DCAlign at all (11 by exact enumeration + 5 high-gap by parallel tempering); controls 8/8.** The
+  **11 enumerable cases (≤3 gaps, including all 8 PPIC pairs)
   recover EXACTLY** — native is the *provable* global Potts minimum (ΔE_best ≈ 0), and for PPIC-176 a
   frame strictly **beats** native (ΔE −1.24, rigorous: the MSA "native" frame is not always the global
   Potts min). The 1-gap PPIC pairs are a **91-frame** search that DCAlign's BP placed ΔE 22–53 above
   the 8 ms enumerated optimum — i.e. **the residual on the tractable cases is purely a BP search
   failure**, not an objective/prior bias (refuting the §10.14/§10.15 prior-tuning framing for good).
-- **The 3 stragglers** (CM-186, CM-289, CM-syn-186 — the 9/13/14-gap cases, `C(L,g)` up to ~10¹⁵)
-  plateau at ΔE 5–17 above native under warm-started single-move SA, but **all beat DCAlign's iter-002
-  frame** (27–44). These are the genuine hard combinatorial core (the §10.19 "hard immovable" set,
-  which §10.18 also showed is native-*stable*). Warm-starting SA from the fields-MAP and DCAlign frames
-  (vs random) was decisive: it took the high-gap median from worse-than-DCAlign to better-than-DCAlign
-  and recovered two cases (CM-syn-140, CM-syn-141) exactly.
+- **The high-gap tail — single-move SA plateaued, parallel tempering cracked it.** Warm-started
+  single-temperature SA (from the fields-MAP and DCAlign frames) reached 13/16, leaving 3 stragglers
+  (CM-186 `g=13`, CM-289 `g=14`, CM-syn-186 `g=9`) at ΔE 5–17 above native (still beating DCAlign's
+  27–44) — the §10.19 "hard immovable", native-*stable* core. Per user decision ("improve SA, parallel
+  tempering"), `potts_align` gained a **parallel-tempering** engine (`pt_align`: replica exchange over a
+  fixed β ladder, the default fallback above the enumeration budget; spec `docs/POTTS_ALIGN.md` §6.7).
+  It crosses the deep-but-narrow wrong basins and reaches **16/16** — CM-186/CM-syn-186 with the default
+  PT schedule (~100 s for the whole curated set on one Mac core), and CM-289 (`g=14`, the single largest
+  space at 2.4·10¹⁶ frames) with a heavier schedule (~50 s for that one sequence, `dE_best = −0.000`).
+  PT gives no exactness *guarantee* (only the 11 enumerated cases are provably global), but it
+  empirically lands native on every worse pair. The combinatorial wall stands regardless — exact
+  enumeration is impossible past `g ≈ 10` (`docs/POTTS_ALIGN.md` §4.1) — so PT (or branch-and-bound, not
+  built) is the only route for the high-gap cases.
 - **Decision (user):** the production aligner returns the **global Potts minimum** (lowest-energy
   frame, regardless of whether it matches the MSA "native" frame); the rare beats-native cases are
   surfaced as a diagnostic. This is the fully-unsupervised "find the right frame for an unknown
   sequence" criterion. iter-003's tuning question is **answered**: drop the DCAlign prior/search debate
   — minimize the Potts energy over gap placements (exact when feasible, warm-started SA otherwise).
-- **Confirmatory Midway batch (built + staged, awaiting the cluster run):**
-  `combine/combine-CM-PPIC-dcalign-pottsinit/` (`scripts/build_potts_align_warmstart.py` +
-  `MIDWAY_RUN.md`). **M1** (`sa-beta{1,0.5}`) warm-starts DCAlign-BP at the Potts-align frame (pure
-  refine + hybrid anneal) — does BP close the last 3, now that the init is ΔE 5–17 (vs DCAlign's 27–44)
-  from native? **M3** (`perturb-k{1,2,4,8}`) is the basin-width probe (native ± k reassigned columns).
-  **M4** (`diag-{native,dcalign}`) reads DCAlign's 0-sweep `compute_en` at each frame via a new scalar
-  `n_diag_sweeps` flag in `run_dcalign_warmstart.jl` — **note (§10.17 confirmed):** `compute_en` is the
-  *Potts* energy of the argmax-decoded frame, **not** a Λ-inclusive free energy, so the literal
-  "free-energy split" is not available; this is a gauge cross-check, validated on the Mac with flat Λ to
-  match numpy `potts_energy` at **8e-13**. The DCAlign clone stays pinned + unmodified
-  (`cab443ffad133e6e68eff8e50b11e8fc59178dbd`). Analyze the pulled caches with
-  `scripts/analyze_potts_init_batch.py`.
+- **Confirmatory Midway batch — RAN (2026-06-30), and it sharpens the verdict: DCAlign-BP is not just
+  unnecessary, it is *harmful as a refinement step*.** `combine/combine-CM-PPIC-dcalign-pottsinit/`
+  (`scripts/build_potts_align_warmstart.py` + `MIDWAY_RUN.md`; analyzed by
+  `scripts/analyze_potts_init_batch.py`). **M1** (`sa-beta{1,0.5}`) warm-started DCAlign-BP at the
+  Potts-align frame. β₀=1.0 (pure refine): **10/16 stayed at native** (the low-gap cases whose
+  Potts-align frame already *is* native) — but for several pairs BP **drifted off a native-quality init
+  to the production wrong frame**: PPIC-215 (1 gap, native→ΔE 30.4), CM-syn-141 (native→44.9), CM-syn-186
+  (ΔE 5→44.1). So BP, even started exactly at the global-min frame, can only **lose** ground the direct
+  minimizer already holds — confirming DCAlign-BP should be *dropped*, not refined. β₀=0.5 (hybrid
+  anneal): **0/16** — the hot start diffuses the warm init away into the wide wrong basin (consistent
+  with §10.18). **M3** (`perturb-k{1,2,4,8}`) basin-width probe: **0/16 return to native at every k,
+  including k=1** — the native BP basin is razor-thin (radius < 1 column reassignment) for the worse
+  pairs, which is exactly *why* production random-init BP never lands in it. **M4** (`diag-{native,dcalign}`)
+  read DCAlign's 0-sweep `compute_en` via a new scalar `n_diag_sweeps` flag in `run_dcalign_warmstart.jl`
+  — **note (§10.17 confirmed):** `compute_en` is the *Potts* energy of the argmax-decoded frame, **not** a
+  Λ-inclusive free energy (the literal "free-energy split" is unavailable); the canary held on the real
+  deltan runs (max |compute_en − numpy `potts_energy`| ≈ **1e-12**, both diag dirs). The DCAlign clone
+  stayed pinned + unmodified (`cab443ffad133e6e68eff8e50b11e8fc59178dbd`). **Bottom line:** the Mac
+  direct Potts minimizer (16/16 with PT, 11 provably exact) strictly dominates warm-start BP (10/16); the batch
+  confirms the production method is the all-Mac minimizer with **no DCAlign in the loop**.
 - **Why this matters beyond the residual:** the result reframes the whole combine alignment step. The
   couplings-aware aligner that the campaign needed is a **direct Potts-energy minimizer**, not DCAlign's
   BP+prior — which is ~700× slower and demonstrably fails near-trivial searches. For home/low-gap
