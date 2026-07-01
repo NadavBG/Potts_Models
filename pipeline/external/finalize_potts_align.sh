@@ -16,7 +16,7 @@
 # + render step then runs ON THE MAC (snakemake off the login node): pull the
 # durable cache with scripts/sync_models.sh (its generic combine excludes prune
 # shards/ + logs/ + *.tar.zst automatically), then `snakemake ... all`. See
-# docs/PIPELINE.md.
+# docs/POTTS_ALIGN.md §11.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -90,4 +90,4 @@ echo "  # on the Mac, from the repo root:"
 echo "  scripts/sync_models.sh pull   # brings cache/<model>/alignments.tsv (+ meta.json)"
 echo "  snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \\"
 echo "      --config run_root=${RUN_ROOT} --cores 8 all"
-echo "(swap the --configfile for the tiny config on the tiny smoke run.) See docs/PIPELINE.md."
+echo "(swap the --configfile for the tiny config on the tiny smoke run.) See docs/POTTS_ALIGN.md §11."

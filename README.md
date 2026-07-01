@@ -270,7 +270,7 @@ python pruning/build_mask.py --alg msa.npy --strategies sca dia --percent-J 98 -
 
 ## Combining two models: energy of a sequence under both
 
-Once you have **two trained models** (e.g. two different families), you can score any sequence under *both* and report `E_A`, `E_B`, and the combined `E_tot = w_A·E_A + w_B·E_B`. This is a separate, two-model pipeline (`Snakefile.combine`); the design and the math are documented in `docs/initiate_two_model_energy.md`.
+Once you have **two trained models** (e.g. two different families), you can score any sequence under *both* and report `E_A`, `E_B`, and the combined `E_tot = w_A·E_A + w_B·E_B`. This is a separate, two-model pipeline (`Snakefile.combine`); the progress note and math are in `docs/two_model_progress.md`, and the production couplings-aware aligner is documented in `docs/POTTS_ALIGN.md`.
 
 The catch: a raw sequence is **not in either model's frame** (the two models have different aligned lengths and are non-homologous), so it must be aligned to each model independently. By default (`method: map`) each sequence is threaded into each model's frame the **same way** — the single best alignment per model — so `E_A` and `E_B` are computed by an identical procedure and are directly comparable. If you instead want the thermodynamically-principled energy that integrates over alignment uncertainty, `method: marginal` estimates the free energy by importance sampling and reports an effective sample size (ESS); see the method table.
 
@@ -291,7 +291,7 @@ snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --co
 
 Combine runs land under **`combine/<run_name>/`** — a separate (git-ignored) tree from the single-model `results/`, so dual-model runs never mix with single-model ones.
 
-**Where it runs.** `map`, `marginal`, and `in_frame` run entirely on your Mac. Only `method: dcalign` needs the Midway cluster — its alignment is ~700× slower and is sharded there — after which you pull the small cache back and score locally. That end-to-end Mac→Midway→Mac sequence is the runbook **`docs/PIPELINE.md`**.
+**Where it runs.** Every method runs on your Mac. `potts_align` (the production couplings-aware aligner) is pure numpy; for a *large* query set its alignment can optionally be pre-built on a Slurm array and pulled back as a cache before scoring locally — that optional flow is `docs/POTTS_ALIGN.md` §11. A small query set needs no cluster step at all.
 
 ### Write a combine config
 
@@ -319,8 +319,10 @@ query:
                                #   marginal cost on large natural MSAs; drop is logged
 
 scoring:
-  method: map                  # auto | in_frame | map | marginal (see below). map is
-                               #   the default: same alignment procedure for both models
+  method: map                  # auto | in_frame | map | marginal | potts_align (see
+                               #   below). map is the schema default (same alignment
+                               #   procedure for both models); potts_align is the
+                               #   production couplings-aware aligner (docs/POTTS_ALIGN.md)
   n_samples: 1000              # importance-sampling draws (used only by `marginal`)
   ess_threshold: 100.0         # below this, a `marginal` estimate is flagged unreliable
 
@@ -335,13 +337,13 @@ To score **your own sequences** instead of the models' training/synthetic sets, 
 
 | method | what it does | when |
 | --- | --- | --- |
-| `map` | **(default)** Viterbi-align to each model, full Potts energy on that single best path; same procedure for both models | you want the single best alignment + comparable `E_A`, `E_B` |
-| `dcalign` | couplings-aware alignment by DCAlign (uses the full `J`, not just conservation), then full Potts energy in-frame; runs on Midway, cached on disk | the most accurate cross-family alignment — runbook in `docs/PIPELINE.md` |
+| `map` | **(schema default)** Viterbi-align to each model, full Potts energy on that single best path; same procedure for both models | you want the single best alignment + comparable `E_A`, `E_B` |
+| `potts_align` | **(production)** couplings-aware gap-placement aligner: minimizes the exact Potts energy over frames (uses the full `J`); pure numpy, provably global for few gaps | the most accurate alignment for `N ≤ L` — spec + cluster runbook in `docs/POTTS_ALIGN.md` |
 | `marginal` | free energy `−log Σ_a e^(−E(x,a))` by importance sampling; reports ESS + MC stderr | the principled model-evidence; accounts for alignment ambiguity |
 | `in_frame` | exact Potts sum; requires the sequence already be in the model's frame | sequences already aligned to a model |
 | `auto` | `in_frame` (original MSA alignment) for a sequence's home model, `marginal` for the other | fast per-model scoring — **but** `E_A`/`E_B` use different aligners, so *not* comparable (it warns) |
 
-`map` is the *fields*-MAP (Viterbi under the HMM, which aligns using conservation but ignores the couplings `J`), so the alignment it picks is good but not guaranteed energy-optimal. The couplings-aware upgrade — `method: dcalign` — is **implemented and validated** (phase-1, flat insertion prior; the informed insertion prior is the deferred phase-2 fix): DCAlign chooses the alignment using the full `J`. Because it is ~700× slower it runs on Midway and is cached on disk; the end-to-end Mac→Midway→Mac sequence is the runbook `docs/PIPELINE.md` (spec: `docs/initiate_two_model_energy.md` §10.9).
+`map` is the *fields*-MAP (Viterbi under the HMM, which aligns using conservation but ignores the couplings `J`), so the alignment it picks is good but not guaranteed energy-optimal. The couplings-aware upgrade is **`method: potts_align`**: it minimizes the exact in-frame Potts energy (the full `J`) over gap placements — provably global when the gap count is small, parallel tempering otherwise — and requires `N ≤ L` (raw sequence no longer than the model frame). It is pure numpy and runs on the Mac; a large query set can optionally pre-build its alignment cache on a Slurm array. Full spec, cost model, the honest comparison to the retired DCAlign approach, and the cluster runbook: `docs/POTTS_ALIGN.md`.
 
 ### What you get
 
@@ -374,7 +376,7 @@ The two frames are independent (different lengths, not column-aligned). A native
 
 ### Reading the ESS (only for `method: marginal`)
 
-ESS comes out of the importance-sampling pass, so it is reported only when you run `method: marginal` (the default `map` is a deterministic single alignment with no ESS). The marginal estimate is only as good as its ESS. **A low ESS is not always a problem:** when a sequence aligns essentially one way (e.g. a native in its own family), the alignment posterior is sharply peaked, ESS is near 1 *by construction*, and the marginal energy still agrees with the MAP and in-frame energies. A low ESS on a genuinely ambiguous cross-family alignment, on the other hand, means the estimate is dominated by one lucky sample and should be treated as an upper bound — raise `n_samples`, or switch to the couplings-aware `method: dcalign` (now available; runs on Midway, see `docs/PIPELINE.md`) or annealed importance sampling. Either way the run **warns loudly** and records the ESS in `scores.tsv`, `scores_detail.json`, and `manifest.json`; nothing is hidden.
+ESS comes out of the importance-sampling pass, so it is reported only when you run `method: marginal` (the default `map` is a deterministic single alignment with no ESS). The marginal estimate is only as good as its ESS. **A low ESS is not always a problem:** when a sequence aligns essentially one way (e.g. a native in its own family), the alignment posterior is sharply peaked, ESS is near 1 *by construction*, and the marginal energy still agrees with the MAP and in-frame energies. A low ESS on a genuinely ambiguous cross-family alignment, on the other hand, means the estimate is dominated by one lucky sample and should be treated as an upper bound — raise `n_samples`, or switch to the couplings-aware `method: potts_align` (`docs/POTTS_ALIGN.md`) or annealed importance sampling. Either way the run **warns loudly** and records the ESS in `scores.tsv`, `scores_detail.json`, and `manifest.json`; nothing is hidden.
 
 ---
 

@@ -4,9 +4,8 @@
 # This is a SEPARATE pipeline from the two-model `Snakefile.combine` (two
 # already-trained models -> combined energy): different DAG, different validated
 # config schema (workflow_config.py vs combine_config.py), and a different output
-# tree (results/ vs combine/). They are intentionally not merged. The end-to-end
-# story spanning both — and the Mac-primary / Midway-for-DCAlign split — is the
-# runbook docs/PIPELINE.md.
+# tree (results/ vs combine/). They are intentionally not merged. The two-model
+# side is documented in docs/two_model_progress.md and docs/POTTS_ALIGN.md.
 #
 # One validated YAML config = one run. Every output lands under a single
 # run directory so it is obvious which parameters produced which figure.

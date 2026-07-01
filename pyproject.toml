@@ -64,7 +64,7 @@ Bug-Tracker = "https://github.com/StatBio/Stochastic-Boltzmann-Machine/-/issues"
 
 [tool.pytest.ini_options]
 markers = [
-    "integration: end-to-end tests needing an external tool (julia + DCAlign clone); skipped when unavailable",
+    "integration: end-to-end tests needing an external tool; skipped when unavailable",
 ]
 
 [tool.scikit-build]

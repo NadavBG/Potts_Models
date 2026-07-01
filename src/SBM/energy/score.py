@@ -11,16 +11,11 @@ single energy:
 - ``"marginal"`` (default) — integrate the alignment out by importance sampling
   with the profile-HMM posterior as proposal (spec §3.1). Reports ESS and Monte
   Carlo standard error; warns loudly when ESS is low (the estimate is unreliable).
-- ``"dcalign"`` — couplings-aware alignment by DCAlign (spec §10.9). The
-  expensive Julia alignment runs out-of-process and is cached on disk
-  (:mod:`SBM.utils.dcalign_score`); this branch is a thin cache-reader that
-  recomputes the energy in-frame on the cached frame, so it stays pure (no Julia
-  here) and gauge-consistent with ``map``/``in_frame``.
-- ``"potts_align"`` — couplings-aware gap-placement aligner (iter-003, spec
-  ``docs/POTTS_ALIGN.md``). Minimizes the exact in-frame Potts energy over the
-  ``C(L, N)`` insert-free frames (exact enumeration for few gaps, else parallel
-  tempering) and returns the global-minimum frame. Pure numpy; requires a raw
-  gap-free ``seq`` with ``N <= L`` and an explicit ``seed``.
+- ``"potts_align"`` — couplings-aware gap-placement aligner (the production
+  aligner; ``docs/POTTS_ALIGN.md``). Minimizes the exact in-frame Potts energy
+  over the ``C(L, N)`` insert-free frames (exact enumeration for few gaps, else
+  parallel tempering) and returns the global-minimum frame. Pure numpy; requires
+  a raw gap-free ``seq`` with ``N <= L`` and an explicit ``seed``.
 
 Energies are only comparable / additive across models in a fixed gauge; both
 models are loaded in the zero-sum gauge (see :mod:`SBM.energy.model`).
@@ -34,7 +29,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import logsumexp
 
-from .encoding import GAP, ints_to_seq, seq_to_ints
+from .encoding import GAP, ints_to_seq
 from .hmm import ProfileHMM
 from .model import PottsModel
 from .potts import potts_energies, potts_energy
@@ -42,7 +37,7 @@ from .potts_align import potts_align
 
 log = logging.getLogger(__name__)
 
-METHODS = ("in_frame", "map", "marginal", "dcalign", "potts_align")
+METHODS = ("in_frame", "map", "marginal", "potts_align")
 DEFAULT_N_SAMPLES = 1000
 DEFAULT_ESS_THRESHOLD = 100.0
 
@@ -117,21 +112,16 @@ def score_sequence(
     n_samples: int = DEFAULT_N_SAMPLES,
     seed: int | None = None,
     ess_threshold: float = DEFAULT_ESS_THRESHOLD,
-    dcalign_frame: str | None = None,
-    dcalign_notes: str = "",
 ) -> ScoreResult:
     """Energy of one query (integer array) under ``model`` via ``method``.
 
     For ``"in_frame"`` ``seq`` must be length ``L`` (gaps allowed). For ``"map"``
     / ``"marginal"`` ``seq`` is a raw ungapped query (residues 1..20) and ``hmm``
     (built once via :meth:`ProfileHMM.from_model`) is required. ``marginal``
-    requires an explicit ``seed`` for reproducibility. For ``"dcalign"`` ``seq``
-    is ignored and ``dcalign_frame`` (a length-``L`` amino-acid frame string, gap
-    ``-``, from the on-disk DCAlign cache) is required; the energy is recomputed
-    in-frame on that frame, so this branch is pure (no Julia call here). For
-    ``"potts_align"`` ``seq`` is a raw gap-free query with ``N <= L`` and an
-    explicit ``seed`` is required; the energy is the global insert-free Potts
-    minimum found by :func:`SBM.energy.potts_align.potts_align`.
+    requires an explicit ``seed`` for reproducibility. For ``"potts_align"``
+    ``seq`` is a raw gap-free query with ``N <= L`` and an explicit ``seed`` is
+    required; the energy is the global insert-free Potts minimum found by
+    :func:`SBM.energy.potts_align.potts_align`.
     """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
@@ -143,30 +133,6 @@ def score_sequence(
             energy=energy, method="in_frame", model_name=model.name,
             gauge=model.gauge, model_sha256=model.sha256,
             representative_alignment=ints_to_seq(seq),
-        )
-
-    if method == "dcalign":
-        # The expensive couplings-aware alignment ran out-of-process; we only
-        # recompute the energy on the cached frame. A missing/empty frame means
-        # DCAlign failed for this id — a loud error, never a silent skip.
-        if not dcalign_frame:
-            raise ValueError(
-                f"method='dcalign' needs a non-empty dcalign_frame for model {model.name!r}; "
-                "an empty frame means DCAlign failed to align this sequence (see the cache)."
-            )
-        frame = seq_to_ints(dcalign_frame)
-        if frame.size != model.L:
-            raise ValueError(
-                f"dcalign_frame length {frame.size} != model L={model.L} for {model.name!r}"
-            )
-        energy = potts_energy(frame, model)
-        notes = "couplings-aware (DCAlign); energy recomputed in-frame via potts_energy"
-        if dcalign_notes:
-            notes += f"; {dcalign_notes}"
-        return ScoreResult(
-            energy=energy, method="dcalign", model_name=model.name,
-            gauge=model.gauge, model_sha256=model.sha256,
-            representative_alignment=ints_to_seq(frame), notes=notes,
         )
 
     if method == "potts_align":
@@ -228,7 +194,7 @@ def score_sequence(
     if ess < ess_threshold:
         log.warning(
             "low ESS=%.1f (< %.1f) for model %r: marginal energy unreliable; "
-            "raise n_samples or upgrade the proposal (DCAlign / annealed IS)",
+            "raise n_samples, use method='potts_align', or annealed IS",
             ess, ess_threshold, model.name,
         )
         notes += f"; LOW ESS={ess:.1f} < {ess_threshold:.0f} — estimate unreliable"

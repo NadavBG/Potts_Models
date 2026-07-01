@@ -1,12 +1,12 @@
 # Two-model combine run scored with potts_align — the couplings-aware
 # gap-placement aligner that returns the global insert-free Potts-energy minimum
-# (iter-003; docs/POTTS_ALIGN.md + docs/ITER003_RUNBOOK.md). Pure numpy — NO
+# (docs/POTTS_ALIGN.md — spec + cluster runbook §11). Pure numpy — NO
 # DCAlign, NO Julia. The heavy compute is sharded on a Slurm array
 # (pipeline/external/run_potts_align_align.sh); the gather writes
 # potts_align/cache/<model>/alignments.tsv, and the Snakemake `score` rule reads
 # that cache and recomputes each energy in-frame (<=1e-6 canary).
 #
-# WHERE THINGS RUN (mirrors docs/PIPELINE.md; Mac-primary): snakemake runs ONLY
+# WHERE THINGS RUN (docs/POTTS_ALIGN.md §11; Mac-primary): snakemake runs ONLY
 # on the Mac. The Midway login node runs ONLY the two bash drivers below — they
 # submit sbatch jobs and validate; no snakemake, no heavy compute (good login
 # etiquette). CODE moves by git (commit/push on the Mac, the align driver pulls
@@ -57,8 +57,8 @@ scoring:
   # Slurm array size. Measured cost ~74 s per g>=4 PT pair on a caslake core
   # (~2x the docs' Mac estimate). Fixed PT work (home CM/PPIC + CM->PPIC cross +
   # random->CM) ~= 53 core-h; the 2000-pair PPIC->CM cross adds ~41 -> ~94 core-h
-  # total. Fan-out at cpus=1 is ~100% core-efficient (docs/initiate_two_model_energy.md
-  # §10: within-shard threading only ~36%), so more shards cut wall time at ~constant
+  # total. Fan-out at cpus=1 is ~100% core-efficient (docs/POTTS_ALIGN.md §11;
+  # within-shard threading scales poorly), so more shards cut wall time at ~constant
   # SU. 512 shards (all concurrent, per prior DCAlign runs at MAX_CONCURRENT=512)
   # ≈ ~0.18 h/shard ≈ 11 min wall; 3 h wall limit is ample. If the account can't
   # place 512 at once the extra tasks just queue (no SU penalty).
@@ -72,7 +72,6 @@ scoring:
   # n_samples / ess_threshold unused by potts_align (kept for schema completeness).
   n_samples: 1000
   ess_threshold: 100.0
-  # dcalign_* / lambda_spec / maxiter / pcount omitted -> defaults; unused (NO DCAlign).
 
 figures:
   enabled: true

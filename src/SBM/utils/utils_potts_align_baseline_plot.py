@@ -7,8 +7,7 @@ the native frame already is the global minimum; **below** means potts_align foun
 a strictly lower frame; **above** would be a search failure and should not occur),
 and the distribution of ``ΔE = E_potts_align − E_inframe`` (mass at 0 = recovered,
 mass left of 0 = the aligner beating the native frame). Rows are the two models;
-only one figure file, per the lab "consolidate similar figures" convention. This
-is the potts_align analogue of :mod:`SBM.utils.utils_dcalign_baseline_plot` and is
+only one figure file, per the lab "consolidate similar figures" convention. It is
 routed through ``scripts/lab_plotting.py`` so the lab palette + PDF provenance
 stay the single source of truth.
 """
@@ -24,8 +23,7 @@ import numpy as np
 import pandas as pd
 
 # scripts/lab_plotting.py is a sibling script, not a package module. Add the
-# scripts/ dir to sys.path so ``import lab_plotting`` works regardless of cwd
-# (mirrors src/SBM/utils/utils_dcalign_baseline_plot.py).
+# scripts/ dir to sys.path so ``import lab_plotting`` works regardless of cwd.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPTS_DIR = _REPO_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:

@@ -14,8 +14,7 @@ the ground state, and how often is the native frame already it?".
   ground state), ``delta_e > 0`` ⇒ potts_align did *worse* than native — a PT/SA
   search failure (impossible for the enumerate engine). Cross-family pairs have no
   in-frame reference (different length) and are skipped — see
-  :mod:`SBM.energy.potts_align_baseline`. This is the potts_align analogue of
-  ``scripts/compare_dcalign_baseline.py``.
+  :mod:`SBM.energy.potts_align_baseline`.
 
 Usage::
 

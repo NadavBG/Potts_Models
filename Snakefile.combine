@@ -3,9 +3,10 @@
 # SEPARATE from the single-model `Snakefile` (one MSA -> one model): this one
 # takes two ALREADY-TRAINED models and scores a query set under both. Different
 # DAG, config schema (combine_config.py vs workflow_config.py), and output tree
-# (combine/ vs results/) — intentionally not merged. Scoring runs on the Mac;
-# only `scoring.method: dcalign` needs Midway (the alignment is sharded there,
-# then cached and pulled back). End-to-end runbook: docs/PIPELINE.md.
+# (combine/ vs results/) — intentionally not merged. Scoring runs on the Mac.
+# `scoring.method: potts_align` (the production couplings-aware aligner;
+# docs/POTTS_ALIGN.md) can pre-build its alignment cache out-of-process on a
+# Slurm array for large query sets, then score locally.
 #
 # One validated YAML config = one combine run. Consumes two already-trained
 # models and scores a query set (each family's natural + synthetic sequences,
@@ -69,27 +70,6 @@ def _score_potts_cache_inputs():
     return {f"pa_cache_{i}": f"{POTTS_ALIGN_CACHE}/{m.name}/alignments.tsv"
             for i, m in enumerate(cfg.models)}
 
-# DCAlign diagnostics (only meaningful for method=dcalign, which has a cache).
-# Figures are gated on figures.enabled like the energy figure.
-DCALIGN_BASELINE_TSV      = f"{RUN_ROOT}/data/dcalign_vs_inframe.tsv"
-DCALIGN_BASELINE_JSON     = f"{RUN_ROOT}/data/dcalign_vs_inframe.json"
-DCALIGN_BASELINE_MANIFEST = f"{RUN_ROOT}/provenance/dcalign_vs_inframe_manifest.json"
-DCALIGN_BASELINE_FIG      = f"{RUN_ROOT}/figs/dcalign_vs_inframe.pdf"
-
-DCALIGN_CONV_TSV      = f"{RUN_ROOT}/data/dcalign_convergence.tsv"
-DCALIGN_CONV_JSON     = f"{RUN_ROOT}/data/dcalign_convergence.json"
-DCALIGN_CONV_MANIFEST = f"{RUN_ROOT}/provenance/dcalign_convergence_manifest.json"
-DCALIGN_CONV_FIG      = f"{RUN_ROOT}/figs/dcalign_convergence.pdf"
-
-DCALIGN_BASELINE_OUTPUTS = []
-if cfg.scoring.method == "dcalign":
-    DCALIGN_BASELINE_OUTPUTS = [
-        DCALIGN_BASELINE_TSV, DCALIGN_BASELINE_JSON, DCALIGN_BASELINE_MANIFEST,
-        DCALIGN_CONV_TSV, DCALIGN_CONV_JSON, DCALIGN_CONV_MANIFEST,
-    ]
-    if cfg.figures.enabled:
-        DCALIGN_BASELINE_OUTPUTS += [DCALIGN_BASELINE_FIG, DCALIGN_CONV_FIG]
-
 # potts_align ground-state-recovery baseline (only when method=potts_align, which
 # has a cluster cache). The potts_align analogue of the dcalign baseline: per
 # home pair, potts_align's minimum energy vs the native in-frame energy. A native
@@ -118,7 +98,6 @@ rule all:
         QUERY_FASTA,
         SCORES,
         *([ENERGY_FIG] if cfg.figures.enabled else []),
-        *DCALIGN_BASELINE_OUTPUTS,
         *POTTS_BASELINE_OUTPUTS,
         RUN_MANIFEST,
 
@@ -211,53 +190,6 @@ if cfg.figures.enabled:
             "scripts/wf/run_render_combine.py"
 
 
-# ── DCAlign-vs-in-frame baseline (only when method=dcalign) ──────────────
-if cfg.scoring.method == "dcalign":
-
-    rule dcalign_baseline:
-        input:
-            models=MODELS_JSON,
-            fasta=QUERY_FASTA,
-            groups=QUERY_GROUPS,
-            scores=SCORES,  # orders after scoring; the cache must be present by then
-        output:
-            tsv=DCALIGN_BASELINE_TSV,
-            summary=DCALIGN_BASELINE_JSON,
-            manifest=DCALIGN_BASELINE_MANIFEST,
-            **({"fig": DCALIGN_BASELINE_FIG} if cfg.figures.enabled else {}),
-        params:
-            run_root=RUN_ROOT,
-        log:
-            f"{RUN_ROOT}/logs/dcalign_baseline.log"
-        threads: 1
-        resources:
-            mem_mb=4000,
-            runtime=20,
-        script:
-            "scripts/wf/run_dcalign_baseline.py"
-
-    rule dcalign_convergence:
-        input:
-            models=MODELS_JSON,
-            groups=QUERY_GROUPS,
-            scores=SCORES,  # orders after scoring; the cache must be present by then
-        output:
-            tsv=DCALIGN_CONV_TSV,
-            summary=DCALIGN_CONV_JSON,
-            manifest=DCALIGN_CONV_MANIFEST,
-            **({"fig": DCALIGN_CONV_FIG} if cfg.figures.enabled else {}),
-        params:
-            run_root=RUN_ROOT,
-        log:
-            f"{RUN_ROOT}/logs/dcalign_convergence.log"
-        threads: 1
-        resources:
-            mem_mb=2000,
-            runtime=15,
-        script:
-            "scripts/wf/run_dcalign_convergence.py"
-
-
 # ── potts_align ground-state-recovery baseline (only when method=potts_align) ──
 if cfg.scoring.method == "potts_align":
 
@@ -291,7 +223,6 @@ rule run_manifest:
         MODELS_JSON,
         SCORES,
         *([ENERGY_FIG] if cfg.figures.enabled else []),
-        *DCALIGN_BASELINE_OUTPUTS,
         *POTTS_BASELINE_OUTPUTS,
     output:
         RUN_MANIFEST,

@@ -1,14 +1,19 @@
 # Couplings-aware Potts-energy alignment by gap-placement minimization
 
 **Module:** `src/SBM/energy/potts_align.py` · **Tests:** `tests/test_potts_align.py`
-· **Driver:** `scripts/analyze_potts_align.py` · **Spec/decision record:**
-`docs/initiate_two_model_energy.md` §10.20
+· **Scoring branch:** `SBM.energy.score.score_sequence(method="potts_align")` ·
+**Combine pipeline:** `Snakefile.combine` with `scoring.method: potts_align` ·
+**Progress/context:** `docs/two_model_progress.md`
 
-This document specifies, in enough detail to re-implement from scratch, the
-alignment algorithm introduced in iter-003 to fix the combine "worse-than-native"
-residual, and explains precisely how it relates to (and differs from) DCAlign.
-Read §1–§2 for the framing, §3–§7 for the replicable mechanics, §8 for the honest
-comparison to DCAlign and the scope limits.
+This is the **production aligner** for the two-model energy work: it finds the
+best alignment of a raw sequence to a Potts model by minimizing the exact Potts
+energy over gap placements — **no DCAlign** (the DCAlign campaign that this
+replaced is archived; the verdict is recorded in `docs/two_model_progress.md`).
+This document specifies it in enough detail to re-implement from scratch, and
+explains precisely how it relates to (and differs from) DCAlign. Read §1–§2 for
+the framing, §3–§7 for the replicable mechanics, §8 for the honest comparison to
+DCAlign and the scope limits, §11 for running it in the combine pipeline (locally
+and at cluster scale).
 
 ---
 
@@ -372,8 +377,10 @@ columns, fill `k` previously-gap columns, re-thread the residues in order (so `N
 and monotone order are preserved). Used by the Midway basin-width probe (warm-start
 BP at native ± k columns; reuses the warm-start driver verbatim).
 
-**Result on the 24 curated home pairs** (`scripts/analyze_potts_align.py` →
-`combine/combine-CM-PPIC-dcalign-pottsalign/`, master seed 0; `ΔE = E_best − E_native`):
+**Result on the 24 curated home pairs** (the one-off eval driver
+`analyze_potts_align.py` and its output `combine-CM-PPIC-dcalign-pottsalign/` are
+archived under `.archive/`, since the comparison was against DCAlign frames;
+master seed 0; `ΔE = E_best − E_native`):
 
 | group | count | outcome |
 | --- | --- | --- |
@@ -385,10 +392,11 @@ So **16/16** worse-than-native pairs reach native-or-better with **no DCAlign at
 all** — 11 provably global by enumeration, the 5 high-gap cases by parallel tempering
 (§6.7; the `g=14` case needs the heavier PT schedule, ~50 s). With the older
 single-temperature SA only 13/16 were reached (the `g = 9, 13, 14` tail plateaued at
-ΔE 5–17, still beating DCAlign's 27–44); parallel tempering crosses those basins. The
-Midway confirmatory batch (§10.20) showed warm-starting DCAlign-BP at the
-Potts-align frames recovers *fewer* (10/16) — BP only drifts off the exact frame — so
-the direct minimizer strictly dominates and BP is dropped from the loop.
+ΔE 5–17, still beating DCAlign's 27–44); parallel tempering crosses those basins. A
+Midway confirmatory batch (archived; see `docs/two_model_progress.md`) showed
+warm-starting DCAlign-BP at the Potts-align frames recovers *fewer* (10/16) — BP only
+drifts off the exact frame — so the direct minimizer strictly dominates and BP is
+dropped from the loop.
 
 ---
 
@@ -463,10 +471,10 @@ failure — which is what told us the right tool is brute force, not more BP tun
   query fits the frame (`N ≤ L`). It *does* handle **cross-family** pairs when
   `N ≤ L_other` (a PPIC query, `N ≤ 91`, in the CM `L=96` frame is just a `g ≥ 5`
   gap placement — validated). Only `N > L` is out of scope (CM queries with `N > 91`
-  scored under PPIC need insertions). iter-003 scores every pair with `N ≤ L` and
-  skips the rest (`docs/ITER003_RUNBOOK.md`). Closing the `N > L` gap needs an
-  insertion-capable move set (or DCAlign) — deferred; under the "design ≤ min(L)=91"
-  direction both terms are insert-free and this never arises.
+  scored under PPIC need insertions). The combine pipeline scores every pair with
+  `N ≤ L` and skips the rest with a NaN row (§11). Closing the `N > L` gap needs an
+  insertion-capable move set — deferred; under the "design ≤ min(L)=91" direction
+  both terms are insert-free and this never arises (`docs/two_model_progress.md`).
 - **High gap counts.** For `g` beyond the enumeration budget the result is the SA
   approximation, which on the 3 high-gap CM stragglers (`g = 9–14`) plateaus
   `ΔE 5–17` above native (still better than DCAlign). Block moves or simulated
@@ -495,12 +503,13 @@ res.topk_frames     # K best distinct frames (for a multi-start min)
 ```
 
 `PottsAlignResult` carries no `E_native`/`ΔE` — the aligner never sees the
-ground-truth frame; that comparison is the analysis layer's job
-(`scripts/analyze_potts_align.py`). The curated-set experiment:
+ground-truth frame; any comparison to a reference frame is the caller's job. The
+score-layer wrapper is `SBM.energy.score.score_sequence(seq, model,
+method="potts_align", seed=...)` (§11), and the combine `potts_align_baseline`
+rule (`SBM.energy.potts_align_baseline`) reports ΔE-vs-native per home pair.
 
 ```
-.venv/bin/python scripts/analyze_potts_align.py        # → combine/combine-CM-PPIC-dcalign-pottsalign/
-.venv/bin/python -m pytest tests/test_potts_align.py -q
+.venv/bin/python -m pytest tests/test_potts_align.py tests/test_potts_align_baseline.py -q
 ```
 
 **Tests (the brute-force-anchor philosophy of `tests/test_energy.py`):**
@@ -509,4 +518,52 @@ SA's best energy equals the exact `enumerate_align` minimum on a tiny model
 determinism (same seed → identical frame); output invariants (length-`L`, `N`
 non-gap, monotone, in-alphabet); top-K sorted/distinct; loud `ValueError`s on a
 gapped query, `N > L`, or a missing seed.
+
+---
+
+## 11. Running it in the combine pipeline (local + at cluster scale)
+
+`potts_align` is wired into the two-model `combine` pipeline as
+`scoring.method: potts_align` (`config/params_combine-CM-PPIC-potts.yaml`;
+`-potts-tiny` is the smoke config). It scores **every (query, model) pair with
+`N ≤ L`** and returns the global insert-free Potts-min frame; cross pairs with
+`N > L_other` (insertions needed) are emitted as a NaN row (`note="N>L …"`), not
+crashed. Both are computed by the *same* aligner, so `E_A` and `E_B` are
+comparable. The score branch is pure numpy — no Julia, no external tool.
+
 ```
+python scripts/iter.py run combine-CM-PPIC-potts "<tag>" --snakefile Snakefile.combine
+```
+
+**Two knobs bound the cost** (`scoring.*`, validated by `combine_config.py`):
+
+- `pa_cross_subsample_{origin,under,n}` — restrict the expensive cross block
+  (e.g. every PPIC natural scored under the CM frame, all `g ≥ 5` → PT) to a
+  *seeded* random subset of `n` ids. This is the run's cost driver; the subsample
+  preserves the gap-count distribution so the figure cluster is unbiased.
+- `query.{n_random,random_length}` — append `n_random` random length-`random_length`
+  sequences (uniform iid residues, seeded) as a negative-control group. They must
+  sit at high energy under both models, well clear of the naturals — the sanity
+  check on the energy scale in `two_model_energy.pdf`.
+
+**Local vs. cluster.** Everything runs on the Mac. Per-pair cost is set by the PT
+schedule, not by `g` (§6.8): instant for `g ≤ 3`, ~tens of seconds for the PT
+cases. For a large query set (the full CM+PPIC naturals ≈ tens of core-hours,
+§6.8) the alignment can be pre-built out-of-process on a Slurm array — pure Python,
+no `module load julia`:
+
+1. **Build the query on the Mac** (`snapshot_config`, `resolve_models`,
+   `build_query` targets of `Snakefile.combine`) and, if using Midway, push
+   models + query with `scripts/sync_models.sh push`.
+2. **Shard + gather** on the cluster with `pipeline/external/run_potts_align_align.sh`
+   (`plan` → `sbatch --array` of `run_potts_align_shard.py` at `cpus=1` → gather via
+   `run_potts_align_gather.py`), writing `<run_root>/potts_align/cache/<model>/alignments.tsv`.
+3. **Pull the cache** (`scripts/sync_models.sh pull`) and run `Snakefile.combine all`
+   on the Mac. The `score` rule reads the cache and recomputes each energy in-frame
+   as a `≤1e-6` gauge canary; nothing else touches the cluster.
+
+The `score` rule *declares* the cache as an input when `method: potts_align`, so
+Snakemake refuses to score until the align+gather has filled it (the two-phase
+dependency is explicit in the DAG). When scoring a small query set, omit the
+cluster step entirely: `score_two_models.py --method potts_align --seed S` (no
+`--potts-align-cache`) recomputes each pair live in-process.

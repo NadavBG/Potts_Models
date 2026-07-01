@@ -8,15 +8,22 @@ silently producing a wrong file on the far side. It covers **two trees**:
 - **`results/`** — trained models (`model.npy` ~47 MB; ~4.4 GB across all
   families). Meant to exist on both machines so the cluster alignment can read
   them.
-- **`combine/`** — two-model runs, including the **DCAlign cache**
-  (`cache/<model>/alignments.tsv`) the Mac reads to score. The cluster produces
-  it; you pull it back and score on the Mac.
+- **`combine/`** — two-model runs, including the **`potts_align` cache**
+  (`potts_align/cache/<model>/alignments.tsv`) the Mac reads to score. When a
+  large query set is aligned on the cluster, it produces the cache; you pull it
+  back and score on the Mac. (A small query set is scored directly on the Mac
+  with no cache — `docs/POTTS_ALIGN.md` §11.)
 
 Each tree gets its own `<tree>/SHA256SUMS` manifest. A tree absent on one side
 is skipped (a fresh Mac has no `combine/` until a run); a command fails only if
 neither tree is present. Override the tree list with
-`SBM_SYNC_ROOTS="results ..."`. The Mac-primary / Midway-for-DCAlign workflow
-that motivates all this is the runbook `docs/PIPELINE.md`.
+`SBM_SYNC_ROOTS="results ..."`. The Mac-primary workflow that motivates all this
+is `docs/POTTS_ALIGN.md` §11 (running `potts_align` locally and at cluster scale).
+
+> **Retired DCAlign runs are never synced.** They live under `.archive/` on the
+> Mac (gitignored); `.archive/` and any `combine/*dcalign*` dir are excluded from
+> both the rsync transfer and the SHA256SUMS manifests, so a `pull` can't restore
+> them from Midway. See `docs/two_model_progress.md`.
 
 ## Why not Git-LFS
 
@@ -44,29 +51,29 @@ Durable-only is ~50–60 MB/run vs ~0.5 GB/run. Figures regenerate from `model.n
 + `synthetic/` via `scripts/render_sbm.sh` / `render_figures.py`. Pass `--with-figs`
 to mirror everything (e.g. archiving a finished run).
 
-## What gets synced — `combine/` (DCAlign cache)
+## What gets synced — `combine/` (potts_align cache)
 
-A combine run's DCAlign output is dominated by per-shard scratch that is huge and
-fully regenerable. Sync keeps only the small durable cache + run metadata and
-drops the rest:
+A combine run's cluster align output is dominated by per-shard scratch that is
+regenerable. Sync keeps only the small durable cache + run metadata and drops the
+rest:
 
 | Synced (durable) | Skipped (scratch / regenerable) |
 |---|---|
-| `dcalign/cache/<model>/alignments.tsv` (the gathered result) | `dcalign/cache/<model>/work/` (~7–8 GB/model BP-solver scratch) |
-| `dcalign/cache/<model>/meta.json` (provenance) | `dcalign/cache/<model>/shards/` (raw per-shard TSVs, merged into `alignments.tsv`) |
-| `config_snapshot.yaml`, `models.json`, `query/` | `dcalign/logs/` + top-level `logs/` (machine-local job logs) |
-| `dcalign/{shards_manifest,gather_status}.json`, `.shard_jids` | `*.tar.zst` (the finalizer's archives) |
-| `data/` (scores + DCAlign diagnostics) + `provenance/` (manifests), after scoring | `figs/` (regenerable; `--with-figs` to include) |
+| `potts_align/cache/<model>/alignments.tsv` (the gathered result) | `potts_align/shards/` (raw per-shard TSVs, merged into `alignments.tsv`) |
+| `potts_align/cache/<model>/meta.json` (provenance) | `potts_align/logs/` + top-level `logs/` (machine-local job logs) |
+| `config_snapshot.yaml`, `models.json`, `query/` | `*.tar.zst` (the finalizer's archives) |
+| `potts_align/{shards_manifest,gather_status}.json`, `.shard_jids` | `figs/` (regenerable; `--with-figs` to include) |
+| `data/` (scores) + `provenance/` (manifests), after scoring | `.archive/` and any `combine/*dcalign*` dir (retired) |
 
-The whole point: the alignment runs on Midway (~15 GB scratch), but only
-~0.5 MB/run needs to come back for the Mac to score. The score step reads
-`alignments.tsv` and recomputes energies in-frame — no Julia, no cluster. The
-end-to-end sequence is in `docs/PIPELINE.md`.
+The whole point: aligning a large query set runs on Midway, but only ~0.5 MB/run
+needs to come back for the Mac to score. The score step reads `alignments.tsv`
+and recomputes energies in-frame — no cluster. The end-to-end sequence is in
+`docs/POTTS_ALIGN.md` §11.
 
-The exclude patterns (`work/`, `shards/`, `logs/`, `*.tar.zst`) and the
-manifest prunes are kept in lock-step inside `sync_models.sh` so the
-post-transfer verify never flags a manifested file that was deliberately
-skipped.
+The exclude patterns (`work/`, `shards/`, `logs/`, `*.tar.zst`, `.archive/`,
+`*dcalign*`) and the manifest prunes are kept in lock-step inside
+`sync_models.sh` so the post-transfer verify never flags a manifested file that
+was deliberately skipped.
 
 ## The checksum guarantee
 
@@ -165,9 +172,9 @@ source — review the `--dry-run` output first).
 
 - Run `scripts/sync_models.sh push --dry-run` once to confirm the file list and
   destination, then `push` for real.
-- Where this fits end to end — push models to Midway, run the DCAlign alignment
-  there, pull the cache back, score on the Mac — is the runbook
-  `docs/PIPELINE.md` (cluster mechanics in `pipeline/external/README.md`).
+- Where this fits end to end — push models to Midway, align a large query set
+  there with `potts_align`, pull the cache back, score on the Mac — is
+  `docs/POTTS_ALIGN.md` §11 (cluster mechanics in `pipeline/external/README.md`).
 - If `/project` quota becomes tight, point `SBM_MIDWAY_REPO`'s `results/` at a
   scratch-backed dir via a symlink on Midway; the script only cares about the
   final path, not whether it is a real dir or a symlink.

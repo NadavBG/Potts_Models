@@ -38,6 +38,11 @@ combine/
 pruning/masks/
 data/figs/
 
+# ── Retired code + artifacts (kept on disk, out of git and out of rsync) ──
+# Populated by the 2026-07 DCAlign retirement (see docs/two_model_progress.md);
+# scripts/sync_models.sh also excludes it so a Midway pull never restores it.
+.archive/
+
 # ── DCAlign integration spike (cloned Julia pkg + scratch driver) ────────
 dcalign_spike/
 

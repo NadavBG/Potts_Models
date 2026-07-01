@@ -7,8 +7,7 @@ docs/POTTS_ALIGN.md) and caches the frame plus its exact in-frame Potts energy
 its own model's length-``L`` frame — the native gap placement is itself one of
 the frames the minimizer searches, so the global minimum it returns can never be
 *higher* than the native in-frame energy. This module turns "did we recover the
-ground state?" into a reproducible, per-sequence quantity, the potts_align
-analogue of :mod:`SBM.energy.dcalign_baseline`.
+ground state?" into a reproducible, per-sequence quantity.
 
 Sign convention: ``delta_e = E_potts_align − E_inframe``. Lower energy is better,
 so each home pair falls into exactly one bucket:
@@ -38,9 +37,6 @@ import numpy as np
 
 from SBM.utils.potts_align_cache import PottsAlignCacheResult
 
-# The column-overlap metric is identical to the DCAlign baseline's; reuse the
-# tested implementation rather than copy it (both compare two length-L frames).
-from .dcalign_baseline import column_agreement
 from .datasets import QueryRecord
 from .encoding import GAP, seq_to_ints
 from .model import PottsModel
@@ -50,8 +46,26 @@ from .potts import potts_energies
 #: state rather than strictly above/below it. The in-frame recompute vs the
 #: cached energy agrees to ≲1e-6 (the cache canary); this larger band absorbs
 #: energetically-equivalent re-threadings so ``n_improved`` / ``n_worse`` count
-#: only material differences. Matches ``dcalign_baseline.DEFAULT_EQUAL_TOL``.
+#: only material differences.
 DEFAULT_EQUAL_TOL = 1.0
+
+
+def column_agreement(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
+    """Fraction of the ``L`` positions where two length-``L`` frames agree.
+
+    Counts both residue–residue and gap–gap matches (per-position state
+    equality) — the "col agreement" metric between the native frame and the
+    aligner's frame.
+    """
+    a = np.asarray(frame_a).ravel()
+    b = np.asarray(frame_b).ravel()
+    if a.size != b.size:
+        raise ValueError(
+            f"column_agreement needs equal-length frames; got {a.size} and {b.size}"
+        )
+    if a.size == 0:
+        raise ValueError("column_agreement needs non-empty frames")
+    return float(np.mean(a == b))
 
 
 @dataclass(frozen=True)

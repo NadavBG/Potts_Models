@@ -2,12 +2,12 @@
 # Sync the durable artifacts that don't belong in git between the Mac and
 # Midway, with end-to-end checksum verification. Covers two trees:
 #   results/  trained models (big .npy blobs; ~0.5 GB/run)
-#   combine/  two-model runs, incl. the DCAlign cache the Mac reads to score
+#   combine/  two-model runs, incl. the potts_align alignment cache the Mac scores
 # Replaces the old (never-populated) Git-LFS handoff. Both live on BOTH
-# machines: models so the cluster alignment can read them, and the DCAlign
-# cache so the combine SCORING can run on the Mac after that alignment. The
-# Mac-primary / Midway-for-DCAlign split is documented in docs/PIPELINE.md;
-# sync specifics in docs/MODEL_SYNC.md.
+# machines: models so a cluster align run can read them, and the alignment
+# cache so the combine SCORING can run on the Mac after that align. Sync
+# specifics in docs/MODEL_SYNC.md. (Retired DCAlign runs are excluded — they
+# live under .archive/ and never travel; see docs/two_model_progress.md.)
 #
 # Each tree gets its own <tree>/SHA256SUMS manifest. A tree absent on one side
 # is skipped (a fresh Mac has no combine/ until a run); a command fails only if
@@ -46,7 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Trees synced (repo-root-relative). results/ = trained models; combine/ =
-# two-model runs incl. the DCAlign cache. Override with SBM_SYNC_ROOTS.
+# two-model runs incl. the potts_align cache. Override with SBM_SYNC_ROOTS.
 # IFS is $'\n\t' here (no space), so split explicitly on whitespace.
 IFS=$' \t\n' read -r -a SYNC_ROOTS <<< "${SBM_SYNC_ROOTS:-results combine}"
 
@@ -171,8 +171,10 @@ fi
 # scratch so only the small per-model alignments.tsv (+ meta.json) travels.
 rsync_excludes() {
     local root="$1"
-    # Always-excluded caches/junk.
-    printf '%s\n' '__pycache__/' '.snakemake/' '.DS_Store' '*.pyc'
+    # Always-excluded caches/junk. .archive/ = the retired-code/artifact store
+    # (DCAlign, docs/two_model_progress.md); it must never travel either way, so a
+    # pull can't restore archived runs onto the Mac.
+    printf '%s\n' '__pycache__/' '.snakemake/' '.DS_Store' '*.pyc' '.archive/'
     if [[ "${WITH_FIGS}" -eq 0 ]]; then
         printf '%s\n' 'figs/' 'mpnn_tmp/'
     fi
@@ -181,7 +183,10 @@ rsync_excludes() {
         # shards/ raw per-shard TSVs, already merged into alignments.tsv
         # logs/   machine-local job logs (scoring regenerates its own on the Mac)
         # *.tar.zst  the finalizer's archives (not needed to score)
-        printf '%s\n' 'work/' 'shards/' 'logs/' '*.tar.zst'
+        # *dcalign* DCAlign is retired (docs/two_model_progress.md); its run dirs
+        #           are archived on the Mac. Skip them so a pull never brings the
+        #           Midway copies back (mirrored in the find prunes below).
+        printf '%s\n' 'work/' 'shards/' 'logs/' '*.tar.zst' '*dcalign*'
     fi
 }
 
@@ -189,13 +194,15 @@ rsync_excludes() {
 # root). The prunes mirror rsync_excludes() for the same tree.
 find_durable() {
     local root="$1"
-    local prune=(-name __pycache__ -o -name .snakemake)
+    local prune=(-name __pycache__ -o -name .snakemake -o -name .archive)
     if [[ "${WITH_FIGS}" -eq 0 ]]; then
         prune+=(-o -name figs -o -name mpnn_tmp)
     fi
     local extra=()
     if [[ "${root}" == "combine" ]]; then
-        prune+=(-o -name work -o -name shards -o -name logs)
+        # -name '*dcalign*' mirrors rsync_excludes: retired DCAlign runs are
+        # archived, so drop them from the manifest too (keeps verify in lockstep).
+        prune+=(-o -name work -o -name shards -o -name logs -o -name '*dcalign*')
         extra=(! -name '*.tar.zst')
     fi
     # ${extra[@]+...} guards against bash 3.2 (macOS default) treating an empty
@@ -239,11 +246,13 @@ if command -v sha256sum >/dev/null 2>&1; then SHA=(sha256sum); else SHA=(shasum 
 present=0
 for root in "${roots[@]}"; do
     [ -d "$root" ] || continue
-    prune=(-name __pycache__ -o -name .snakemake)
+    prune=(-name __pycache__ -o -name .snakemake -o -name .archive)
     [ "$with_figs" -eq 0 ] && prune+=(-o -name figs -o -name mpnn_tmp)
     extra=()
     if [ "$root" = "combine" ]; then
-        prune+=(-o -name work -o -name shards -o -name logs)
+        # '*dcalign*' matches rsync_excludes so the remote manifest omits retired
+        # DCAlign runs — a pull excludes them AND verify won't flag them missing.
+        prune+=(-o -name work -o -name shards -o -name logs -o -name '*dcalign*')
         extra=(! -name '*.tar.zst')
     fi
     files="$(mktemp)"

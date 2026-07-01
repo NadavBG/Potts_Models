@@ -9,5 +9,6 @@ elsewhere in ``SBM``):
 - :mod:`SBM.energy.hmm`      — profile-HMM alignment proposal (forward / Viterbi / FFBS).
 - :mod:`SBM.energy.score`    — :func:`score_sequence` / :func:`score_two_models`.
 
-See ``docs/initiate_two_model_energy.md`` for the specification this implements.
+See ``docs/two_model_progress.md`` (goal + status) and ``docs/POTTS_ALIGN.md``
+(the production aligner) for the specification this implements.
 """

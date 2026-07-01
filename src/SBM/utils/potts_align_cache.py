@@ -11,8 +11,7 @@ This module is the single definition of that TSV schema — the parser/writer th
 shard, the gather, and the ``score`` cache-reader (``scripts/score_two_models.py``)
 all share. It is a pure parser (no Potts kernel): the energy stored is the global
 (or PT) in-frame Potts minimum the cluster computed, and the score branch
-recomputes ``potts_energy(frame)`` as a ``<=1e-6`` gauge/handoff canary, exactly
-as the DCAlign branch does (mirrors :mod:`SBM.utils.dcalign_score`).
+recomputes ``potts_energy(frame)`` as a ``<=1e-6`` gauge/handoff canary.
 """
 
 from __future__ import annotations

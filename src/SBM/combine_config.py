@@ -23,12 +23,7 @@ SCHEMA_VERSION = 1
 
 _QUERY_SOURCES = ("model_sets", "fasta")
 _INCLUDE = ("natural", "synthetic")
-_METHODS = ("auto", "in_frame", "map", "marginal", "dcalign", "potts_align")
-# DCAlign insertion prior Λ (only used by method="dcalign"). "flat" = the original
-# geometry-blind prior (mass on Δn=1 for every (i,j)); "deltan" = the empirical
-# per-(i,j) prior built from each model's own seed MSA via DCAlign.deltan_prior
-# (combine spec §10.13).
-_LAMBDA_SPECS = ("flat", "deltan")
+_METHODS = ("auto", "in_frame", "map", "marginal", "potts_align")
 
 
 @dataclass(frozen=True)
@@ -94,31 +89,20 @@ class QueryConfig:
 
 @dataclass(frozen=True)
 class ScoringConfig:
-    # Operational default is `map` (the single best alignment per model, the same
-    # procedure for both → comparable energies). `marginal` is the principled
-    # model-evidence (free energy) and the only mode that yields ESS; `auto` is a
-    # speed hack that breaks A/B comparability (see the warning it emits).
-    # `dcalign` is the couplings-aware alignment upgrade (spec §10.9): the
-    # expensive Julia alignment runs out-of-process on the cluster and is cached
-    # on disk; the score branch reads the cache and recomputes the energy
-    # in-frame. The fields below configure that cluster-side align step.
+    # `potts_align` is the production aligner (couplings-aware gap-placement Potts
+    # minimizer; docs/POTTS_ALIGN.md) — the cluster align step is pure numpy and
+    # sharded over `n_shards`. `map` is the single best fields-Viterbi alignment
+    # per model (same procedure for both → comparable energies); `marginal` is the
+    # principled model-evidence (free energy) and the only mode that yields ESS;
+    # `auto` is a speed hack that breaks A/B comparability (see the warning it emits).
     method: str = "map"
     n_samples: int = 1000
     ess_threshold: float = 100.0
-    # DCAlign bridge (only used by method="dcalign"; None → resolve from the
-    # DCALIGN_PATH / JULIA_BINARY env vars, mirroring mpnn.path / mpnn.python).
-    dcalign_path: str | None = None
-    julia: str | None = None
-    dcalign_seed: int = 0
-    maxiter: int = 2000
-    pcount: float = 1e-3
     n_shards: int = 32
-    # Insertion-prior shape for the cluster align step (see _LAMBDA_SPECS).
-    lambda_spec: str = "flat"
-    # potts_align (method="potts_align", iter-003): the gap-placement aligner is
-    # pure numpy and runs sharded on Slurm (n_shards reused above). To bound the
-    # PT cost, the cross block where `pa_cross_subsample_origin` queries are scored
-    # under `pa_cross_subsample_under` is restricted to a seeded subset of
+    # potts_align (method="potts_align"): the gap-placement aligner is pure numpy
+    # and runs sharded on Slurm (n_shards above). To bound the PT cost, the cross
+    # block where `pa_cross_subsample_origin` queries are scored under
+    # `pa_cross_subsample_under` is restricted to a seeded subset of
     # pa_cross_subsample_n ids (0 = no subsample). The two model names must match
     # entries in `models` (checked in CombineRunConfig.from_dict, where they are
     # known). All other potts_align knobs (the g-adaptive PT schedule) are internal.
@@ -134,12 +118,6 @@ class ScoringConfig:
         _require(obj.n_samples >= 1, "scoring.n_samples must be >= 1")
         _require(obj.ess_threshold >= 0, "scoring.ess_threshold must be >= 0")
         _require(obj.n_shards >= 1, "scoring.n_shards must be >= 1")
-        _require(obj.maxiter >= 1, "scoring.maxiter must be >= 1")
-        _require(obj.pcount > 0, "scoring.pcount must be > 0")
-        _require(
-            obj.lambda_spec in _LAMBDA_SPECS,
-            f"scoring.lambda_spec must be one of {_LAMBDA_SPECS}",
-        )
         _require(obj.pa_cross_subsample_n >= 0, "scoring.pa_cross_subsample_n must be >= 0")
         if obj.pa_cross_subsample_n > 0:
             _require(

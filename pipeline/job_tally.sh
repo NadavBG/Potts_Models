@@ -4,8 +4,8 @@
 # `squeue -u $USER` is hard to eyeball once array jobs fan out: a pending
 # array shows as ONE line (e.g. 12345_[5-511]) that is really 500+ task
 # slots. This expands arrays (squeue -r) so the counts reflect actual tasks,
-# then breaks the total down by state and by job name — so the DCAlign shard
-# array vs. its gather job are tallied separately.
+# then breaks the total down by state and by job name — so a shard array vs.
+# its gather job are tallied separately.
 #
 # Usage:
 #   bash pipeline/job_tally.sh                 # one snapshot of all your jobs
