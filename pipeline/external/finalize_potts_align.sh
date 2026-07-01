@@ -13,9 +13,10 @@
 #      per-shard work/ dir to delete — potts_align writes no scratch binaries.)
 #
 # It does NOT move the cache off Midway and combine/ stays out of git. The score
-# + render step runs here (pure numpy + lab_plotting), or pull the durable cache
-# to the Mac with scripts/sync_models.sh (its generic combine excludes prune
-# shards/ + logs/ + *.tar.zst automatically). See docs/PIPELINE.md.
+# + render step then runs ON THE MAC (snakemake off the login node): pull the
+# durable cache with scripts/sync_models.sh (its generic combine excludes prune
+# shards/ + logs/ + *.tar.zst automatically), then `snakemake ... all`. See
+# docs/PIPELINE.md.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -84,6 +85,9 @@ for align in "${ALIGN_FILES[@]}"; do
     echo "  ${align}"
 done
 echo
-echo "Score + render here (pure numpy + lab_plotting), or pull to the Mac:"
+echo "Now score + render ON THE MAC (do NOT run snakemake on the login node):"
+echo "  # on the Mac, from the repo root:"
 echo "  scripts/sync_models.sh pull   # brings cache/<model>/alignments.tsv (+ meta.json)"
-echo "then run the combine pipeline — see docs/PIPELINE.md."
+echo "  snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \\"
+echo "      --config run_root=${RUN_ROOT} --cores 8 all"
+echo "(swap the --configfile for the tiny config on the tiny smoke run.) See docs/PIPELINE.md."

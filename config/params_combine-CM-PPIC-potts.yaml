@@ -6,15 +6,29 @@
 # potts_align/cache/<model>/alignments.tsv, and the Snakemake `score` rule reads
 # that cache and recomputes each energy in-frame (<=1e-6 canary).
 #
+# WHERE THINGS RUN (mirrors docs/PIPELINE.md; Mac-primary): snakemake runs ONLY
+# on the Mac. The Midway login node runs ONLY the two bash drivers below — they
+# submit sbatch jobs and validate; no snakemake, no heavy compute (good login
+# etiquette). CODE moves by git (commit/push on the Mac, the align driver pulls
+# on Midway); the gitignored combine/ + results/ DATA moves by rsync
+# (scripts/sync_models.sh) — that is the ONLY way the scored cache reaches the Mac.
+#
 #   RR=combine/combine-CM-PPIC-potts/iter-001-potts-align-eval
-#   # 1. build inputs (config_snapshot, models.json, query incl. random controls):
+#   # 1. MAC — build the pre-align inputs (config_snapshot, models.json, query
+#   #    incl. random controls). snapshot_config is its own rule, so name it.
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
 #       --config run_root=$RR --cores 8 \
 #       $RR/config_snapshot.yaml $RR/models.json $RR/query/query.fasta
-#   # 2. cluster align (login node): plan + array + afterok gather
+#   # 2. MAC — commit + push any code changes (the align driver refuses a dirty
+#   #    tree and pulls origin), then rsync the models + pre-align dir up:
+#   git add -A && git commit -m "combine potts_align: <run>" && git push
+#   scripts/sync_models.sh push
+#   # 3. MIDWAY login — plan + submit the shard array + afterok gather (NO snakemake):
 #   bash pipeline/external/run_potts_align_align.sh $RR
-#   # 3. finalize, then score+render+manifest (reads the cache):
+#   # 4. MIDWAY login — when the gather job mails END, validate + reclaim space:
 #   bash pipeline/external/finalize_potts_align.sh $RR
+#   # 5. MAC — pull the cache back, then score + render + manifest (snakemake HERE):
+#   scripts/sync_models.sh pull
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
 #       --config run_root=$RR --cores 8 all
 

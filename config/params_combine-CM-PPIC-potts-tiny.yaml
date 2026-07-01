@@ -1,20 +1,29 @@
 # Fast CLUSTER smoke test of the potts_align combine pipeline (iter-003). Unlike
-# the pure-local smoke test, this one exercises the FULL sbatch path — the same
-# run_potts_align_align.sh -> Slurm array (+ afterok gather) -> finalize -> score
-# -> render machinery the real run uses — but sized to finish in UNDER 2 MINUTES
-# and WELL UNDER 1 SU. Run it on a Midway login node:
+# a pure-local smoke test, this exercises the FULL sbatch path — the same
+# run_potts_align_align.sh -> Slurm array (+ afterok gather) -> finalize machinery
+# the real run uses — but sized to finish in UNDER 2 MINUTES and WELL UNDER 1 SU.
+# It follows the SAME Mac/Midway split as the real run (config/params_combine-
+# CM-PPIC-potts.yaml): snakemake runs ONLY on the Mac; the Midway login node runs
+# only the bash drivers (no snakemake, no heavy compute). Code moves by git; the
+# gitignored combine/ + results/ data moves by rsync (scripts/sync_models.sh).
 #
 #   RR=combine/combine-CM-PPIC-potts-tiny/iter-001-smoke   # shared-FS path, NOT /tmp:
 #                                                          # array tasks run on compute nodes
-#   # 1. build inputs (config_snapshot, models.json, query; no random controls):
+#   # 1. MAC — build the pre-align inputs (config_snapshot, models.json, query;
+#   #    no random controls). snapshot_config is its own rule, so name it.
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts-tiny.yaml \
 #       --config run_root=$RR --cores 8 \
 #       $RR/config_snapshot.yaml $RR/models.json $RR/query/query.fasta
-#   # 2. cluster align (login node): plan (n_shards=3) + 3-task array + afterok gather.
-#   #    Refuses a dirty git tree — commit first (combine/ outputs are gitignored).
+#   # 2. MAC — commit + push code (the driver refuses a dirty tree and pulls origin),
+#   #    then rsync the models + pre-align dir up:
+#   git add -A && git commit -m "combine potts_align tiny smoke" && git push
+#   scripts/sync_models.sh push
+#   # 3. MIDWAY login — plan (n_shards=3) + 3-task array + afterok gather (NO snakemake):
 #   bash pipeline/external/run_potts_align_align.sh $RR
-#   # 3. when the gather job mails END, finalize, then score+render+manifest (reads the cache):
+#   # 4. MIDWAY login — when the gather job mails END, validate + reclaim space:
 #   bash pipeline/external/finalize_potts_align.sh $RR
+#   # 5. MAC — pull the cache back, then score + render (snakemake HERE):
+#   scripts/sync_models.sh pull
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts-tiny.yaml \
 #       --config run_root=$RR --cores 8 all
 #
@@ -32,7 +41,7 @@
 # The random negative-control group is OMITTED here (n_random=0) because each
 # valid control (N<=91) is itself a ~1 min PT pair under CM; it is exercised only
 # in the real run (build_query + the random_length<=min(L) guard run cheaply in
-# phase 1 on the login node).
+# the Mac-side build-inputs step).
 #
 # To debug the shard/gather logic WITHOUT the cluster, the entrypoints are pure
 # numpy and still run locally: `run_potts_align_shard.py plan --n-shards 3` then

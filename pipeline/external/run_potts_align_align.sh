@@ -11,19 +11,22 @@
 #   <run_root>  a built combine iteration dir, e.g.
 #               combine/combine-CM-PPIC-potts/iter-001-potts-align-eval. It MUST
 #               already contain config_snapshot.yaml, models.json,
-#               query/query.fasta and query/groups.json (build the combine query
-#               first: `snakemake -s Snakefile.combine ... <run_root>/query/query.fasta`).
+#               query/query.fasta and query/groups.json — built ON THE MAC
+#               (`snakemake -s Snakefile.combine ... <run_root>/query/query.fasta`)
+#               and rsync'd up with `scripts/sync_models.sh push`.
 #   <n_shards>  optional override of scoring.n_shards from the config.
 #
 # FLAT layout: every in-scope (query, model) pair is round-robined into n_shards,
 # so the array has exactly n_shards tasks (task t = shard t; each task loads both
-# models). This is developed on Midway, so the driver refuses a dirty tree (the
-# array reads the committed working tree on the shared filesystem) but does NOT
-# pull from origin — commit here first.
+# models). The array reads the committed working tree on the shared filesystem, so
+# the driver refuses a dirty tree and fast-forwards to origin (`git pull --ff-only`)
+# — this is how code committed + pushed on the Mac reaches Midway.
 #
 # When the gather job mails END, finalize from this login node:
 #   bash pipeline/external/finalize_potts_align.sh <run_root>
-# then run the cheap score+render+manifest step (reads the cache):
+# then, ON THE MAC (not the login node — snakemake off the login), pull the cache
+# and run the cheap score+render+manifest step (reads the cache):
+#   scripts/sync_models.sh pull
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
 #       --config run_root=<run_root> --cores 8 all
 
@@ -49,16 +52,23 @@ for f in "${SHARD_JOB}" "${GATHER_JOB}"; do
     [[ -f "${f}" ]] || { echo "ERROR: missing sbatch script: ${f}" >&2; exit 2; }
 done
 
-# Repo + clean-tree check. The array runs the committed working tree on the shared
-# FS; refuse a dirty *code* tree so the run is reproducible from a commit (combine/
-# outputs are gitignored). No origin pull — code is developed on Midway.
+# Repo + git sync. The array runs the committed working tree on the shared FS, so
+# refuse a dirty *code* tree (combine/ outputs are gitignored) and fast-forward to
+# origin — this is how code edited on the Mac (committed + pushed there) reaches
+# Midway. No julia module is loaded here, so git's HTTPS CA bundle stays intact.
 REPO_DIR="$(git -C "${RUN_ROOT}" rev-parse --show-toplevel)"
 if [[ -n "$(git -C "${REPO_DIR}" status --porcelain)" ]]; then
-    echo "FATAL: working tree is dirty; commit first so the array runs a reproducible HEAD." >&2
-    echo "  Run 'git -C ${REPO_DIR} status' and commit/stash." >&2
+    echo "FATAL: working tree is dirty; refuse to submit (reproduce-on-Midway needs a clean HEAD)." >&2
+    echo "  Commit/stash on Midway, or — if you edited on the Mac — commit + push there, then re-run." >&2
     exit 7
 fi
-echo "repo=${REPO_DIR} HEAD=$(git -C "${REPO_DIR}" rev-parse --short HEAD) ($(git -C "${REPO_DIR}" rev-parse --abbrev-ref HEAD))"
+BRANCH="$(git -C "${REPO_DIR}" rev-parse --abbrev-ref HEAD)"
+git -C "${REPO_DIR}" fetch --quiet origin
+if ! git -C "${REPO_DIR}" pull --ff-only --quiet origin "${BRANCH}"; then
+    echo "FATAL: git pull --ff-only failed (diverged from origin/${BRANCH}?); reconcile then re-run." >&2
+    exit 7
+fi
+echo "git sync: repo=${REPO_DIR} HEAD=$(git -C "${REPO_DIR}" rev-parse --short HEAD) (${BRANCH})"
 
 VENV="${REPO_DIR}/.venv"
 [[ -f "${VENV}/bin/activate" ]] || { echo "ERROR: no venv at ${VENV}" >&2; exit 3; }
@@ -112,6 +122,7 @@ echo "  sacct -j ${ARRAY_JID},${GATHER_JID} -X --format=JobID,JobName,Elapsed,St
 echo
 echo "when gather mails END, finalize from this login node:"
 echo "  bash ${SCRIPT_DIR}/finalize_potts_align.sh ${RUN_ROOT}"
-echo "then run the cheap score+render+manifest step:"
+echo "then, ON THE MAC (not the login node), pull the cache and score+render:"
+echo "  scripts/sync_models.sh pull"
 echo "  snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \\"
 echo "      --config run_root=${RUN_ROOT} --cores 8 all"
