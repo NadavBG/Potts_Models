@@ -90,6 +90,24 @@ if cfg.scoring.method == "dcalign":
     if cfg.figures.enabled:
         DCALIGN_BASELINE_OUTPUTS += [DCALIGN_BASELINE_FIG, DCALIGN_CONV_FIG]
 
+# potts_align ground-state-recovery baseline (only when method=potts_align, which
+# has a cluster cache). The potts_align analogue of the dcalign baseline: per
+# home pair, potts_align's minimum energy vs the native in-frame energy. A native
+# gap placement is itself a frame the minimizer searches, so ΔE<=0 is expected —
+# the figure reads out how often the native frame already IS the ground state.
+POTTS_BASELINE_TSV      = f"{RUN_ROOT}/data/potts_align_vs_inframe.tsv"
+POTTS_BASELINE_JSON     = f"{RUN_ROOT}/data/potts_align_vs_inframe.json"
+POTTS_BASELINE_MANIFEST = f"{RUN_ROOT}/provenance/potts_align_vs_inframe_manifest.json"
+POTTS_BASELINE_FIG      = f"{RUN_ROOT}/figs/potts_align_vs_inframe.pdf"
+
+POTTS_BASELINE_OUTPUTS = []
+if cfg.scoring.method == "potts_align":
+    POTTS_BASELINE_OUTPUTS = [
+        POTTS_BASELINE_TSV, POTTS_BASELINE_JSON, POTTS_BASELINE_MANIFEST,
+    ]
+    if cfg.figures.enabled:
+        POTTS_BASELINE_OUTPUTS += [POTTS_BASELINE_FIG]
+
 
 # ── Aggregate target ──────────────────────────────────────────────────────
 rule all:
@@ -101,6 +119,7 @@ rule all:
         SCORES,
         *([ENERGY_FIG] if cfg.figures.enabled else []),
         *DCALIGN_BASELINE_OUTPUTS,
+        *POTTS_BASELINE_OUTPUTS,
         RUN_MANIFEST,
 
 
@@ -239,6 +258,32 @@ if cfg.scoring.method == "dcalign":
             "scripts/wf/run_dcalign_convergence.py"
 
 
+# ── potts_align ground-state-recovery baseline (only when method=potts_align) ──
+if cfg.scoring.method == "potts_align":
+
+    rule potts_align_baseline:
+        input:
+            models=MODELS_JSON,
+            fasta=QUERY_FASTA,
+            groups=QUERY_GROUPS,
+            scores=SCORES,  # orders after scoring; the cache must be present by then
+        output:
+            tsv=POTTS_BASELINE_TSV,
+            summary=POTTS_BASELINE_JSON,
+            manifest=POTTS_BASELINE_MANIFEST,
+            **({"fig": POTTS_BASELINE_FIG} if cfg.figures.enabled else {}),
+        params:
+            run_root=RUN_ROOT,
+        log:
+            f"{RUN_ROOT}/logs/potts_align_baseline.log"
+        threads: 1
+        resources:
+            mem_mb=4000,
+            runtime=30,
+        script:
+            "scripts/wf/run_potts_align_baseline.py"
+
+
 # ── Aggregate run manifest (last) ────────────────────────────────────────
 rule run_manifest:
     input:
@@ -247,6 +292,7 @@ rule run_manifest:
         SCORES,
         *([ENERGY_FIG] if cfg.figures.enabled else []),
         *DCALIGN_BASELINE_OUTPUTS,
+        *POTTS_BASELINE_OUTPUTS,
     output:
         RUN_MANIFEST,
     params:
