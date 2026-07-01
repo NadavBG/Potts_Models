@@ -61,6 +61,17 @@ Per-pair cost is set by the schedule, **not** by `g` (§6.8): ~instant for `g �
 is what brings it to ~100.) Embarrassingly parallel over pairs → **~12 min on a
 500-task array.** `query.cap_per_group` can shrink it further if wanted.
 
+> **Measured cost correction (2026-06-30, Midway wiring).** The per-pair rate above
+> (~32 s for a `g=4..12` PT pair) was the Mac estimate; a caslake core measured
+> **~74 s** for a `g=5` PT pair (~2× slower). At that rate the fixed PT work (home
+> CM/PPIC + CM→PPIC cross + random→CM) is ~53 core-h and each subsampled PPIC→CM
+> pair costs ~0.02 core-h, so `pa_cross_subsample_n` was cut from 8000 to **2000**
+> to hold the run near **~94 SU** (2000 cross points is still plenty to see the
+> PPIC-under-CM cluster). The shipped config
+> (`config/params_combine-CM-PPIC-potts.yaml`) uses `pa_cross_subsample_n: 2000`,
+> `n_shards: 128` (≈0.75 h/shard, 3 h wall). Raise the subsample for a denser cross
+> cloud at proportionally more SU.
+
 ## Mac-side code to add (portable; no Slurm) — implement these first
 
 1. **`src/SBM/energy/score.py`** — add `"potts_align"` to `METHODS` and a branch:

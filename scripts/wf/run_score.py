@@ -50,6 +50,13 @@ if cfg.scoring.method == "dcalign":
     run_root = snakemake.params.run_root  # noqa: F821
     argv += ["--dcalign-cache", str(Path(run_root) / "dcalign" / "cache")]
 
+# potts_align likewise reads a cluster-built cache under <run_root>/potts_align/cache
+# (pipeline/external/run_potts_align_align.sh); the score step recomputes each
+# energy in-frame as a canary and writes the tidy scores.tsv.
+if cfg.scoring.method == "potts_align":
+    run_root = snakemake.params.run_root  # noqa: F821
+    argv += ["--potts-align-cache", str(Path(run_root) / "potts_align" / "cache")]
+
 rc = score_two_models.main(argv)
 if rc:
     raise SystemExit(rc)

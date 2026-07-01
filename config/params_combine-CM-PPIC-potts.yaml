@@ -1,0 +1,60 @@
+# Two-model combine run scored with potts_align — the couplings-aware
+# gap-placement aligner that returns the global insert-free Potts-energy minimum
+# (iter-003; docs/POTTS_ALIGN.md + docs/ITER003_RUNBOOK.md). Pure numpy — NO
+# DCAlign, NO Julia. The heavy compute is sharded on a Slurm array
+# (pipeline/external/run_potts_align_align.sh); the gather writes
+# potts_align/cache/<model>/alignments.tsv, and the Snakemake `score` rule reads
+# that cache and recomputes each energy in-frame (<=1e-6 canary).
+#
+#   RR=combine/combine-CM-PPIC-potts/iter-001-potts-align-eval
+#   # 1. build inputs (config_snapshot, models.json, query incl. random controls):
+#   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
+#       --config run_root=$RR --cores 4 \
+#       $RR/config_snapshot.yaml $RR/models.json $RR/query/query.fasta
+#   # 2. cluster align (login node): plan + array + afterok gather
+#   bash pipeline/external/run_potts_align_align.sh $RR
+#   # 3. finalize, then score+render+manifest (reads the cache):
+#   bash pipeline/external/finalize_potts_align.sh $RR
+#   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
+#       --config run_root=$RR --cores 4 all
+
+run_name: combine-CM-PPIC-potts
+description: Cross-score CM and PPIC under both models via potts_align gap-placement minimization
+seed: 42
+omp_num_threads: null
+
+models:                        # exactly two; E_tot = w_A*E_A + w_B*E_B
+  - name: CM-bm-dense          # L=96
+    run_dir: results/CM-bm-dense/iter-002-base-model
+    weight: 1.0
+  - name: PPIC-dense           # L=91
+    run_dir: results/PPIC-dense/iter-001-baseline
+    weight: 1.0
+
+query:
+  source: model_sets
+  include: [natural]           # naturals only (synthetics excluded per the SU budget)
+  cap_per_group: 0             # full sets; cost is bounded by the cross-subsample, not capping
+  n_random: 500                # random negative-control group (group "random/N91")
+  random_length: 91            # length N (=PPIC L; g=0 under PPIC in-frame, g=5 under CM)
+
+scoring:
+  method: potts_align
+  # Slurm array size. Measured cost ~74 s per g>=4 PT pair on a caslake core
+  # (~2x the docs' Mac estimate). Fixed PT work (home CM/PPIC + CM->PPIC cross +
+  # random->CM) ~= 53 core-h; the 2000-pair PPIC->CM cross adds ~41 -> ~94 core-h
+  # total. 128 shards ≈ ~0.75 h/shard (3 h wall limit leaves ample margin).
+  n_shards: 128
+  # PPIC->CM cross is the cost driver (all g>=5 -> PT). Seeded-subsample it to 2000
+  # to hold the run near ~100 SU (still thousands of points for the cluster figure;
+  # raise it for a denser cross cloud at proportionally more SU).
+  pa_cross_subsample_origin: PPIC-dense   # queries whose cross block is capped
+  pa_cross_subsample_under: CM-bm-dense   # the model they are scored under
+  pa_cross_subsample_n: 2000
+  # n_samples / ess_threshold unused by potts_align (kept for schema completeness).
+  n_samples: 1000
+  ess_threshold: 100.0
+  # dcalign_* / lambda_spec / maxiter / pcount omitted -> defaults; unused (NO DCAlign).
+
+figures:
+  enabled: true

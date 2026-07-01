@@ -54,6 +54,21 @@ SCORE_MANIFEST = f"{RUN_ROOT}/provenance/score_manifest.json"
 ENERGY_FIG     = f"{RUN_ROOT}/figs/two_model_energy.pdf"
 RUN_MANIFEST   = f"{RUN_ROOT}/provenance/run_manifest.json"
 
+# potts_align cluster cache (only for method=potts_align). The Slurm gather writes
+# <model>/alignments.tsv here out-of-process; the score rule reads it (an external
+# DAG input, exactly like the dcalign cache) and recomputes energies in-frame.
+POTTS_ALIGN_CACHE = f"{RUN_ROOT}/potts_align/cache"
+
+
+def _score_potts_cache_inputs():
+    """Declare the per-model potts_align cache as an input to `score` when that is
+    the method, so Snakemake refuses to score until the cluster align+gather has
+    filled the cache (makes the two-phase dependency explicit in the DAG)."""
+    if cfg.scoring.method != "potts_align":
+        return {}
+    return {f"pa_cache_{i}": f"{POTTS_ALIGN_CACHE}/{m.name}/alignments.tsv"
+            for i, m in enumerate(cfg.models)}
+
 # DCAlign diagnostics (only meaningful for method=dcalign, which has a cache).
 # Figures are gated on figures.enabled like the energy figure.
 DCALIGN_BASELINE_TSV      = f"{RUN_ROOT}/data/dcalign_vs_inframe.tsv"
@@ -140,6 +155,7 @@ rule score:
         models=MODELS_JSON,
         fasta=QUERY_FASTA,
         groups=QUERY_GROUPS,
+        **_score_potts_cache_inputs(),
     output:
         scores=SCORES,
         detail=SCORES_DETAIL,

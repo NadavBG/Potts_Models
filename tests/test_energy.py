@@ -451,6 +451,95 @@ def test_dcalign_cache_write_read_round_trip(tmp_path):
     assert back["s3"].used_decimation and back["s3"].n_iter == 5000
 
 
+# ── potts_align scoring branch (iter-003) ─────────────────────────────────
+
+
+def test_potts_align_branch_matches_enumerate():
+    """method='potts_align' returns the exact global insert-free Potts minimum.
+
+    On a small model the whole C(L,N) space is enumerated, so the score branch
+    must equal ``enumerate_align`` (the oracle) exactly, and flag it exact.
+    """
+    from SBM.energy.potts_align import enumerate_align
+
+    model = make_model(6, seed=204)
+    raw = np.array([2, 4, 6, 8], dtype=np.int64)  # N=4, L=6 -> g=2, C(6,4)=15 frames
+    res = score_sequence(raw, model, method="potts_align", seed=0)
+    oracle = enumerate_align(raw, model)
+    assert res.method == "potts_align"
+    assert np.isclose(res.energy, oracle.best_energy, atol=1e-9)
+    assert "engine=enumerate" in res.notes and "exact=True" in res.notes
+    # representative_alignment is a length-L frame with exactly N non-gap residues
+    assert len(res.representative_alignment) == model.L
+    assert res.representative_alignment.count("-") == model.L - raw.size
+
+
+def test_potts_align_g0_equals_in_frame():
+    """A length-L query (g=0) enumerates a single frame == the in-frame energy."""
+    model = make_model(6, seed=205)
+    S = np.random.default_rng(9).integers(1, Q, size=model.L)  # residues 1..20, no gaps
+    e_pa = score_sequence(S, model, method="potts_align", seed=3).energy
+    e_inf = score_sequence(S, model, method="in_frame").energy
+    assert np.isclose(e_pa, e_inf, atol=1e-9)
+
+
+def test_potts_align_is_deterministic_per_seed():
+    """Same seed -> identical energy (pure numpy, thread-independent)."""
+    model = make_model(6, seed=206)
+    raw = np.array([1, 3, 5, 7, 9], dtype=np.int64)  # N=5, g=1
+    a = score_sequence(raw, model, method="potts_align", seed=11).energy
+    b = score_sequence(raw, model, method="potts_align", seed=11).energy
+    assert a == b
+
+
+def test_potts_align_requires_seed():
+    model = make_model(5, seed=207)
+    with pytest.raises(ValueError, match="seed"):
+        score_sequence(np.array([2, 4, 6]), model, method="potts_align")
+
+
+def test_potts_align_rejects_gapped_and_N_gt_L():
+    model = make_model(4, seed=208)
+    with pytest.raises(ValueError, match="gap-free"):
+        score_sequence(np.array([2, 0, 6]), model, method="potts_align", seed=1)
+    with pytest.raises(ValueError, match="N<=L"):
+        score_sequence(np.array([2, 4, 6, 8, 10]), model, method="potts_align", seed=1)
+
+
+def test_potts_align_cache_round_trip(tmp_path):
+    """write_alignment_cache round-trips; skip rows (nan/empty frame) parse; dups raise."""
+    from SBM.utils.potts_align_cache import (
+        PottsAlignCacheResult,
+        read_potts_align_cache,
+        read_shard_cache,
+        write_alignment_cache,
+    )
+
+    rows = [
+        PottsAlignCacheResult("qA", "CM", 93, 3, -251.8598621, "enumerate", True, "-TAEN", 42),
+        PottsAlignCacheResult("qB", "CM", 91, 5, -21.9, "pt", False, "MVWFK", 45),
+        PottsAlignCacheResult("qC", "PPIC", 95, -4, float("nan"), "skip_NgtL", False, "", 0),
+    ]
+    out = tmp_path / "alignments.tsv"
+    write_alignment_cache(out, rows)
+    by_id = read_potts_align_cache(out)
+    assert set(by_id) == {"qA", "qB", "qC"}
+    assert by_id["qA"].energy == -251.8598621 and by_id["qA"].is_global_exact and by_id["qA"].ok
+    assert by_id["qB"].engine == "pt" and not by_id["qB"].is_global_exact
+    assert not by_id["qC"].ok and np.isnan(by_id["qC"].energy) and by_id["qC"].engine == "skip_NgtL"
+
+    shard = read_shard_cache(out)  # keyed by (query_id, model)
+    assert ("qA", "CM") in shard and ("qC", "PPIC") in shard
+
+    dup = tmp_path / "dup.tsv"
+    dup.write_text(
+        "qA\tCM\t5\t0\t-1.0\tenumerate\ttrue\tACDEF\t1\n"
+        "qA\tCM\t5\t0\t-1.0\tenumerate\ttrue\tACDEF\t1\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        read_potts_align_cache(dup)
+
+
 # ── DCAlign-vs-in-frame baseline (SBM.energy.dcalign_baseline) ─────────────
 
 

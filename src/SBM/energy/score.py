@@ -16,6 +16,11 @@ single energy:
   (:mod:`SBM.utils.dcalign_score`); this branch is a thin cache-reader that
   recomputes the energy in-frame on the cached frame, so it stays pure (no Julia
   here) and gauge-consistent with ``map``/``in_frame``.
+- ``"potts_align"`` — couplings-aware gap-placement aligner (iter-003, spec
+  ``docs/POTTS_ALIGN.md``). Minimizes the exact in-frame Potts energy over the
+  ``C(L, N)`` insert-free frames (exact enumeration for few gaps, else parallel
+  tempering) and returns the global-minimum frame. Pure numpy; requires a raw
+  gap-free ``seq`` with ``N <= L`` and an explicit ``seed``.
 
 Energies are only comparable / additive across models in a fixed gauge; both
 models are loaded in the zero-sum gauge (see :mod:`SBM.energy.model`).
@@ -33,10 +38,11 @@ from .encoding import GAP, ints_to_seq, seq_to_ints
 from .hmm import ProfileHMM
 from .model import PottsModel
 from .potts import potts_energies, potts_energy
+from .potts_align import potts_align
 
 log = logging.getLogger(__name__)
 
-METHODS = ("in_frame", "map", "marginal", "dcalign")
+METHODS = ("in_frame", "map", "marginal", "dcalign", "potts_align")
 DEFAULT_N_SAMPLES = 1000
 DEFAULT_ESS_THRESHOLD = 100.0
 
@@ -122,7 +128,10 @@ def score_sequence(
     requires an explicit ``seed`` for reproducibility. For ``"dcalign"`` ``seq``
     is ignored and ``dcalign_frame`` (a length-``L`` amino-acid frame string, gap
     ``-``, from the on-disk DCAlign cache) is required; the energy is recomputed
-    in-frame on that frame, so this branch is pure (no Julia call here).
+    in-frame on that frame, so this branch is pure (no Julia call here). For
+    ``"potts_align"`` ``seq`` is a raw gap-free query with ``N <= L`` and an
+    explicit ``seed`` is required; the energy is the global insert-free Potts
+    minimum found by :func:`SBM.energy.potts_align.potts_align`.
     """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
@@ -158,6 +167,33 @@ def score_sequence(
             energy=energy, method="dcalign", model_name=model.name,
             gauge=model.gauge, model_sha256=model.sha256,
             representative_alignment=ints_to_seq(frame), notes=notes,
+        )
+
+    if method == "potts_align":
+        # Couplings-aware gap-placement minimization (iter-003, docs/POTTS_ALIGN.md):
+        # return the global insert-free Potts-energy minimum frame. Pure numpy; the
+        # dispatcher enumerates exactly for few gaps and falls back to g-adaptive
+        # parallel tempering otherwise. seq is a raw gap-free query with N <= L.
+        # (The checks below duplicate potts_align's own _validate_query for a
+        # clearer score-layer error; potts_align re-enforces as defense in depth.)
+        if seed is None:
+            raise ValueError("method='potts_align' requires an explicit seed (reproducibility)")
+        if seq.size and np.any(seq == GAP):
+            raise ValueError(
+                "method='potts_align' needs a gap-free raw query (residues 1..20); the input "
+                "contains gaps. Strip them first with SBM.energy.encoding.strip_gaps."
+            )
+        if seq.size > model.L:
+            raise ValueError(
+                f"method='potts_align' needs N<=L (insert-free); N={seq.size} > L={model.L} "
+                f"for model {model.name!r}. N>L pairs need insertions and are out of scope."
+            )
+        res = potts_align(seq, model, seed=seed)
+        return ScoreResult(
+            energy=res.best_energy, method="potts_align", model_name=model.name,
+            gauge=model.gauge, model_sha256=model.sha256, seed=seed,
+            representative_alignment=ints_to_seq(res.best_frame),
+            notes=f"global Potts-min; engine={res.method}; exact={res.is_global_exact}",
         )
 
     if hmm is None:

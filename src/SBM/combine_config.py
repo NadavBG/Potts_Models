@@ -23,7 +23,7 @@ SCHEMA_VERSION = 1
 
 _QUERY_SOURCES = ("model_sets", "fasta")
 _INCLUDE = ("natural", "synthetic")
-_METHODS = ("auto", "in_frame", "map", "marginal", "dcalign")
+_METHODS = ("auto", "in_frame", "map", "marginal", "dcalign", "potts_align")
 # DCAlign insertion prior Λ (only used by method="dcalign"). "flat" = the original
 # geometry-blind prior (mass on Δn=1 for every (i,j)); "deltan" = the empirical
 # per-(i,j) prior built from each model's own seed MSA via DCAlign.deltan_prior
@@ -64,6 +64,12 @@ class QueryConfig:
     # marginal scoring on large natural MSAs (e.g. the ~26k-seq PPIC alignment);
     # the subsample is seeded with the run seed and the drop is logged.
     cap_per_group: int = 500
+    # potts_align negative control (iter-003): n_random random length-random_length
+    # sequences (residues 1..20 uniform iid, seeded from the run seed), appended as
+    # group "random/N91" with origin_model="" by build_query (scored under both
+    # models). 0 = none. random_length must be <= min model L to score under both.
+    n_random: int = 0
+    random_length: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "QueryConfig":
@@ -75,6 +81,12 @@ class QueryConfig:
         bad = set(obj.include) - set(_INCLUDE)
         _require(not bad, f"query.include has unknown value(s) {sorted(bad)}; allowed: {_INCLUDE}")
         _require(obj.cap_per_group >= 0, "query.cap_per_group must be >= 0 (0 = no cap)")
+        _require(obj.n_random >= 0, "query.n_random must be >= 0 (0 = no control group)")
+        _require(obj.random_length >= 0, "query.random_length must be >= 0")
+        _require(
+            obj.n_random == 0 or obj.random_length > 0,
+            "query.n_random > 0 requires query.random_length > 0",
+        )
         if obj.source == "fasta":
             _require(bool(obj.fasta), "query.source='fasta' requires query.fasta")
         return obj
@@ -103,6 +115,16 @@ class ScoringConfig:
     n_shards: int = 32
     # Insertion-prior shape for the cluster align step (see _LAMBDA_SPECS).
     lambda_spec: str = "flat"
+    # potts_align (method="potts_align", iter-003): the gap-placement aligner is
+    # pure numpy and runs sharded on Slurm (n_shards reused above). To bound the
+    # PT cost, the cross block where `pa_cross_subsample_origin` queries are scored
+    # under `pa_cross_subsample_under` is restricted to a seeded subset of
+    # pa_cross_subsample_n ids (0 = no subsample). The two model names must match
+    # entries in `models` (checked in CombineRunConfig.from_dict, where they are
+    # known). All other potts_align knobs (the g-adaptive PT schedule) are internal.
+    pa_cross_subsample_origin: str | None = None
+    pa_cross_subsample_under: str | None = None
+    pa_cross_subsample_n: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ScoringConfig":
@@ -118,6 +140,13 @@ class ScoringConfig:
             obj.lambda_spec in _LAMBDA_SPECS,
             f"scoring.lambda_spec must be one of {_LAMBDA_SPECS}",
         )
+        _require(obj.pa_cross_subsample_n >= 0, "scoring.pa_cross_subsample_n must be >= 0")
+        if obj.pa_cross_subsample_n > 0:
+            _require(
+                bool(obj.pa_cross_subsample_origin) and bool(obj.pa_cross_subsample_under),
+                "scoring.pa_cross_subsample_n > 0 requires both pa_cross_subsample_origin "
+                "and pa_cross_subsample_under (the cross block's origin and scored-under model names)",
+            )
         return obj
 
 
@@ -170,6 +199,13 @@ class CombineRunConfig:
                 kwargs[key] = sub_cls.from_dict(data[key])
         obj = cls(models=models, **kwargs)
         _require(bool(obj.run_name), "config.run_name must be non-empty")
+        # potts_align cross-subsample model names must reference real models (the
+        # ScoringConfig validator can't see the model list; check it here).
+        if obj.scoring.method == "potts_align" and obj.scoring.pa_cross_subsample_n > 0:
+            valid = {m.name for m in obj.models}
+            for fld in ("pa_cross_subsample_origin", "pa_cross_subsample_under"):
+                nm = getattr(obj.scoring, fld)
+                _require(nm in valid, f"scoring.{fld}={nm!r} must be one of model names {sorted(valid)}")
         return obj
 
 

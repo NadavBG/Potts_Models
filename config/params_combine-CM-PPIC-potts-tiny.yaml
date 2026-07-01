@@ -1,0 +1,49 @@
+# Fast smoke test of the potts_align combine pipeline (iter-003). A tiny query
+# set (2 naturals/group + 2 random controls, cross-subsample 1, 2 shards) that
+# runs the WHOLE potts_align path locally in a few minutes — no cluster needed:
+#
+#   RR=/tmp/RRtiny
+#   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts-tiny.yaml \
+#       --config run_root=$RR --cores 4 \
+#       $RR/config_snapshot.yaml $RR/models.json $RR/query/query.fasta   # build inputs
+#   python scripts/wf/run_potts_align_shard.py plan --run-root $RR --n-shards 2
+#   python scripts/wf/run_potts_align_shard.py run  --run-root $RR --shard 0
+#   python scripts/wf/run_potts_align_shard.py run  --run-root $RR --shard 1
+#   python scripts/wf/run_potts_align_gather.py --run-root $RR          # gather + gates
+#   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts-tiny.yaml \
+#       --config run_root=$RR --cores 4 all                             # score + render
+#
+# The real run uses config/params_combine-CM-PPIC-potts.yaml (full naturals +
+# 500 controls, ~200 core-h on a 192-task Slurm array via run_potts_align_align.sh).
+
+run_name: combine-CM-PPIC-potts-tiny
+description: Smoke test of the potts_align combine pipeline (tiny query set)
+seed: 42
+omp_num_threads: null
+
+models:                        # exactly two; E_tot = w_A*E_A + w_B*E_B
+  - name: CM-bm-dense          # L=96
+    run_dir: results/CM-bm-dense/iter-002-base-model
+    weight: 1.0
+  - name: PPIC-dense           # L=91
+    run_dir: results/PPIC-dense/iter-001-baseline
+    weight: 1.0
+
+query:
+  source: model_sets
+  include: [natural]
+  cap_per_group: 2             # tiny: 2 naturals per model
+  n_random: 2                  # 2 random negative controls
+  random_length: 91
+
+scoring:
+  method: potts_align
+  n_shards: 2
+  pa_cross_subsample_origin: PPIC-dense
+  pa_cross_subsample_under: CM-bm-dense
+  pa_cross_subsample_n: 1      # tiny: cap the cross block to 1 id
+  n_samples: 1000              # unused by potts_align
+  ess_threshold: 100.0         # unused
+
+figures:
+  enabled: true

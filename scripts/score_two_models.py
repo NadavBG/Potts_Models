@@ -32,6 +32,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+import math
 from pathlib import Path
 
 import numpy as np
@@ -42,8 +43,10 @@ from SBM.energy.datasets import QueryRecord
 from SBM.energy.encoding import ints_to_seq, seq_to_ints, strip_gaps
 from SBM.energy.hmm import ProfileHMM
 from SBM.energy.model import PottsModel, load_model, load_seed_msa, seed_msa_path
+from SBM.energy.potts import potts_energy
 from SBM.energy.score import DEFAULT_ESS_THRESHOLD, DEFAULT_N_SAMPLES, ScoreResult, score_sequence
 from SBM.utils.dcalign_score import DCAlignResult, read_alignment_cache
+from SBM.utils.potts_align_cache import PottsAlignCacheResult, read_potts_align_cache
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +88,7 @@ def _score_one(
     seed: int | None,
     ess_threshold: float,
     dcalign_result: DCAlignResult | None = None,
+    potts_align_result: PottsAlignCacheResult | None = None,
 ) -> ScoreResult:
     resolved = _method_for(record, model, method)
     if resolved == "in_frame":
@@ -108,6 +112,49 @@ def _score_one(
             strip_gaps(record.ints), model, method="dcalign",
             dcalign_frame=dcalign_result.aligned_frame, dcalign_notes=notes,
         )
+    if resolved == "potts_align":
+        raw = strip_gaps(record.ints)
+        # CACHE path: the expensive minimization ran out-of-process on the cluster.
+        # Read its frame + energy and recompute the energy in-frame as a canary
+        # (the standing gauge/handoff check, mirroring the dcalign branch).
+        if potts_align_result is not None:
+            # A skip row (empty frame, nan energy) marks a pair the cluster did not
+            # score — out of scope (N>L) or excluded by the cross-subsample. Surface
+            # it as a NaN row (dropped from the figure) rather than recomputing.
+            if not potts_align_result.ok:
+                return ScoreResult(
+                    energy=float("nan"), method="potts_align", model_name=model.name,
+                    gauge=model.gauge, model_sha256=model.sha256, seed=potts_align_result.seed,
+                    notes=f"skipped ({potts_align_result.engine or 'no frame'})",
+                )
+            frame = seq_to_ints(potts_align_result.frame)
+            if frame.size != model.L:
+                raise ValueError(
+                    f"cached potts_align frame length {frame.size} != model L={model.L} "
+                    f"for {record.id!r} under {model.name!r}"
+                )
+            energy = potts_energy(frame, model)
+            if not math.isclose(energy, potts_align_result.energy, abs_tol=1e-6):
+                raise ValueError(
+                    f"potts_align cache CANARY failed for {record.id!r} under {model.name!r}: "
+                    f"in-frame recompute {energy:.10g} != cached {potts_align_result.energy:.10g} "
+                    f"(|Δ|={abs(energy - potts_align_result.energy):.3g} > 1e-6)"
+                )
+            notes = (f"global Potts-min (cluster cache); engine={potts_align_result.engine}; "
+                     f"exact={potts_align_result.is_global_exact}")
+            return ScoreResult(
+                energy=energy, method="potts_align", model_name=model.name,
+                gauge=model.gauge, model_sha256=model.sha256, seed=potts_align_result.seed,
+                representative_alignment=potts_align_result.frame, notes=notes,
+            )
+        # LIVE path: out-of-scope (N>L) → NaN skip row; else recompute directly.
+        if raw.size > model.L:
+            return ScoreResult(
+                energy=float("nan"), method="potts_align", model_name=model.name,
+                gauge=model.gauge, model_sha256=model.sha256, seed=seed,
+                notes="N>L: insertions needed, out of scope",
+            )
+        return score_sequence(raw, model, method="potts_align", seed=seed)
     raw = strip_gaps(record.ints)
     return score_sequence(
         raw, model, method=resolved, hmm=hmm,
@@ -129,6 +176,23 @@ def _load_dcalign_caches(
             )
         caches[name] = read_alignment_cache(tsv)
         log.info("loaded %d DCAlign alignments for model %r from %s", len(caches[name]), name, tsv)
+    return caches
+
+
+def _load_potts_align_caches(
+    cache_dir: Path, model_names: list[str]
+) -> dict[str, dict[str, PottsAlignCacheResult]]:
+    """Load each model's ``<cache_dir>/<model>/alignments.tsv`` (keyed by query_id)."""
+    caches: dict[str, dict[str, PottsAlignCacheResult]] = {}
+    for name in model_names:
+        tsv = cache_dir / name / "alignments.tsv"
+        if not tsv.is_file():
+            raise FileNotFoundError(
+                f"potts_align cache for model {name!r} not found at {tsv}. Run the align "
+                "step (pipeline/external/run_potts_align_align.sh) before scoring."
+            )
+        caches[name] = read_potts_align_cache(tsv)
+        log.info("loaded %d potts_align alignments for model %r from %s", len(caches[name]), name, tsv)
     return caches
 
 
@@ -172,6 +236,30 @@ def _dcalign_manifest_block(rows: list[dict], args, model_A: PottsModel, model_B
     return block
 
 
+def _potts_align_manifest_block(rows: list[dict], args, model_A: PottsModel, model_B: PottsModel) -> dict:
+    """Per-model potts_align cache provenance + the in-frame recompute canary.
+
+    ``agreement`` is max/median ``|in-frame recompute − the cluster's cached
+    energy|`` over the scored rows — the gauge/handoff canary (a value > 1e-6
+    would already have raised in ``_score_one``). ``meta`` is the per-model
+    cache ``meta.json`` (``_load_dcalign_meta`` just reads ``<cache>/<model>/meta.json``).
+    """
+    block: dict = {"cache_dir": str(args.potts_align_cache), "models": {}}
+    for model in (model_A, model_B):
+        diffs = [r["_potts_abs_diff"] for r in rows
+                 if r["model"] == model.name and "_potts_abs_diff" in r]
+        agreement = None
+        if diffs:
+            arr = np.asarray(diffs, dtype=float)
+            agreement = {"max_abs_diff": float(arr.max()),
+                         "median_abs_diff": float(np.median(arr)), "n": int(arr.size)}
+        block["models"][model.name] = {
+            "meta": _load_dcalign_meta(args.potts_align_cache, model.name),
+            "agreement": agreement,
+        }
+    return block
+
+
 def _records_from_args(args: argparse.Namespace) -> list[QueryRecord]:
     if args.seq is not None:
         return [QueryRecord(id="query", group="query", origin_model="", ints=seq_to_ints(args.seq))]
@@ -197,9 +285,15 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("--seq", default=None, help="a single amino-acid sequence (ungapped or gapped)")
     src.add_argument("--fasta", type=Path, default=None, help="FASTA of sequences to score (mixed lengths allowed)")
     parser.add_argument("--groups", type=Path, default=None, help="groups.json sidecar (origin model per id)")
-    parser.add_argument("--method", choices=["auto", "in_frame", "map", "marginal", "dcalign"], default="marginal")
+    parser.add_argument("--method",
+                        choices=["auto", "in_frame", "map", "marginal", "dcalign", "potts_align"],
+                        default="marginal")
     parser.add_argument("--dcalign-cache", type=Path, default=None,
                         help="for --method dcalign: dir holding <model>/alignments.tsv (combine/<run>/dcalign/cache)")
+    parser.add_argument("--potts-align-cache", type=Path, default=None,
+                        help="for --method potts_align: dir holding <model>/alignments.tsv "
+                             "(combine/<run>/potts_align/cache). If set, read cached frames+energies "
+                             "(the cluster-gather path); if omitted, recompute LIVE in-process.")
     parser.add_argument("--weights", type=float, nargs=2, default=(1.0, 1.0), metavar=("W_A", "W_B"))
     parser.add_argument("--n-samples", type=int, default=DEFAULT_N_SAMPLES, help="IS samples for marginal")
     parser.add_argument("--seed", type=int, default=None, help="master seed (required for marginal)")
@@ -213,9 +307,14 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    needs_seed = args.method in ("marginal", "auto")
+    # marginal/auto need a seed for the IS draws; potts_align needs one on the
+    # LIVE path (per-pair seeds derive from it). The cache path reads the seed
+    # the cluster used from each row, so no master seed is required there.
+    needs_seed = args.method in ("marginal", "auto") or (
+        args.method == "potts_align" and args.potts_align_cache is None
+    )
     if needs_seed and args.seed is None:
-        parser.error(f"--method {args.method} can run the marginal estimator; pass --seed for reproducibility")
+        parser.error(f"--method {args.method} needs --seed for reproducibility")
     if args.method == "auto":
         log.warning(
             "method='auto' scores a sequence under its HOME model with its original MSA "
@@ -229,6 +328,12 @@ def main(argv: list[str] | None = None) -> int:
     model_B, hmm_B = _build_model(args.model_b, args.name_b, args.seed_msa_b)
     w_A, w_B = args.weights
     records = _records_from_args(args)
+
+    potts_caches: dict[str, dict[str, PottsAlignCacheResult]] = {}
+    if args.method == "potts_align" and args.potts_align_cache is not None:
+        potts_caches = _load_potts_align_caches(
+            args.potts_align_cache, [model_A.name, model_B.name]
+        )
 
     dcalign_caches: dict[str, dict[str, DCAlignResult]] = {}
     dcalign_partial: dict[str, bool] = {}
@@ -269,10 +374,18 @@ def main(argv: list[str] | None = None) -> int:
         for j, (model, hmm) in enumerate(((model_A, hmm_A), (model_B, hmm_B))):
             seed_rj = None if args.seed is None else args.seed + 2 * r_idx + j
             dca_res = dcalign_caches.get(model.name, {}).get(record.id) if dcalign_caches else None
+            pa_res = potts_caches.get(model.name, {}).get(record.id) if potts_caches else None
+            if potts_caches and pa_res is None:
+                # A complete cache has one row per (query_id) per model — scored or
+                # a skip row. A genuine miss is a coverage gap, never a silent skip.
+                raise ValueError(
+                    f"potts_align cache has no row for {record.id!r} under {model.name!r}; "
+                    "the align run is incomplete (re-submit the unfinished shards and gather)."
+                )
             res = _score_one(
                 record, model, hmm, method=args.method,
                 n_samples=args.n_samples, seed=seed_rj, ess_threshold=args.ess_threshold,
-                dcalign_result=dca_res,
+                dcalign_result=dca_res, potts_align_result=pa_res,
             )
             per_model[model.name] = res
             row = {
@@ -287,6 +400,10 @@ def main(argv: list[str] | None = None) -> int:
                 # on the same frame must agree to fp noise (the spike's ≤5e-7).
                 row["_dcalign_energy"] = dca_res.dcalign_energy
                 row["_dcalign_abs_diff"] = abs(res.energy - dca_res.dcalign_energy)
+            if pa_res is not None and pa_res.ok:
+                # Canary: our in-frame recompute vs the cluster's cached energy.
+                row["_potts_cached_energy"] = pa_res.energy
+                row["_potts_abs_diff"] = abs(res.energy - pa_res.energy)
             rows.append(row)
         e_tot = w_A * per_model[model_A.name].energy + w_B * per_model[model_B.name].energy
         rep_A, rep_B = per_model[model_A.name], per_model[model_B.name]
@@ -401,6 +518,8 @@ def _write_manifest(rows, args, model_A, model_B, w_A, w_B, started_at, finished
         extra["skipped_no_alignment"] = skipped[:50]
     if args.method == "dcalign":
         extra["dcalign"] = _dcalign_manifest_block(rows, args, model_A, model_B)
+    if args.method == "potts_align" and args.potts_align_cache is not None:
+        extra["potts_align"] = _potts_align_manifest_block(rows, args, model_A, model_B)
 
     manifest = provenance.build_run_manifest(
         run_id="score_two_models",
