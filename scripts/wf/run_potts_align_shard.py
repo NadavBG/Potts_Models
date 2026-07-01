@@ -46,7 +46,8 @@ from SBM.utils.potts_align_cache import (
 log = logging.getLogger(__name__)
 
 #: SeedSequence spawn-key salt for the cross-subsample RNG. Fixed + logged so the
-#: 8000-id subset is reproducible and independent of any other seeded stream.
+#: seeded cross-subsample (pa_cross_subsample_n ids) is reproducible and
+#: independent of any other seeded stream.
 _CROSS_SUBSAMPLE_SALT = 0xC205
 
 

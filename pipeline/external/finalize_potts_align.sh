@@ -64,13 +64,18 @@ echo "gather outputs: ${#ALIGN_FILES[@]} alignments.tsv"
 
 # --- Step 3: reclaim space ---------------------------------------------------
 command -v zstd >/dev/null 2>&1 || { echo "ERROR: zstd not on PATH." >&2; exit 10; }
+# Archive then DELETE the raw sources (set -o pipefail aborts before rm if the
+# tar|zstd fails). The per-model alignments.tsv the score step needs lives in
+# cache/<model>/, not cache/shards/, so removing the raw shards is safe.
 if [[ -d "${PA_DIR}/cache/shards" ]]; then
     tar -C "${PA_DIR}/cache" -cf - shards | zstd -19 --force --quiet -o "${PA_DIR}/cache/shards.tar.zst"
-    echo "  ${PA_DIR}/cache/shards.tar.zst"
+    rm -rf "${PA_DIR}/cache/shards"
+    echo "  ${PA_DIR}/cache/shards.tar.zst (raw shards/ removed)"
 fi
 if [[ -d "${PA_DIR}/logs" ]]; then
     tar -C "${PA_DIR}" -cf - logs | zstd -19 --force --quiet -o "${PA_DIR}/potts_align_logs.tar.zst"
-    echo "  ${PA_DIR}/potts_align_logs.tar.zst"
+    rm -rf "${PA_DIR}/logs"
+    echo "  ${PA_DIR}/potts_align_logs.tar.zst (raw logs/ removed)"
 fi
 
 echo

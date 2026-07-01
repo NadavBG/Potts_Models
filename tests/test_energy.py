@@ -16,6 +16,7 @@ which loads the compiled MCMC kernel):
 from __future__ import annotations
 
 import itertools
+import json
 import logging
 import math
 
@@ -538,6 +539,153 @@ def test_potts_align_cache_round_trip(tmp_path):
     )
     with pytest.raises(ValueError, match="duplicate"):
         read_potts_align_cache(dup)
+
+
+# ── potts_align CLUSTER orchestration: plan -> run -> gather (iter-003) ────
+#
+# The in-process branch above is covered; this exercises the highest-risk part
+# of the wiring — the standalone cluster CLIs (scripts/wf/run_potts_align_*.py):
+# pair classification, round-robin sharding, the per-pair seed derivation (which
+# MUST match score_two_models), coverage/missing detection, and the gather gates.
+
+
+def _load_wf_module(stem):
+    """Import a scripts/wf/ standalone CLI by path (not a package).
+
+    run_potts_align_{shard,gather}.py import only ``SBM.*`` + stdlib at module
+    scope (no ``snakemake`` global), so they load cleanly outside Snakemake.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "wf" / f"{stem}.py"
+    spec = importlib.util.spec_from_file_location(f"_wf_{stem}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _write_model_npy(path, L, seed):
+    """Persist a make_model PottsModel as a model.npy load_model can read."""
+    m = make_model(L, seed=seed)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, np.array({"h": m.h, "J": m.J}, dtype=object), allow_pickle=True)
+
+
+def _build_potts_align_run_root(root):
+    """A tiny built combine run_root: two models (L=6 'A', L=5 'B'), a query set
+    that hits every pair class (home / cross / skip_NgtL / skip_subsample), a
+    valid config_snapshot.yaml and models.json. Returns (records-in-id-order)."""
+    from pathlib import Path as _P
+
+    yaml = pytest.importorskip("yaml")  # PyYAML ships with the workflow extra
+
+    from SBM.energy.datasets import QueryRecord
+    from SBM.energy.datasets import write_query_fasta
+
+    L_A, L_B = 6, 5
+    mdir_A = _P(root) / "models" / "A"
+    mdir_B = _P(root) / "models" / "B"
+    _write_model_npy(mdir_A / "model.npy", L_A, seed=301)
+    _write_model_npy(mdir_B / "model.npy", L_B, seed=302)
+
+    # Home records are stored in their origin model's L-frame (gaps allowed);
+    # cross/random are raw N<=L. ids chosen so sorted order is deterministic.
+    records = [
+        QueryRecord("A|nat|0", "A/natural", "A", np.array([3, 5, 7, 9, 11, 13], dtype=np.int64)),   # N=6=L_A (g0); N>L_B -> skip_NgtL under B
+        QueryRecord("A|nat|1", "A/natural", "A", np.array([3, 0, 5, 0, 7, 9], dtype=np.int64)),      # N=4 (g2) home A; cross under B
+        QueryRecord("B|nat|0", "B/natural", "B", np.array([2, 4, 6, 8, 10], dtype=np.int64)),        # N=5=L_B home B; cross/subsample under A
+        QueryRecord("B|nat|1", "B/natural", "B", np.array([12, 14, 16, 1, 3], dtype=np.int64)),      # N=5=L_B home B; cross/subsample under A
+        QueryRecord("random|N5|0", "random/N5", "", np.array([5, 10, 15, 20, 2], dtype=np.int64)),   # cross under both
+    ]
+    write_query_fasta(records, _P(root) / "query" / "query.fasta", _P(root) / "query" / "groups.json")
+
+    models_json = {"schema_version": 1, "models": [
+        {"name": "A", "run_dir": str(mdir_A), "model_path": str(mdir_A / "model.npy"),
+         "L": L_A, "q": Q, "weight": 1.0},
+        {"name": "B", "run_dir": str(mdir_B), "model_path": str(mdir_B / "model.npy"),
+         "L": L_B, "q": Q, "weight": 1.0},
+    ]}
+    (_P(root) / "models.json").write_text(json.dumps(models_json, indent=2), encoding="utf-8")
+
+    cfg = {
+        "run_name": "combine-potts-test", "seed": 42, "omp_num_threads": None,
+        "models": [{"name": "A", "run_dir": str(mdir_A), "weight": 1.0},
+                   {"name": "B", "run_dir": str(mdir_B), "weight": 1.0}],
+        "query": {"source": "model_sets", "include": ["natural"], "cap_per_group": 0,
+                  "n_random": 1, "random_length": 5},
+        "scoring": {"method": "potts_align", "n_shards": 2,
+                    "pa_cross_subsample_origin": "B", "pa_cross_subsample_under": "A",
+                    "pa_cross_subsample_n": 1},
+        "figures": {"enabled": True},
+    }
+    (_P(root) / "config_snapshot.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return sorted(records, key=lambda r: r.id)
+
+
+def test_potts_align_cluster_plan_run_gather(tmp_path):
+    """plan classifies pairs + derives matching seeds; run scores a shard; gather
+    detects an incomplete run, then merges + passes the canary/ΔE gates."""
+    import types
+
+    shard = _load_wf_module("run_potts_align_shard")
+    gather = _load_wf_module("run_potts_align_gather")
+    sorted_records = _build_potts_align_run_root(tmp_path)
+
+    # --- plan -------------------------------------------------------------
+    shard.cmd_plan(types.SimpleNamespace(run_root=str(tmp_path), n_shards=2))
+    manifest = json.loads((tmp_path / "potts_align" / "shards_manifest.json").read_text())
+    status = {(p["query_id"], p["model"]): p["status"] for p in manifest["pairs"]}
+
+    # every pair class is represented and classified correctly
+    assert status[("A|nat|0", "A")] == "home"
+    assert status[("A|nat|0", "B")] == "skip_NgtL"       # N=6 > L_B=5
+    assert status[("A|nat|1", "A")] == "home"
+    assert status[("A|nat|1", "B")] == "cross"
+    assert status[("B|nat|0", "B")] == "home"
+    assert status[("B|nat|1", "B")] == "home"
+    assert status[("random|N5|0", "A")] == "cross"
+    assert status[("random|N5|0", "B")] == "cross"
+    # cross-subsample n=1 over the two B-origin ids under A: exactly one skips
+    b_under_a = [status[("B|nat|0", "A")], status[("B|nat|1", "A")]]
+    assert sorted(b_under_a) == ["cross", "skip_subsample"]
+
+    # seed derivation is EXACTLY score_two_models' (master_seed + 2*r_idx + j over
+    # id-sorted records, j = model index) — the reproducibility contract.
+    idx = {r.id: i for i, r in enumerate(sorted_records)}
+    model_j = {"A": 0, "B": 1}
+    for p in manifest["pairs"]:
+        assert p["seed"] == 42 + 2 * idx[p["query_id"]] + model_j[p["model"]]
+
+    # shards partition the in-scope pairs exactly (no dup, no drop, in-scope only)
+    flat = [i for s in manifest["shards"] for i in s]
+    assert len(set(flat)) == len(flat)                          # no pair in two shards
+    assert len(flat) == manifest["n_pairs_in_scope"]            # every in-scope pair placed
+    assert all(manifest["pairs"][i]["status"] in ("home", "cross") for i in flat)
+
+    # --- an incomplete run must fail loudly at gather ---------------------
+    shard.cmd_run(types.SimpleNamespace(run_root=str(tmp_path), shard=0))
+    with pytest.raises(RuntimeError, match="not produced by any shard"):
+        gather.main(["--run-root", str(tmp_path)])
+
+    # --- finish + gather --------------------------------------------------
+    shard.cmd_run(types.SimpleNamespace(run_root=str(tmp_path), shard=1))
+    assert gather.main(["--run-root", str(tmp_path)]) == 0
+
+    gstatus = json.loads((tmp_path / "potts_align" / "gather_status.json").read_text())
+    assert not gstatus["partial"]
+    for name in ("A", "B"):
+        g = gstatus["gates"][name]
+        assert g["canary_ok"]                                    # in-frame recompute matches cluster energy
+        assert g["delta_e_gate"]["n_enumerated_violations"] == 0  # an enumerated home can't beat native
+
+    # each per-model cache has one row per query id (scored or skip)
+    from SBM.utils.potts_align_cache import read_potts_align_cache
+    cache_A = read_potts_align_cache(tmp_path / "potts_align" / "cache" / "A" / "alignments.tsv")
+    cache_B = read_potts_align_cache(tmp_path / "potts_align" / "cache" / "B" / "alignments.tsv")
+    assert set(cache_A) == set(cache_B) == {r.id for r in sorted_records}
+    assert not cache_B["A|nat|0"].ok and math.isnan(cache_B["A|nat|0"].energy)   # skip_NgtL row
+    assert cache_A["A|nat|0"].ok and cache_A["A|nat|0"].is_global_exact          # enumerated home
 
 
 # ── DCAlign-vs-in-frame baseline (SBM.energy.dcalign_baseline) ─────────────

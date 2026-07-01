@@ -8,9 +8,10 @@ Standalone CLI (imports only ``SBM.*`` + stdlib; invoked by path from
 energy) or a skip row (``engine`` ∈ {``skip_NgtL``, ``skip_subsample``,
 ``missing``}, nan energy, empty frame) — so the ``score`` cache-reader always
 finds a row (a genuine gap is a loud error, not a silent skip). Writes a
-per-model ``meta.json`` and a top-level ``gather_status.json`` carrying the
-validation gates: the in-frame recompute canary, the home-term ΔE gate, and the
-random-control-vs-naturals energy separation.
+per-model ``meta.json`` and a top-level ``gather_status.json`` carrying two hard
+gates (the in-frame recompute canary and the home-term ΔE gate — either failing
+raises) plus the random-control-vs-naturals energy separation as a reported
+diagnostic (computed and recorded, not gated).
 
 By default it errors if any in-scope pair is missing (an incomplete run —
 re-submit the unfinished shards, then gather again). ``--allow-missing`` writes

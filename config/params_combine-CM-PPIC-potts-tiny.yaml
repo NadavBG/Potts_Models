@@ -14,7 +14,7 @@
 #       --config run_root=$RR --cores 4 all                             # score + render
 #
 # The real run uses config/params_combine-CM-PPIC-potts.yaml (full naturals +
-# 500 controls, ~200 core-h on a 192-task Slurm array via run_potts_align_align.sh).
+# 500 controls, ~94 SU on a 128-task Slurm array via run_potts_align_align.sh).
 
 run_name: combine-CM-PPIC-potts-tiny
 description: Smoke test of the potts_align combine pipeline (tiny query set)

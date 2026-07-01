@@ -42,6 +42,12 @@ groups_out = Path(snakemake.output.groups)  # noqa: F821
 fasta_out.parent.mkdir(parents=True, exist_ok=True)
 
 if cfg.query.source == "fasta":
+    if cfg.query.n_random > 0:
+        log.warning(
+            "query.n_random=%d is ignored for query.source='fasta' (random controls "
+            "are only appended to model_sets queries scored with method='potts_align')",
+            cfg.query.n_random,
+        )
     shutil.copyfile(cfg.query.fasta, fasta_out)
     groups_out.write_text("{}\n", encoding="utf-8")  # no origin frames for external seqs
     log.info("query: external FASTA %s -> %s", cfg.query.fasta, fasta_out)
@@ -53,7 +59,27 @@ else:
         cap_per_group=cfg.query.cap_per_group,
         seed=cfg.seed,
     )
+    if cfg.query.n_random > 0 and cfg.scoring.method != "potts_align":
+        log.warning(
+            "query.n_random=%d is ignored for scoring.method=%r (random controls are "
+            "only appended for method='potts_align')",
+            cfg.query.n_random, cfg.scoring.method,
+        )
     if cfg.scoring.method == "potts_align" and cfg.query.n_random > 0:
+        # random_length must be <= every model's L, else the control becomes an
+        # out-of-scope (N>L) NaN skip row under the smaller model and the negative
+        # control silently collapses. L is only known post-resolve (models.json),
+        # so this invariant (noted on QueryConfig.random_length) is enforced here.
+        models_json = json.loads(Path(snakemake.input.models).read_text(encoding="utf-8"))  # noqa: F821
+        model_Ls = {m["name"]: int(m["L"]) for m in models_json["models"]}
+        min_L = min(model_Ls.values())
+        if cfg.query.random_length > min_L:
+            raise ValueError(
+                f"query.random_length={cfg.query.random_length} exceeds the smallest model "
+                f"L={min_L} ({model_Ls}); every random control would become an out-of-scope "
+                f"(N>L) NaN row under that model, silently voiding the negative control. "
+                f"Set query.random_length <= {min_L}."
+            )
         controls = _random_control_records(cfg.query.n_random, cfg.query.random_length, cfg.seed)
         records += controls
         log.info("query: appended %d random control sequence(s) (group %s, length %d, seed %d)",
