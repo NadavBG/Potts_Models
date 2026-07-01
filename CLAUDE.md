@@ -116,7 +116,7 @@ The rest of the codebase has no unit-test suite. After non-trivial changes, run 
 ```
 snakemake --configfile config/params_tiny.yaml --cores 8 all
 # combine pipeline smoke test (scores a handful of CM+PPIC seqs under both models):
-snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --cores 4 all
+snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --cores 8 all
 ```
 
 The first exercises the whole DAG — encode_msa → mask → train → sample(×2) → mpnn → render → manifest, plus the independent `msa_stats` branch — and lands deterministic outputs under `results/tiny/` (assert on `inputs/msa.npy`, `model.npy`, `manifest.json`, `synthetic/align_T*.npy`, `figs/*.pdf`, `msa_stats.pdf`, `run_manifest.json`). The legacy `bash pruning/CM_example.sh` still works but is superseded by the pipeline.

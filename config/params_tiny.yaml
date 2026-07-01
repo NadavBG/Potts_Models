@@ -4,7 +4,7 @@
 # skip_scoring: true so it needs no torch / PROTEINMPNN_PATH (it still reads
 # the WT FASTA + PDB, both present in the repo).
 #
-#   snakemake --configfile config/params_tiny.yaml --cores 4 all
+#   snakemake --configfile config/params_tiny.yaml --cores 8 all
 
 run_name: tiny
 description: Fast smoke test of the full pipeline DAG

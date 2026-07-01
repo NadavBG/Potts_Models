@@ -25,7 +25,7 @@
 #   bash pipeline/external/finalize_potts_align.sh <run_root>
 # then run the cheap score+render+manifest step (reads the cache):
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
-#       --config run_root=<run_root> --cores 4 all
+#       --config run_root=<run_root> --cores 8 all
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -114,4 +114,4 @@ echo "when gather mails END, finalize from this login node:"
 echo "  bash ${SCRIPT_DIR}/finalize_potts_align.sh ${RUN_ROOT}"
 echo "then run the cheap score+render+manifest step:"
 echo "  snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \\"
-echo "      --config run_root=${RUN_ROOT} --cores 4 all"
+echo "      --config run_root=${RUN_ROOT} --cores 8 all"

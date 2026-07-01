@@ -10,12 +10,12 @@
 #   .venv/bin/python scripts/iter.py new combine-CM-PPIC-dcalign-smoke "tier2-smoke" --snakefile Snakefile.combine
 #   .venv/bin/python -m snakemake -s Snakefile.combine \
 #       --configfile config/params_combine-CM-PPIC-dcalign-smoke.yaml \
-#       --config run_root=$RR --cores 4 $RR/query/query.fasta $RR/models.json
+#       --config run_root=$RR --cores 8 $RR/query/query.fasta $RR/models.json
 #   DCALIGN_TINY=1 bash pipeline/external/run_dcalign_align.sh $RR 2
 #   bash pipeline/external/finalize_dcalign_push.sh $RR        # no --push
 #   .venv/bin/python -m snakemake -s Snakefile.combine \
 #       --configfile config/params_combine-CM-PPIC-dcalign-smoke.yaml \
-#       --config run_root=$RR --cores 4 all
+#       --config run_root=$RR --cores 8 all
 
 run_name: combine-CM-PPIC-dcalign-smoke
 description: Tier-2 real-model smoke for DCAlign couplings-aware two-model scoring  # No colons!

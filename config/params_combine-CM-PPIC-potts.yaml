@@ -9,14 +9,14 @@
 #   RR=combine/combine-CM-PPIC-potts/iter-001-potts-align-eval
 #   # 1. build inputs (config_snapshot, models.json, query incl. random controls):
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
-#       --config run_root=$RR --cores 4 \
+#       --config run_root=$RR --cores 8 \
 #       $RR/config_snapshot.yaml $RR/models.json $RR/query/query.fasta
 #   # 2. cluster align (login node): plan + array + afterok gather
 #   bash pipeline/external/run_potts_align_align.sh $RR
 #   # 3. finalize, then score+render+manifest (reads the cache):
 #   bash pipeline/external/finalize_potts_align.sh $RR
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
-#       --config run_root=$RR --cores 4 all
+#       --config run_root=$RR --cores 8 all
 
 run_name: combine-CM-PPIC-potts
 description: Cross-score CM and PPIC under both models via potts_align gap-placement minimization

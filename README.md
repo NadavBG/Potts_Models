@@ -286,7 +286,7 @@ python scripts/iter.py run combine-CM-PPIC "baseline" --snakefile Snakefile.comb
 snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC.yaml --cores 8 all
 
 # fast smoke test first (a handful of sequences, seconds):
-snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --cores 4 all
+snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --cores 8 all
 ```
 
 Combine runs land under **`combine/<run_name>/`** — a separate (git-ignored) tree from the single-model `results/`, so dual-model runs never mix with single-model ones.

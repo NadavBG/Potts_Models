@@ -23,7 +23,7 @@
 #
 # Then run the cheap score step (reads the cache):
 #   snakemake -s Snakefile.combine --configfile config/params_<name>.yaml \
-#       --config run_root=<run_root> --cores 4 all
+#       --config run_root=<run_root> --cores 8 all
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -161,4 +161,4 @@ echo
 echo "when gather mails END, finalize from this login node:"
 echo "  bash ${SCRIPT_DIR}/finalize_dcalign_push.sh ${RUN_ROOT}"
 echo "then run the cheap score step:"
-echo "  snakemake -s Snakefile.combine --config run_root=${RUN_ROOT} --cores 4 all"
+echo "  snakemake -s Snakefile.combine --config run_root=${RUN_ROOT} --cores 8 all"

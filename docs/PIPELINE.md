@@ -81,7 +81,7 @@ RUN_ROOT=combine/combine-CM-PPIC-dcalign/iter-001-baseline
 # Build ONLY the pre-align targets. snapshot_config is an independent rule, so
 # name it explicitly — building query.fasta alone does not pull it in.
 snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalign.yaml \
-    --config run_root=$RUN_ROOT --cores 4 \
+    --config run_root=$RUN_ROOT --cores 8 \
     $RUN_ROOT/config_snapshot.yaml $RUN_ROOT/models.json $RUN_ROOT/query/query.fasta
 ```
 
@@ -155,7 +155,7 @@ canary), and `render_combine` makes the figure:
 
 ```sh
 snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalign.yaml \
-    --config run_root=$RUN_ROOT --cores 4 all
+    --config run_root=$RUN_ROOT --cores 8 all
 ```
 
 Outputs under `$RUN_ROOT` (tables in `data/`, manifests in `provenance/`, figures

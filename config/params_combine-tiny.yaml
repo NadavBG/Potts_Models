@@ -2,7 +2,7 @@
 # -> score -> render -> manifest). Tiny per-group cap + few IS samples keep it
 # to seconds. Reuses the existing CM and PPIC dense models.
 #
-#   snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --cores 4 all
+#   snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --cores 8 all
 
 run_name: combine-tiny
 description: Fast smoke test of the two-model combine pipeline

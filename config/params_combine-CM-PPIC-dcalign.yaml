@@ -7,7 +7,7 @@
 #   #    driver's preflight requires it and snapshot_config is an independent rule:
 #   RR=combine/combine-CM-PPIC-dcalign/iter-001-baseline
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalign.yaml \
-#       --config run_root=$RR --cores 4 $RR/config_snapshot.yaml $RR/models.json $RR/query/query.fasta
+#       --config run_root=$RR --cores 8 $RR/config_snapshot.yaml $RR/models.json $RR/query/query.fasta
 #   # 2. align on the cluster (FAN-OUT: 1 core/task, many shards — DCAlign threads
 #   #    only ~3x on 8 cores, so 1-core tasks are cheaper + ~100% efficient):
 #   DCALIGN_CPUS=1 DCALIGN_MAX_CONCURRENT=512 bash pipeline/external/run_dcalign_align.sh $RR

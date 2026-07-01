@@ -1,34 +1,49 @@
-# Fast smoke test of the potts_align combine pipeline (iter-003). Sized to run
-# the WHOLE path — resolve -> build_query -> plan -> shard run -> gather (gates)
-# -> score -> render — in UNDER 2 MINUTES and well under 1 SU, locally, NO
-# cluster needed:
+# Fast CLUSTER smoke test of the potts_align combine pipeline (iter-003). Unlike
+# the pure-local smoke test, this one exercises the FULL sbatch path — the same
+# run_potts_align_align.sh -> Slurm array (+ afterok gather) -> finalize -> score
+# -> render machinery the real run uses — but sized to finish in UNDER 2 MINUTES
+# and WELL UNDER 1 SU. Run it on a Midway login node:
 #
-#   RR=/tmp/RRtiny
+#   RR=combine/combine-CM-PPIC-potts-tiny/iter-001-smoke   # shared-FS path, NOT /tmp:
+#                                                          # array tasks run on compute nodes
+#   # 1. build inputs (config_snapshot, models.json, query; no random controls):
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts-tiny.yaml \
-#       --config run_root=$RR --cores 4 \
-#       $RR/config_snapshot.yaml $RR/models.json $RR/query/query.fasta   # build inputs
-#   python scripts/wf/run_potts_align_shard.py plan --run-root $RR --n-shards 2
-#   python scripts/wf/run_potts_align_shard.py run  --run-root $RR --shard 0
-#   python scripts/wf/run_potts_align_shard.py run  --run-root $RR --shard 1
-#   python scripts/wf/run_potts_align_gather.py --run-root $RR          # gather + gates
+#       --config run_root=$RR --cores 8 \
+#       $RR/config_snapshot.yaml $RR/models.json $RR/query/query.fasta
+#   # 2. cluster align (login node): plan (n_shards=3) + 3-task array + afterok gather.
+#   #    Refuses a dirty git tree — commit first (combine/ outputs are gitignored).
+#   bash pipeline/external/run_potts_align_align.sh $RR
+#   # 3. when the gather job mails END, finalize, then score+render+manifest (reads the cache):
+#   bash pipeline/external/finalize_potts_align.sh $RR
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts-tiny.yaml \
-#       --config run_root=$RR --cores 4 all                             # score + render
+#       --config run_root=$RR --cores 8 all
 #
-# COST DIAL: a g=5 PT pair costs ~60-74 s; every other pair here is a g<=...
-# instant enumerate. cap_per_group=2 + cross-subsample=1 leaves exactly ONE PT
-# pair (one PPIC natural scored under CM); the other PPIC natural under CM is
-# skip_subsample, CM naturals under PPIC are skip_NgtL, and all homes enumerate.
-# That single PT pair (~1 min) + overhead keeps the whole run under 2 min. The
-# random negative-control group is OMITTED here (n_random=0) because each valid
-# control (N<=91) is itself a ~1 min PT pair under CM; it is exercised in the
-# real run, where build_query (+ the random_length<=min(L) guard) runs cheaply
-# in phase 1 on the login node.
+# COST DIAL: a g=5 PT pair costs ~74 s on a caslake core; every other pair here
+# is an instant g<=3 enumerate. cap_per_group=2 + cross-subsample=1 leaves exactly
+# ONE PT pair (one PPIC natural scored under CM); the other PPIC natural under CM
+# is skip_subsample, CM naturals under PPIC are skip_NgtL, and all homes enumerate.
+# So the whole run is: 4 homes (enumerate, ~instant) + 1 cross PT pair (~1.2 min).
+# n_shards=3 round-robins the 5 in-scope pairs into 3 array tasks (sizes 2,2,1),
+# all placed concurrently, so the task holding the PT pair sets the wall clock at
+# ~1.5 min < 2 min; the array's total core-time is ~0.05 core-h and the gather is
+# seconds, so the run stays well under 1 SU. (More shards than in-scope pairs is
+# fine — extra shards just get empty slices and exit "nothing to do".)
+#
+# The random negative-control group is OMITTED here (n_random=0) because each
+# valid control (N<=91) is itself a ~1 min PT pair under CM; it is exercised only
+# in the real run (build_query + the random_length<=min(L) guard run cheaply in
+# phase 1 on the login node).
+#
+# To debug the shard/gather logic WITHOUT the cluster, the entrypoints are pure
+# numpy and still run locally: `run_potts_align_shard.py plan --n-shards 3` then
+# `run ... --shard 0..2` then `run_potts_align_gather.py`. The cluster path above
+# is the point of this config; the local path is a fallback.
 #
 # The real run uses config/params_combine-CM-PPIC-potts.yaml (full naturals +
 # 500 controls, ~94 SU on a 512-task Slurm array via run_potts_align_align.sh).
 
 run_name: combine-CM-PPIC-potts-tiny
-description: Smoke test of the potts_align combine pipeline (tiny query set)
+description: Cluster smoke test of the potts_align combine pipeline (tiny query set, 3-task array)
 seed: 42
 omp_num_threads: null
 
@@ -49,7 +64,7 @@ query:
 
 scoring:
   method: potts_align
-  n_shards: 2
+  n_shards: 3                  # 3-task Slurm array over the 5 in-scope pairs (~1.5 min wall, <1 SU)
   pa_cross_subsample_origin: PPIC-dense
   pa_cross_subsample_under: CM-bm-dense
   pa_cross_subsample_n: 1      # exactly ONE PPIC->CM PT pair; the other -> skip_subsample

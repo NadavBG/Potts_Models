@@ -38,7 +38,7 @@ is `src/SBM/julia/run_dcalign.jl`.
 #    with `scripts/iter.py new combine-CM-PPIC-dcalign "<tag>" --snakefile Snakefile.combine`.
 RUN_ROOT=combine/combine-CM-PPIC-dcalign/iter-001-baseline
 snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalign.yaml \
-    --config run_root=$RUN_ROOT --cores 4 \
+    --config run_root=$RUN_ROOT --cores 8 \
     $RUN_ROOT/config_snapshot.yaml $RUN_ROOT/models.json $RUN_ROOT/query/query.fasta
 
 # 1. Submit the align step (login node).
@@ -53,7 +53,7 @@ bash pipeline/external/finalize_dcalign_push.sh $RUN_ROOT
 RUN_ROOT=combine/combine-CM-PPIC-dcalign/iter-001-baseline     # on the Mac
 scripts/sync_models.sh pull                                    # Midway -> Mac
 snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-dcalign.yaml \
-    --config run_root=$RUN_ROOT --cores 4 all
+    --config run_root=$RUN_ROOT --cores 8 all
 ```
 
 ## Environment assumptions (Midway)
