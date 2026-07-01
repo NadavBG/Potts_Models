@@ -43,8 +43,12 @@ scoring:
   # Slurm array size. Measured cost ~74 s per g>=4 PT pair on a caslake core
   # (~2x the docs' Mac estimate). Fixed PT work (home CM/PPIC + CM->PPIC cross +
   # random->CM) ~= 53 core-h; the 2000-pair PPIC->CM cross adds ~41 -> ~94 core-h
-  # total. 128 shards ≈ ~0.75 h/shard (3 h wall limit leaves ample margin).
-  n_shards: 128
+  # total. Fan-out at cpus=1 is ~100% core-efficient (docs/initiate_two_model_energy.md
+  # §10: within-shard threading only ~36%), so more shards cut wall time at ~constant
+  # SU. 512 shards (all concurrent, per prior DCAlign runs at MAX_CONCURRENT=512)
+  # ≈ ~0.18 h/shard ≈ 11 min wall; 3 h wall limit is ample. If the account can't
+  # place 512 at once the extra tasks just queue (no SU penalty).
+  n_shards: 512
   # PPIC->CM cross is the cost driver (all g>=5 -> PT). Seeded-subsample it to 2000
   # to hold the run near ~100 SU (still thousands of points for the cluster figure;
   # raise it for a denser cross cloud at proportionally more SU).

@@ -22,7 +22,7 @@
 # J is (L,L,q,q) f8 ~33MB/model x2; enumerate g<=3 materializes <=110MB; the
 # compute_energies chunk is ~0.3GB. 2G is ~6x headroom.
 #SBATCH --mem=2G
-# Measured ~74s per g=5 PT pair on a caslake core; 128 shards -> ~0.75h/shard.
+# Measured ~74s per g=5 PT pair on a caslake core; 512 shards -> ~0.18h/shard (~11 min).
 # 3h gives ample margin (and resume makes a TIME_LIMIT non-fatal anyway).
 #SBATCH --time=03:00:00
 #SBATCH --output=logs/potts_align_shard_%A_%a.log

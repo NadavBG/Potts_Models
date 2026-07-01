@@ -1,6 +1,7 @@
-# Fast smoke test of the potts_align combine pipeline (iter-003). A tiny query
-# set (2 naturals/group + 2 random controls, cross-subsample 1, 2 shards) that
-# runs the WHOLE potts_align path locally in a few minutes — no cluster needed:
+# Fast smoke test of the potts_align combine pipeline (iter-003). Sized to run
+# the WHOLE path — resolve -> build_query -> plan -> shard run -> gather (gates)
+# -> score -> render — in UNDER 2 MINUTES and well under 1 SU, locally, NO
+# cluster needed:
 #
 #   RR=/tmp/RRtiny
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts-tiny.yaml \
@@ -13,8 +14,18 @@
 #   snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts-tiny.yaml \
 #       --config run_root=$RR --cores 4 all                             # score + render
 #
+# COST DIAL: a g=5 PT pair costs ~60-74 s; every other pair here is a g<=...
+# instant enumerate. cap_per_group=2 + cross-subsample=1 leaves exactly ONE PT
+# pair (one PPIC natural scored under CM); the other PPIC natural under CM is
+# skip_subsample, CM naturals under PPIC are skip_NgtL, and all homes enumerate.
+# That single PT pair (~1 min) + overhead keeps the whole run under 2 min. The
+# random negative-control group is OMITTED here (n_random=0) because each valid
+# control (N<=91) is itself a ~1 min PT pair under CM; it is exercised in the
+# real run, where build_query (+ the random_length<=min(L) guard) runs cheaply
+# in phase 1 on the login node.
+#
 # The real run uses config/params_combine-CM-PPIC-potts.yaml (full naturals +
-# 500 controls, ~94 SU on a 128-task Slurm array via run_potts_align_align.sh).
+# 500 controls, ~94 SU on a 512-task Slurm array via run_potts_align_align.sh).
 
 run_name: combine-CM-PPIC-potts-tiny
 description: Smoke test of the potts_align combine pipeline (tiny query set)
@@ -33,15 +44,15 @@ query:
   source: model_sets
   include: [natural]
   cap_per_group: 2             # tiny: 2 naturals per model
-  n_random: 2                  # 2 random negative controls
-  random_length: 91
+  n_random: 0                  # controls omitted (each is a ~1 min PT pair); see header
+  random_length: 0
 
 scoring:
   method: potts_align
   n_shards: 2
   pa_cross_subsample_origin: PPIC-dense
   pa_cross_subsample_under: CM-bm-dense
-  pa_cross_subsample_n: 1      # tiny: cap the cross block to 1 id
+  pa_cross_subsample_n: 1      # exactly ONE PPIC->CM PT pair; the other -> skip_subsample
   n_samples: 1000              # unused by potts_align
   ess_threshold: 100.0         # unused
 
