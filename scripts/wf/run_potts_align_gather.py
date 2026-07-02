@@ -32,7 +32,7 @@ from SBM import combine_config as cc
 from SBM.energy import datasets
 from SBM.energy.encoding import seq_to_ints
 from SBM.energy.model import load_model
-from SBM.energy.potts import potts_energy
+from SBM.energy.potts import potts_energies
 from SBM.energy.potts_align import SASchedule
 from SBM.utils.potts_align_cache import (
     PottsAlignCacheResult,
@@ -44,6 +44,9 @@ log = logging.getLogger(__name__)
 
 _CANARY_TOL = 1e-6   # in-frame recompute vs cached energy
 _DELTA_E_FLAG = 1.0  # home ΔE above native flagged for the PT tail (docs §6.8)
+#: Batch size for the vectorized in-frame recompute. Bounds the transient
+#: (L, L, chunk) intermediate in ``compute_energies`` (~0.3 GB at L=96, f8).
+_ENERGY_CHUNK = 4096
 
 
 def _skip_row(p: dict, engine: str) -> PottsAlignCacheResult:
@@ -52,6 +55,48 @@ def _skip_row(p: dict, engine: str) -> PottsAlignCacheResult:
         gaps=p["gaps"], energy=float("nan"), engine=engine, is_global_exact=False,
         frame="", seed=p["seed"],
     )
+
+
+def _batched_energies(S: np.ndarray, model) -> np.ndarray:
+    """``potts_energies`` over an ``(N, L)`` batch in memory-bounded chunks."""
+    out = np.empty(S.shape[0], dtype=float)
+    for s in range(0, S.shape[0], _ENERGY_CHUNK):
+        out[s:s + _ENERGY_CHUNK] = potts_energies(S[s:s + _ENERGY_CHUNK], model)
+    return out
+
+
+def _recompute_checks(scored: list, records: dict, model) -> list[dict]:
+    """In-frame recompute canary (+ home ΔE) for one model's scored pairs.
+
+    Vectorized: every scored frame for a model has the same length ``L``, so they
+    stack into one ``(N, L)`` array scored by a single batched ``potts_energies``
+    (the same ``compute_energies`` primitive as the per-pair ``potts_energy``),
+    replacing an ~N-call Python loop. The gate decisions and the reported
+    diagnostics are unchanged — batched vs. per-row energies agree to ~1e-13, far
+    below the ``_CANARY_TOL`` (1e-6) gate. ``scored`` is a list of ``(pair, res)``
+    in the same query-id-sorted order the caller appends rows in.
+    """
+    if not scored:
+        return []
+    frames = np.array([seq_to_ints(res.frame) for _, res in scored], dtype=np.int64)
+    e_recompute = _batched_energies(frames, model)
+
+    home_pos = [k for k, (p, _) in enumerate(scored) if p["status"] == "home"]
+    e_native = {}
+    if home_pos:
+        natives = np.array([records[scored[k][0]["query_id"]].ints for k in home_pos],
+                           dtype=np.int64)
+        e_native = dict(zip(home_pos, _batched_energies(natives, model)))
+
+    checks: list[dict] = []
+    for k, (p, res) in enumerate(scored):
+        entry = {"query_id": p["query_id"], "status": p["status"], "engine": res.engine,
+                 "is_global_exact": res.is_global_exact,
+                 "abs_diff": abs(float(e_recompute[k]) - res.energy)}
+        if p["status"] == "home":
+            entry["delta_e"] = res.energy - float(e_native[k])
+        checks.append(entry)
+    return checks
 
 
 def _gather_model(run_root: Path, model_entry: dict, manifest: dict, records: dict,
@@ -63,7 +108,7 @@ def _gather_model(run_root: Path, model_entry: dict, manifest: dict, records: di
 
     rows: list[PottsAlignCacheResult] = []
     missing: list[str] = []
-    checks: list[dict] = []  # per-scored-row canary / ΔE diagnostics
+    scored: list[tuple[dict, PottsAlignCacheResult]] = []  # home/cross, sorted by id
     for p in sorted(pairs, key=lambda x: x["query_id"]):
         status = p["status"]
         if status in ("home", "cross"):
@@ -73,18 +118,12 @@ def _gather_model(run_root: Path, model_entry: dict, manifest: dict, records: di
                 rows.append(_skip_row(p, "missing"))
                 continue
             rows.append(res)
-            # In-frame recompute canary + (for home) the ΔE gate.
-            frame = seq_to_ints(res.frame)
-            e_recompute = potts_energy(frame, model)
-            entry = {"query_id": p["query_id"], "status": status, "engine": res.engine,
-                     "is_global_exact": res.is_global_exact,
-                     "abs_diff": abs(e_recompute - res.energy)}
-            if status == "home":
-                e_native = potts_energy(records[p["query_id"]].ints, model)
-                entry["delta_e"] = res.energy - e_native
-            checks.append(entry)
+            scored.append((p, res))
         else:  # skip_NgtL / skip_subsample
             rows.append(_skip_row(p, status))
+
+    # In-frame recompute canary + (for home) the ΔE gate, batched over the model.
+    checks = _recompute_checks(scored, records, model)
 
     out_tsv = run_root / "potts_align" / "cache" / name / "alignments.tsv"
     write_alignment_cache(out_tsv, rows)
