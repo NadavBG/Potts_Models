@@ -1,0 +1,96 @@
+# Two-model combine run over two FIELDS-ONLY (profile) models — CM-bm-profile and
+# PPIC-profile both have J≡0 (couplings fully pruned). Scored with potts_align for
+# method-parity with the coupled control combine-CM-PPIC-potts (docs/POTTS_ALIGN.md
+# — spec + cluster runbook §11), the couplings-aware gap-placement aligner that
+# returns the global insert-free Potts-energy minimum.
+#
+# potts_align is pure numpy — NO DCAlign, NO Julia. The heavy compute is sharded on
+# a Slurm array (pipeline/external/run_potts_align_align.sh); the gather writes
+# potts_align/cache/<model>/alignments.tsv, and the Snakemake `score` rule reads
+# that cache and recomputes each energy in-frame (<=1e-6 canary).
+#
+# WHERE THINGS RUN (docs/POTTS_ALIGN.md §11; Mac-primary): snakemake runs ONLY
+# on the Mac. The Midway login node runs ONLY the two bash drivers below — they
+# submit sbatch jobs and validate; no snakemake, no heavy compute (good login
+# etiquette). CODE moves by git (commit/push on the Mac, the align driver pulls
+# on Midway); the gitignored combine/ + results/ DATA moves by rsync
+# (scripts/sync_models.sh) — that is the ONLY way the scored cache reaches the Mac.
+#
+#   RR=combine/combine-profiles/iter-001-profile-eval
+#   # 1. MAC — build the pre-align inputs (config_snapshot, models.json, query
+#   #    incl. random controls). snapshot_config is its own rule, so name it.
+#   snakemake -s Snakefile.combine --configfile config/params_combine-profiles.yaml \
+#       --config run_root=$RR --cores 8 \
+#       $RR/config_snapshot.yaml $RR/models.json $RR/query/query.fasta
+#   # 2. MAC — commit + push any code changes (the align driver refuses a dirty
+#   #    tree and pulls origin), then rsync the models + pre-align dir up:
+#   git add -A && git commit -m "combine profiles: <run>" && git push
+#   scripts/sync_models.sh push
+#   # 3. MIDWAY login — plan + submit the shard array + afterok gather (NO snakemake):
+#   bash pipeline/external/run_potts_align_align.sh $RR
+#   # 4. MIDWAY login — when the gather job mails END, validate + reclaim space:
+#   bash pipeline/external/finalize_potts_align.sh $RR
+#   # 5. MAC — pull the cache back, then score + render + manifest (snakemake HERE):
+#   scripts/sync_models.sh pull
+#   snakemake -s Snakefile.combine --configfile config/params_combine-profiles.yaml \
+#       --config run_root=$RR --cores 8 all
+
+run_name: combine-profiles
+description: Cross-score CM and PPIC profile models.
+seed: 42
+omp_num_threads: null
+
+models:                        # exactly two; E_tot = w_A*E_A + w_B*E_B, where the
+                               # weights are NOT set here — the compute_weights stage
+                               # derives them post-hoc from the naturals so each
+                               # family's median native energy contributes equally.
+  - name: CM-bm-profile          # L=96
+    run_dir: results/CM-bm-profile/iter-001-profile
+  - name: PPIC-profile           # L=91
+    run_dir: results/PPIC-profile/iter-001-no-couplings
+
+query:
+  source: model_sets
+  include: [natural]           # naturals only (synthetics excluded per the SU budget)
+  cap_per_group: 0             # full sets; cost is bounded by the cross-subsample, not capping
+  n_random: 500                # random negative-control group (group "random/N91")
+  random_length: 91            # length N (=PPIC L; g=0 under PPIC in-frame, g=5 under CM)
+
+scoring:
+  method: potts_align
+  # Slurm array size. Measured cost ~74 s per g>=4 PT pair on a caslake core
+  # (~2x the docs' Mac estimate). Fixed PT work (home CM/PPIC + CM->PPIC cross +
+  # random->CM) ~= 53 core-h; the 2000-pair PPIC->CM cross adds ~41 -> ~94 core-h
+  # total. Fan-out at cpus=1 is ~100% core-efficient (docs/POTTS_ALIGN.md §11;
+  # within-shard threading scales poorly), so more shards cut wall time at ~constant
+  # SU. 512 shards (all concurrent, per prior DCAlign runs at MAX_CONCURRENT=512)
+  # ≈ ~0.18 h/shard ≈ 11 min wall; 3 h wall limit is ample. If the account can't
+  # place 512 at once the extra tasks just queue (no SU penalty).
+  n_shards: 512
+  # PPIC->CM cross is the cost driver (all g>=5 -> PT). Seeded-subsample it to 2000
+  # to hold the run near ~100 SU (still thousands of points for the cluster figure;
+  # raise it for a denser cross cloud at proportionally more SU).
+  pa_cross_subsample_origin: PPIC-profile   # queries whose cross block is capped
+  pa_cross_subsample_under: CM-bm-profile   # the model they are scored under
+  pa_cross_subsample_n: 2000
+  # n_samples / ess_threshold unused by potts_align (kept for schema completeness).
+  n_samples: 1000
+  ess_threshold: 100.0
+
+figures:
+  enabled: true
+
+design:                          # two-model joint annealing over E_tot (docs/DESIGN_TWO_MODEL.md)
+  enabled: true
+  start_random: 48               # random-sequence starts
+  start_natural_a: 24            # CM (model A) natural starts  } widen the Pareto front:
+  start_natural_b: 24            # PPIC (model B) natural starts } seed both native basins
+  steps: 500000
+  seed: 0
+  min_length: 70                 # deletion floor on N (<= min model L = 91)
+  polish: true
+  polish_schedule: fast          # warm-started potts_align; keeps a run to minutes on the Mac
+  execution: local               # local (default) | auto (predict wall-time vs budget) | cluster
+  local_budget_minutes: 30.0     # used only by execution: auto; raise chains/steps for Midway
+
+  n_shards: 64                   # Slurm array size if it goes CLUSTER
