@@ -24,6 +24,8 @@ SCHEMA_VERSION = 1
 _QUERY_SOURCES = ("model_sets", "fasta")
 _INCLUDE = ("natural", "synthetic")
 _METHODS = ("auto", "in_frame", "map", "marginal", "potts_align")
+_EXECUTION = ("auto", "local", "cluster")
+_POLISH_SCHEDULES = ("auto", "fast", "default", "thorough")
 
 
 @dataclass(frozen=True)
@@ -143,6 +145,64 @@ class CombineFiguresConfig:
 
 
 @dataclass(frozen=True)
+class DesignConfig:
+    """Two-model joint-annealing design stage (SBM.design.anneal; docs/DESIGN_TWO_MODEL.md).
+
+    Off by default. Trajectories are seeded from three kinds of start
+    (``start_random`` / ``start_natural_a`` / ``start_natural_b``); the total is
+    ``n_chains``. The final ``potts_align`` polish is warm-started, so the light
+    ``fast`` schedule (the default) is enough and keeps a run to minutes.
+
+    ``execution`` picks where the anneal runs: ``local`` (on the Mac), ``cluster``
+    (emit the config + hand-off and stop, run the array on Midway, pull back), or
+    ``auto`` (Snakefile predicts the local wall-time and runs local iff it is
+    ``<= local_budget_minutes``). ``n_shards`` sizes the Slurm array for the cluster
+    path. Move probabilities are left at the engine defaults (not exposed here)."""
+
+    enabled: bool = False
+    start_random: int = 48
+    start_natural_a: int = 24
+    start_natural_b: int = 24
+    steps: int = 500_000
+    seed: int = 0
+    min_length: int = 70
+    beta_start: float = 1.0
+    beta_end: float = 10.0
+    teleport_frac: float = 0.3
+    record_every: int = 1000
+    polish: bool = True
+    polish_schedule: str = "fast"
+    execution: str = "local"     # local (default) | cluster | auto (predict wall-time vs budget)
+    local_budget_minutes: float = 30.0
+    n_shards: int = 32
+
+    @property
+    def n_chains(self) -> int:
+        return self.start_random + self.start_natural_a + self.start_natural_b
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DesignConfig":
+        _reject_unknown(cls, data, "design")
+        obj = cls(**data)
+        _require(min(obj.start_random, obj.start_natural_a, obj.start_natural_b) >= 0,
+                 "design.start_* counts must be >= 0")
+        if obj.enabled:
+            _require(obj.n_chains >= 1, "design.enabled needs start_random + start_natural_a "
+                     "+ start_natural_b >= 1")
+        _require(obj.steps >= 1, "design.steps must be >= 1")
+        _require(obj.beta_start > 0 and obj.beta_end > 0,
+                 "design.beta_start / beta_end must be > 0 (T = 1/beta; geometric ladder)")
+        _require(obj.min_length >= 1, "design.min_length must be >= 1")
+        _require(obj.record_every >= 1, "design.record_every must be >= 1")
+        _require(obj.n_shards >= 1, "design.n_shards must be >= 1")
+        _require(obj.local_budget_minutes > 0, "design.local_budget_minutes must be > 0")
+        _require(obj.execution in _EXECUTION, f"design.execution must be one of {_EXECUTION}")
+        _require(obj.polish_schedule in _POLISH_SCHEDULES,
+                 f"design.polish_schedule must be one of {_POLISH_SCHEDULES}")
+        return obj
+
+
+@dataclass(frozen=True)
 class CombineRunConfig:
     """The complete, validated configuration for one combine run."""
 
@@ -154,6 +214,7 @@ class CombineRunConfig:
     query: QueryConfig = field(default_factory=QueryConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     figures: CombineFiguresConfig = field(default_factory=CombineFiguresConfig)
+    design: DesignConfig = field(default_factory=DesignConfig)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -174,7 +235,8 @@ class CombineRunConfig:
         )
         names = [m.name for m in models]
         _require(len(set(names)) == len(names), f"config.models names must be unique; got {names}")
-        nested = {"query": QueryConfig, "scoring": ScoringConfig, "figures": CombineFiguresConfig}
+        nested = {"query": QueryConfig, "scoring": ScoringConfig,
+                  "figures": CombineFiguresConfig, "design": DesignConfig}
         kwargs = {k: v for k, v in data.items() if k not in nested and k != "models"}
         for key, sub_cls in nested.items():
             if data.get(key) is not None:

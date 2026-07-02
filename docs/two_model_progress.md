@@ -93,13 +93,22 @@ this file's git history (former §10.8–§10.20).
    `data/energy_weights.json` + `data/energy_weight_sweep.tsv` + the diagnostic
    `figs/energy_weights.pdf` (median energies vs `w_A`). For the CM/PPIC potts run
    this gives `w_CM=0.412`, `w_PPIC=0.588` (equalized median ≈ −105.9 a.u.).
-2. **Search for multi-model-satisfying sequences.** With a calibrated `E_tot`,
-   look for sequences that are low-energy under *both* models (the design goal):
-   MCMC / simulated annealing over sequences against `E_tot`, re-aligning with
-   `potts_align` (warm-started from the previous frame — the `fast` preset, see
-   `docs/POTTS_ALIGN.md` §6.8). Report whether the two constraints are jointly
-   satisfiable (a Pareto / infeasibility readout), which was explicitly out of
-   scope for the scoring milestone.
+2. **Search for multi-model-satisfying sequences. [BUILT]** Simulated annealing
+   (T=1→0.1) over sequence space against the calibrated `E_tot`, from many random
+   starts, with a Pareto / infeasibility readout. Full spec + runbook:
+   `docs/DESIGN_TWO_MODEL.md`; engine `src/SBM/design/anneal.py`, CLI
+   `scripts/design_two_model.py`, figures `src/SBM/utils/utils_design_plot.py`.
+   **Key design choice (deviates from the earlier sketch):** re-aligning with
+   `potts_align` at *every* Metropolis step (~16 s/step, gap-count-dependent cost)
+   is infeasible, so the alignment is folded **into** the Monte Carlo — the state
+   is (core sequence, gap placement in each frame) and every step is an O(L)
+   incremental update (~9 µs, gap-count-independent). At T→0.1 the thermal
+   alignment converges to the argmin, and a final warm-started `potts_align`
+   "polish" per chain reports the authoritative `E_A`/`E_B`. First runs on the
+   CM/PPIC potts models show the two constraints are in **tension**: designs land
+   in a compromise basin *between* the two native clouds (neither reaches its
+   family's native energy) and tend to shorten toward the length floor — the
+   Pareto front reads out the achievable trade-off.
 3. **The `N > L` insertion gap (only if needed).** `potts_align` handles `N ≤ L`
    (deletions/gaps), including cross-family pairs when `N ≤ L_other`. Sequences
    *longer* than a model (needing insertions) are out of scope. Under the "design
@@ -108,6 +117,8 @@ this file's git history (former §10.8–§10.20).
 
 ## See also
 
+- `docs/DESIGN_TWO_MODEL.md` — the two-model design engine (joint annealing):
+  spec, output schema, cost/SU model, and the Mac→Midway runbook.
 - `docs/POTTS_ALIGN.md` — the production aligner: full spec, cost model,
   DCAlign comparison, and how to run it in the combine pipeline (§11).
 - `README.md` — the combine pipeline, configs, and the scoring-method table.

@@ -29,3 +29,15 @@ scoring:
 
 figures:
   enabled: true
+
+design:                          # smoke-test the two-model design stage end-to-end
+  enabled: true
+  start_random: 2
+  start_natural_a: 1             # 1 CM-natural-seeded chain
+  start_natural_b: 1             # 1 PPIC-natural-seeded chain
+  steps: 2000
+  seed: 0
+  record_every: 500
+  polish: true
+  polish_schedule: fast          # warm-started; seconds at this size
+  execution: auto                # tiny estimate -> LOCAL

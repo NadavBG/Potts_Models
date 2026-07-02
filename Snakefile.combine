@@ -100,6 +100,69 @@ if cfg.scoring.method == "potts_align":
         POTTS_BASELINE_OUTPUTS += [POTTS_BASELINE_FIG]
 
 
+# ── Two-model design stage (joint annealing over E_tot; docs/DESIGN_TWO_MODEL.md) ──
+# Off unless design.enabled. Seeds trajectories from random + CM/PPIC naturals and
+# minimizes E_tot = w_A·E_A + w_B·E_B. The anneal is cheap (~9 µs/step); the final
+# warm-started potts_align polish is the variable cost. design.execution picks where
+# the anneal runs — LOCAL (Mac) or CLUSTER (emit config + hand-off, run the array on
+# Midway, pull back). "auto" predicts the local wall-time and runs local iff it is
+# within design.local_budget_minutes.
+DESIGN_DIR       = f"{RUN_ROOT}/design"
+DESIGN_CONFIG    = f"{DESIGN_DIR}/design_config.json"
+DESIGN_TRAJ      = f"{DESIGN_DIR}/trajectories.npz"
+DESIGN_TSV       = f"{DESIGN_DIR}/designed.tsv"
+DESIGN_FASTA     = f"{DESIGN_DIR}/designed_sequences.fasta"
+DESIGN_MANIFEST  = f"{DESIGN_DIR}/design_manifest.json"
+DESIGN_ALN_A     = f"{DESIGN_DIR}/design_aln_A.fasta"   # designs in model-A frame (uploadable)
+DESIGN_ALN_B     = f"{DESIGN_DIR}/design_aln_B.fasta"   # designs in model-B frame
+DESIGN_HANDOFF   = f"{DESIGN_DIR}/MIDWAY_HANDOFF.txt"
+DESIGN_TRAJ_FIG  = f"{RUN_ROOT}/figs/design_trajectories.pdf"
+DESIGN_PHASE_FIG = f"{RUN_ROOT}/figs/design_phase_space.pdf"
+DESIGN_LEN_FIG   = f"{RUN_ROOT}/figs/design_lengths.pdf"
+DESIGN_ALN_FIG   = f"{RUN_ROOT}/figs/design_alignment.pdf"
+
+# Cost model: per-step ~15 µs (measured on the CM/PPIC models, 8 cores); per-chain
+# warm-started polish upper bounds by schedule (measured, conservative — high-gap CM
+# frame). Bounds the execution: auto local-vs-cluster gate.
+_DESIGN_PER_STEP_S = 1.5e-5
+_DESIGN_POLISH_S = {"auto": 220.0, "fast": 6.0, "default": 220.0, "thorough": 440.0}
+
+
+def _design_runs_local():
+    """True to run the anneal on the Mac, False to emit the cluster config + hand-off.
+
+    ``execution: local``/``cluster`` force it; ``auto`` compares a predicted local
+    wall-time (anneal + polish, over ``workflow.cores``) to ``local_budget_minutes``."""
+    d = cfg.design
+    if d.execution == "local":
+        return True
+    if d.execution == "cluster":
+        return False
+    cores = max(1, int(getattr(workflow, "cores", 1) or 1))
+    anneal_s = d.n_chains * d.steps * _DESIGN_PER_STEP_S
+    polish_s = d.n_chains * (_DESIGN_POLISH_S[d.polish_schedule] if d.polish else 0.0)
+    est_min = (anneal_s + polish_s) / cores / 60.0
+    verdict = "LOCAL" if est_min <= d.local_budget_minutes else "CLUSTER"
+    print(f"[design] estimated {est_min:.1f} min on {cores} cores "
+          f"(n_chains={d.n_chains}, steps={d.steps}, "
+          f"polish={d.polish_schedule if d.polish else 'off'}); "
+          f"budget {d.local_budget_minutes} min -> {verdict}", file=sys.stderr)
+    return est_min <= d.local_budget_minutes
+
+
+DESIGN_OUTPUTS = []
+_DESIGN_LOCAL = False
+if cfg.design.enabled:
+    _DESIGN_LOCAL = _design_runs_local()
+    if _DESIGN_LOCAL:
+        DESIGN_OUTPUTS = [DESIGN_TRAJ, DESIGN_TSV, DESIGN_FASTA, DESIGN_MANIFEST,
+                          DESIGN_ALN_A, DESIGN_ALN_B]
+        if cfg.figures.enabled:
+            DESIGN_OUTPUTS += [DESIGN_TRAJ_FIG, DESIGN_PHASE_FIG, DESIGN_LEN_FIG, DESIGN_ALN_FIG]
+    else:
+        DESIGN_OUTPUTS = [DESIGN_CONFIG, DESIGN_HANDOFF]
+
+
 # ── Aggregate target ──────────────────────────────────────────────────────
 rule all:
     default_target: True
@@ -111,6 +174,7 @@ rule all:
         *WEIGHTS_OUTPUTS,
         *([ENERGY_FIG] if cfg.figures.enabled else []),
         *POTTS_BASELINE_OUTPUTS,
+        *DESIGN_OUTPUTS,
         RUN_MANIFEST,
 
 
@@ -221,6 +285,96 @@ rule compute_weights:
         "scripts/wf/run_compute_weights.py"
 
 
+# ── Two-model design: resolve the run spec, then run locally OR emit a hand-off ──
+if cfg.design.enabled:
+
+    rule design_config:
+        input:
+            models=MODELS_JSON,
+            weights=WEIGHTS_JSON,
+        output:
+            DESIGN_CONFIG,
+        params:
+            run_root=RUN_ROOT,
+        log:
+            f"{RUN_ROOT}/logs/design_config.log"
+        threads: 1
+        resources:
+            mem_mb=2000,
+            runtime=15,
+        script:
+            "scripts/wf/run_design_config.py"
+
+    if _DESIGN_LOCAL:
+
+        rule design_local:
+            input:
+                config=DESIGN_CONFIG,
+            output:
+                traj=DESIGN_TRAJ,
+                tsv=DESIGN_TSV,
+                fasta=DESIGN_FASTA,
+                manifest=DESIGN_MANIFEST,
+                aln_a=DESIGN_ALN_A,
+                aln_b=DESIGN_ALN_B,
+            log:
+                f"{RUN_ROOT}/logs/design_local.log"
+            threads: workflow.cores
+            resources:
+                mem_mb=8000,
+                runtime=720,
+            script:
+                "scripts/wf/run_design_local.py"
+
+    else:
+
+        rule design_handoff:
+            input:
+                config=DESIGN_CONFIG,
+            output:
+                DESIGN_HANDOFF,
+            params:
+                run_root=RUN_ROOT,
+            log:
+                f"{RUN_ROOT}/logs/design_handoff.log"
+            threads: 1
+            resources:
+                mem_mb=256,
+                runtime=2,
+            script:
+                "scripts/wf/run_design_handoff.py"
+
+    # Render is defined in BOTH modes: locally it's part of the run; for a cluster run
+    # it renders once trajectories.npz has been pulled back (target the figs explicitly,
+    # e.g. `snakemake ... <run_root>/figs/design_alignment.pdf`). Its inputs come from
+    # design_local (local) or the synced gather (cluster) — Snakemake needs no rule to
+    # "produce" them in cluster mode, they are already on disk.
+    if cfg.figures.enabled:
+
+        rule design_render:
+            input:
+                traj=DESIGN_TRAJ,
+                manifest=DESIGN_MANIFEST,
+                scores=SCORES,
+                aln_a=DESIGN_ALN_A,
+                aln_b=DESIGN_ALN_B,
+            output:
+                DESIGN_TRAJ_FIG,
+                DESIGN_PHASE_FIG,
+                DESIGN_LEN_FIG,
+                DESIGN_ALN_FIG,
+            params:
+                run_root=RUN_ROOT,
+            log:
+                f"{RUN_ROOT}/logs/design_render.log"
+            threads: 1
+            resources:
+                mem_mb=4000,
+                runtime=30,
+            script:
+                "scripts/wf/run_render_design.py"
+
+
 # ── potts_align ground-state-recovery baseline (only when method=potts_align) ──
 if cfg.scoring.method == "potts_align":
 
@@ -256,6 +410,7 @@ rule run_manifest:
         *WEIGHTS_OUTPUTS,
         *([ENERGY_FIG] if cfg.figures.enabled else []),
         *POTTS_BASELINE_OUTPUTS,
+        *DESIGN_OUTPUTS,
     output:
         RUN_MANIFEST,
     params:
