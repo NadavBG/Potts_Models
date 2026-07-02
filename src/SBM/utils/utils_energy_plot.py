@@ -90,3 +90,60 @@ def render_two_model_energy(
     plt.close(fig)
     log.info("wrote energy figure: %s", saved)
     return Path(saved)
+
+
+def render_energy_weights(
+    sweep: pd.DataFrame,
+    *,
+    w_A: float,
+    m_A: float,
+    m_B: float,
+    model_names: tuple[str, str],
+    out_pdf: Path,
+) -> Path:
+    """Plot the two families' weighted median energies vs ``w_A`` (``w_B = 1 − w_A``).
+
+    Two straight lines — family A's contribution ``w_A·m_A`` and family B's
+    ``(1 − w_A)·m_B`` — cross at the ``w_A`` that equalizes them (the derived
+    weight). ``m_A``/``m_B`` are the median native energies; ``w_A`` the chosen
+    weight. Routed through ``scripts/lab_plotting.py`` for the palette + PDF
+    provenance metadata.
+    """
+    plt.style.use("lab-paper")
+    name_A, name_B = model_names
+    color_A = lab_plotting.WONG_PALETTE[1]  # orange
+    color_B = lab_plotting.WONG_PALETTE[2]  # sky blue
+    equalized = w_A * m_A  # == (1 - w_A) * m_B by construction
+
+    fig, ax = plt.subplots()
+    ax.plot(sweep["w_A"], sweep["weighted_median_A"], color=color_A, lw=1.6,
+            label=f"$w_A \\cdot m_{{{name_A}}}$")
+    ax.plot(sweep["w_A"], sweep["weighted_median_B"], color=color_B, lw=1.6,
+            label=f"$(1-w_A)\\cdot m_{{{name_B}}}$")
+
+    # Crossing = the derived weight: equal weighted median native energy.
+    chrome = lab_plotting.LAB_COLORS["chrome"]
+    ax.axvline(w_A, color=chrome, lw=0.8, ls="--", zorder=0)
+    ax.axhline(equalized, color=chrome, lw=0.8, ls="--", zorder=0)
+    ax.plot([w_A], [equalized], marker="o", ms=6,
+            color=lab_plotting.LAB_COLORS["highlight"], zorder=5)
+    ax.annotate(
+        f"$w_{{{name_A}}}$={w_A:.3f}, $w_{{{name_B}}}$={1 - w_A:.3f}\n"
+        f"equalized E={equalized:.1f} a.u.",
+        xy=(w_A, equalized), xytext=(6, 6), textcoords="offset points",
+        fontsize="x-small", va="bottom", ha="left",
+    )
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_xlabel(f"$w_A$ = weight on E under {name_A} ($w_A + w_B = 1$)")
+    ax.set_ylabel("weighted median native energy (a.u.)")
+    ax.legend(fontsize="x-small", frameon=False, loc="best")
+    lab_plotting.panel_label(ax, "A")
+
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    saved = lab_plotting.save_figure(
+        fig, out_pdf, extra_metadata={"Keywords": "sbm_figure=energy_weights"}
+    )
+    plt.close(fig)
+    log.info("wrote energy-weights figure: %s", saved)
+    return Path(saved)

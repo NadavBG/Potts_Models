@@ -37,13 +37,14 @@ description: Cross-score CM and PPIC under both models via potts_align gap-place
 seed: 42
 omp_num_threads: null
 
-models:                        # exactly two; E_tot = w_A*E_A + w_B*E_B
+models:                        # exactly two; E_tot = w_A*E_A + w_B*E_B, where the
+                               # weights are NOT set here — the compute_weights stage
+                               # derives them post-hoc from the naturals so each
+                               # family's median native energy contributes equally.
   - name: CM-bm-dense          # L=96
     run_dir: results/CM-bm-dense/iter-002-base-model
-    weight: 1.0
   - name: PPIC-dense           # L=91
     run_dir: results/PPIC-dense/iter-001-baseline
-    weight: 1.0
 
 query:
   source: model_sets

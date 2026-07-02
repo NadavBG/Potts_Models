@@ -303,7 +303,8 @@ description: ""
 seed: 42                       # required for the marginal estimator; logged
 omp_num_threads: null
 
-models:                        # required: exactly two {name, run_dir, weight}
+models:                        # required: exactly two {name, run_dir} (E_tot weights
+                               # are derived post-hoc from the naturals, not set here)
   - name: CM-bm-dense          # the EXACT model variant — labels the figure axes,
     run_dir: results/CM-bm-dense/iter-002-base-model   # query groups, and manifests
     weight: 1.0
@@ -350,14 +351,16 @@ To score **your own sequences** instead of the models' training/synthetic sets, 
 ```text
 combine/<run_name>/iter-NNN-<tag>/
 ├── config_snapshot.yaml   # the exact validated config
-├── models.json            # the two models: name, run_dir, sha256, length L, weight
+├── models.json            # the two models: name, run_dir, sha256, length L
 ├── query/query.fasta      # the sequences scored (+ groups.json: origin + group per id)
 ├── scores.tsv             # tidy, one row per (sequence × model): energy, ess, mc_stderr, ...
 ├── scores_detail.json     # per sequence: E_A, E_B, E_tot, diagnostics, best alignment per model
 ├── alignments.txt         # HUMAN-READABLE: each sequence's best alignment under EACH model,
 │                          #   stacked side-by-side, with both energies (see below)
 ├── manifest.json          # scoring provenance: model hashes, method, seed, ESS summary, git
+├── energy_weights.json    # E_tot weights derived post-hoc from the naturals (+ energy_weight_sweep.tsv)
 ├── figs/two_model_energy.pdf  # E_A vs E_B scatter, captioned with the exact models used
+├── figs/energy_weights.pdf    # weighted median native energy vs w_A; the crossing is the derived weight
 └── run_manifest.json      # aggregate
 ```
 

@@ -82,12 +82,17 @@ this file's git history (former §10.8–§10.20).
 
 ## Next steps
 
-1. **Define `E_tot` properly — cross-model scale calibration.** `E_A` and `E_B`
-   are each in their own model's (gauge-fixed but un-calibrated) energy units, so
-   naively summing them is arbitrary. Decide how to make them commensurable —
-   e.g. z-score each against its own native-energy distribution, or fit `w_A`,
-   `w_B` so that natives of each family sit at a common reference — before reading
-   `E_tot` as a real objective. This is the immediate task.
+1. **Define `E_tot` properly — cross-model scale calibration. [DONE]** `E_A` and
+   `E_B` are each in their own model's (gauge-fixed but un-calibrated) energy
+   units, so naively summing them is arbitrary. Resolved: the weights are no
+   longer configured — the `compute_weights` stage derives them *post-hoc from
+   the naturals* so each family's **median native energy** contributes equally to
+   `E_tot`. With `w_A + w_B = 1` and `m_X` = median energy of family X's naturals
+   under its home model, `w_A = m_B/(m_A+m_B)`, `w_B = m_A/(m_A+m_B)` (equalizes
+   `w_A·m_A = w_B·m_B`). Code: `src/SBM/utils/energy_weights.py`; artifacts
+   `data/energy_weights.json` + `data/energy_weight_sweep.tsv` + the diagnostic
+   `figs/energy_weights.pdf` (median energies vs `w_A`). For the CM/PPIC potts run
+   this gives `w_CM=0.412`, `w_PPIC=0.588` (equalized median ≈ −105.9 a.u.).
 2. **Search for multi-model-satisfying sequences.** With a calibrated `E_tot`,
    look for sequences that are low-energy under *both* models (the design goal):
    MCMC / simulated annealing over sequences against `E_tot`, re-aligning with

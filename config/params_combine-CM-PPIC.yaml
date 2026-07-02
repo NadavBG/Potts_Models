@@ -14,17 +14,16 @@ description: Cross-score CM and PPIC natural + synthetic under both models  # No
 seed: 42
 omp_num_threads: null          # pin (e.g. 8) for reproducible per-sequence arrays
 
-models:                        # exactly two; E_tot = w_A*E_A + w_B*E_B.
+models:                        # exactly two; E_tot = w_A*E_A + w_B*E_B, weights
+                               # derived post-hoc from the naturals (compute_weights).
                                # `name` is the exact model variant (not just the
                                # family) — it labels the figure axes, the query
                                # groups, and the manifests, so you can tell which
                                # CM / PPIC model this run used at a glance.
   - name: CM-bm-dense
     run_dir: results/CM-bm-dense/iter-002-base-model
-    weight: 1.0
   - name: PPIC-dense
     run_dir: results/PPIC-dense/iter-001-baseline
-    weight: 1.0
 
 query:
   source: model_sets           # each model's natural + synthetic sets

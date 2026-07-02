@@ -56,13 +56,12 @@ description: Cluster smoke test of the potts_align combine pipeline (tiny query 
 seed: 42
 omp_num_threads: null
 
-models:                        # exactly two; E_tot = w_A*E_A + w_B*E_B
+models:                        # exactly two; E_tot weights derived post-hoc from
+                               # the naturals (compute_weights), not set here.
   - name: CM-bm-dense          # L=96
     run_dir: results/CM-bm-dense/iter-002-base-model
-    weight: 1.0
   - name: PPIC-dense           # L=91
     run_dir: results/PPIC-dense/iter-001-baseline
-    weight: 1.0
 
 query:
   source: model_sets

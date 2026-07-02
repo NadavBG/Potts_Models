@@ -28,18 +28,22 @@ _METHODS = ("auto", "in_frame", "map", "marginal", "potts_align")
 
 @dataclass(frozen=True)
 class ModelRef:
-    """One model to score against: a label, its run dir, and a weight."""
+    """One model to score against: a label and its run dir.
+
+    No weight here by design: the E_tot combining weights are NOT configured, they
+    are *derived post-hoc from the naturals* so each family's median native energy
+    contributes equally to E_tot (the `compute_weights` stage; SBM.utils.energy_weights).
+    A stray `weight:` key is therefore rejected by `_reject_unknown`.
+    """
 
     name: str
     run_dir: str
-    weight: float = 1.0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], *, ctx: str) -> "ModelRef":
         _reject_unknown(cls, data, ctx)
         _require("name" in data and "run_dir" in data, f"{ctx}: needs 'name' and 'run_dir'")
-        obj = cls(name=str(data["name"]), run_dir=str(data["run_dir"]),
-                  weight=float(data.get("weight", 1.0)))
+        obj = cls(name=str(data["name"]), run_dir=str(data["run_dir"]))
         _require(bool(obj.name), f"{ctx}.name must be non-empty")
         return obj
 
@@ -165,8 +169,8 @@ class CombineRunConfig:
         ]
         _require(
             len(models) == 2,
-            f"config.models must list exactly two models (E_tot = w_A·E_A + w_B·E_B); "
-            f"got {len(models)}",
+            f"config.models must list exactly two models (E_tot = w_A·E_A + w_B·E_B, "
+            f"weights derived post-hoc from the naturals); got {len(models)}",
         )
         names = [m.name for m in models]
         _require(len(set(names)) == len(names), f"config.models names must be unique; got {names}")

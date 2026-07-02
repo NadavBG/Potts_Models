@@ -55,6 +55,17 @@ SCORE_MANIFEST = f"{RUN_ROOT}/provenance/score_manifest.json"
 ENERGY_FIG     = f"{RUN_ROOT}/figs/two_model_energy.pdf"
 RUN_MANIFEST   = f"{RUN_ROOT}/provenance/run_manifest.json"
 
+# E_tot combining weights, derived post-hoc from the naturals (compute_weights
+# rule): the weights equalize each family's median native energy so E_tot is not
+# biased toward one family. JSON = the calculation; sweep TSV backs the figure.
+WEIGHTS_JSON   = f"{RUN_ROOT}/data/energy_weights.json"
+WEIGHTS_SWEEP  = f"{RUN_ROOT}/data/energy_weight_sweep.tsv"
+WEIGHTS_FIG    = f"{RUN_ROOT}/figs/energy_weights.pdf"
+
+WEIGHTS_OUTPUTS = [WEIGHTS_JSON, WEIGHTS_SWEEP] + (
+    [WEIGHTS_FIG] if cfg.figures.enabled else []
+)
+
 # potts_align cluster cache (only for method=potts_align). The Slurm gather writes
 # <model>/alignments.tsv here out-of-process; the score rule reads it (an external
 # DAG input, exactly like the dcalign cache) and recomputes energies in-frame.
@@ -97,6 +108,7 @@ rule all:
         MODELS_JSON,
         QUERY_FASTA,
         SCORES,
+        *WEIGHTS_OUTPUTS,
         *([ENERGY_FIG] if cfg.figures.enabled else []),
         *POTTS_BASELINE_OUTPUTS,
         RUN_MANIFEST,
@@ -190,6 +202,25 @@ if cfg.figures.enabled:
             "scripts/wf/run_render_combine.py"
 
 
+# ── E_tot combining weights, derived from the naturals (method-agnostic) ──
+rule compute_weights:
+    input:
+        scores=SCORES,
+        models=MODELS_JSON,
+    output:
+        weights=WEIGHTS_JSON,
+        sweep=WEIGHTS_SWEEP,
+        **({"fig": WEIGHTS_FIG} if cfg.figures.enabled else {}),
+    log:
+        f"{RUN_ROOT}/logs/compute_weights.log"
+    threads: 1
+    resources:
+        mem_mb=4000,
+        runtime=15,
+    script:
+        "scripts/wf/run_compute_weights.py"
+
+
 # ── potts_align ground-state-recovery baseline (only when method=potts_align) ──
 if cfg.scoring.method == "potts_align":
 
@@ -222,6 +253,7 @@ rule run_manifest:
         CONFIG_SNAP,
         MODELS_JSON,
         SCORES,
+        *WEIGHTS_OUTPUTS,
         *([ENERGY_FIG] if cfg.figures.enabled else []),
         *POTTS_BASELINE_OUTPUTS,
     output:

@@ -1,10 +1,12 @@
 """Snakemake wrapper: score the query set under both models.
 
 Reads ``models.json`` (from resolve_models) for the two model paths / names /
-weights / seed-MSA paths, then drives ``scripts/score_two_models.py`` to write a
-tidy ``scores.tsv``, a per-sequence ``scores_detail.json``, and a provenance
-``manifest.json``. The master seed flows through so marginal scoring is
-reproducible (per-sequence seeds are derived deterministically downstream).
+seed-MSA paths, then drives ``scripts/score_two_models.py`` to write a tidy
+``scores.tsv``, a per-sequence ``scores_detail.json``, and a provenance
+``manifest.json``. Scoring is unweighted (per-model E_A / E_B); the E_tot
+combining weights are derived post-hoc from the naturals by the compute_weights
+stage. The master seed flows through so marginal scoring is reproducible
+(per-sequence seeds are derived deterministically downstream).
 """
 
 import json
@@ -30,7 +32,6 @@ argv = [
     "--fasta", str(snakemake.input.fasta),  # noqa: F821
     "--groups", str(snakemake.input.groups),  # noqa: F821
     "--method", cfg.scoring.method,
-    "--weights", str(model_A["weight"]), str(model_B["weight"]),
     "--n-samples", str(cfg.scoring.n_samples),
     "--seed", str(cfg.seed),
     "--ess-threshold", str(cfg.scoring.ess_threshold),

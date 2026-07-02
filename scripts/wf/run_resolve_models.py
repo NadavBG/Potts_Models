@@ -1,8 +1,10 @@
 """Snakemake wrapper: resolve the two referenced models into a models.json.
 
 Records, per model, its label, run dir, model.npy path + sha256, aligned length
-L, seed-MSA path, and weight — the provenance pointer the score / render stages
-and the aggregate manifest rely on. Fails loudly if a referenced model is absent.
+L, and seed-MSA path — the provenance pointer the score / render stages and the
+aggregate manifest rely on. Fails loudly if a referenced model is absent. (No
+weight: the E_tot combining weights are derived post-hoc from the naturals by the
+compute_weights stage, not carried on the model refs.)
 """
 
 import json
@@ -36,7 +38,6 @@ for ref in cfg.models:
         "L": int(h.shape[0]),
         "q": int(h.shape[1]),
         "seed_msa": str(smsa) if smsa is not None else None,
-        "weight": ref.weight,
     })
     log.info("resolved model %r: L=%d, %s", ref.name, h.shape[0], model_path)
 

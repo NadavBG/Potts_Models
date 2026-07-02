@@ -9,13 +9,12 @@ description: Fast smoke test of the two-model combine pipeline
 seed: 42
 omp_num_threads: null
 
-models:
+models:                        # E_tot weights derived post-hoc from the naturals
+                               # (compute_weights), not set here.
   - name: CM-bm-dense
     run_dir: results/CM-bm-dense/iter-002-base-model
-    weight: 1.0
   - name: PPIC-dense
     run_dir: results/PPIC-dense/iter-001-baseline
-    weight: 1.0
 
 query:
   source: model_sets

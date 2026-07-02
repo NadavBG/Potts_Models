@@ -32,7 +32,7 @@ manifest = {
     "run_root": str(run_root),
     "description": cfg.description,
     "seed": cfg.seed,
-    "models": [{"name": m.name, "run_dir": m.run_dir, "weight": m.weight} for m in cfg.models],
+    "models": [{"name": m.name, "run_dir": m.run_dir} for m in cfg.models],
     "scoring": {"method": cfg.scoring.method, "n_samples": cfg.scoring.n_samples,
                 "ess_threshold": cfg.scoring.ess_threshold},
     "code": {
@@ -51,6 +51,10 @@ manifest = {
         "scores_detail": _file_ref(run_root / "data" / "scores_detail.json"),
         "alignments": _file_ref(run_root / "data" / "alignments.txt"),
         "score_manifest": _file_ref(run_root / "provenance" / "score_manifest.json"),
+        # E_tot combining weights derived from the naturals (compute_weights).
+        "energy_weights": _file_ref(run_root / "data" / "energy_weights.json"),
+        "energy_weight_sweep": _file_ref(run_root / "data" / "energy_weight_sweep.tsv"),
+        "energy_weights_figure": _file_ref(run_root / "figs" / "energy_weights.pdf"),
         "energy_figure": _file_ref(run_root / "figs" / "two_model_energy.pdf"),
         # potts_align ground-state-recovery baseline (only present for
         # method=potts_align; None otherwise).

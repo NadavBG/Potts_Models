@@ -489,16 +489,16 @@ def _build_potts_align_run_root(root):
 
     models_json = {"schema_version": 1, "models": [
         {"name": "A", "run_dir": str(mdir_A), "model_path": str(mdir_A / "model.npy"),
-         "L": L_A, "q": Q, "weight": 1.0},
+         "L": L_A, "q": Q},
         {"name": "B", "run_dir": str(mdir_B), "model_path": str(mdir_B / "model.npy"),
-         "L": L_B, "q": Q, "weight": 1.0},
+         "L": L_B, "q": Q},
     ]}
     (_P(root) / "models.json").write_text(json.dumps(models_json, indent=2), encoding="utf-8")
 
     cfg = {
         "run_name": "combine-potts-test", "seed": 42, "omp_num_threads": None,
-        "models": [{"name": "A", "run_dir": str(mdir_A), "weight": 1.0},
-                   {"name": "B", "run_dir": str(mdir_B), "weight": 1.0}],
+        "models": [{"name": "A", "run_dir": str(mdir_A)},
+                   {"name": "B", "run_dir": str(mdir_B)}],
         "query": {"source": "model_sets", "include": ["natural"], "cap_per_group": 0,
                   "n_random": 1, "random_length": 5},
         "scoring": {"method": "potts_align", "n_shards": 2,
