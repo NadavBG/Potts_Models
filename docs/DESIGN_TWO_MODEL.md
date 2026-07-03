@@ -200,7 +200,7 @@ design:
   min_length: 70           # deletion floor on N (≤ min L = 91)
   polish: true
   polish_schedule: fast    # warm-started; keeps a run to minutes (see Cost / SU)
-  execution: auto          # auto | local | cluster (see below)
+  execution: cluster       # cluster (Midway, default) | auto | local (see below)
   local_budget_minutes: 30
   n_shards: 64             # Slurm array size if it goes CLUSTER
 ```
@@ -219,16 +219,19 @@ snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.
 The anneal is always Mac-cheap; the final warm-started `potts_align` polish is the only
 variable cost (high-gap frames). One knob decides where the anneal runs:
 
-- **`local`** — run the whole thing on the Mac now.
-- **`cluster`** — write `design/design_config.json` + `design/MIDWAY_HANDOFF.txt` and
-  **stop** (run the array on Midway, pull back, re-run to render — see the runbook below).
-- **`auto`** (default) — the Snakefile predicts the local wall-time
+- **`cluster`** (default) — write `design/design_config.json` + `design/MIDWAY_HANDOFF.txt`
+  and **stop** (run the array on Midway, pull back, re-run to render — see the runbook
+  below). Sequence generation is a Midway step by policy (`docs/RUNBOOK.md`), so this is
+  the default even though the default-size anneal is Mac-feasible.
+- **`local`** — run the whole thing on the Mac now (still ~2 min at the default size —
+  use this for a quick local iteration or the smoke test).
+- **`auto`** — the Snakefile predicts the local wall-time
   `n_chains × (steps·15µs + polish_per_chain) / --cores` and runs **local** iff it is
   `≤ local_budget_minutes`, else behaves as **cluster**. `polish_per_chain` is a
   conservative per-schedule constant (fast ≈ 6 s, default/auto ≈ 220 s, thorough ≈ 440 s).
 
-So the default-size run (96 chains, `fast` polish ≈ 2 min predicted) runs on the Mac; you
-only land on Midway by raising the chain count/steps or the polish depth past the budget.
+The default-size run (96 chains, `fast` polish) is ~2 min if you set `local`/`auto`; the
+shipped configs default to `cluster` so production sequence generation lands on Midway.
 
 ## Run it directly (CLI, for one-off exploration)
 

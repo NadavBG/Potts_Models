@@ -175,7 +175,7 @@ class DesignConfig:
     record_every: int = 1000
     polish: bool = True
     polish_schedule: str = "fast"
-    execution: str = "local"     # local (default) | cluster | auto (predict wall-time vs budget)
+    execution: str = "cluster"   # cluster (Midway, default) | local (Mac) | auto (predict wall-time vs budget)
     local_budget_minutes: float = 30.0
     n_shards: int = 32
 

@@ -90,7 +90,7 @@ design:                          # two-model joint annealing over E_tot (docs/DE
   min_length: 70                 # deletion floor on N (<= min model L = 91)
   polish: true
   polish_schedule: fast          # warm-started potts_align; keeps a run to minutes on the Mac
-  execution: local               # local (default) | auto (predict wall-time vs budget) | cluster
+  execution: cluster             # cluster (Midway, default) | auto (Mac if cheap, else Midway) | local (Mac)
   local_budget_minutes: 30.0     # used only by execution: auto; raise chains/steps for Midway
 
   n_shards: 64                   # Slurm array size if it goes CLUSTER

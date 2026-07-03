@@ -78,20 +78,26 @@ Outputs: `data/scores.tsv`, `data/energy_weights.json`, and the figures
 
 Design is a gated stage of the *same* combine config: add a `design:` block
 (`design.enabled: true`) and it anneals `E_tot` from random + CM/PPIC-natural
-starts. It runs on the Mac in minutes for the default size; set
-`design.execution: cluster` (or bump chains/steps) to run the Slurm array on
-Midway instead. Full spec + Mac→Midway runbook: `docs/DESIGN_TWO_MODEL.md`.
+starts. **The shipped configs default to `design.execution: cluster`** — sequence
+generation is a Midway step by policy — so `snakemake … all` on the Mac writes the
+run spec + hand-off and stops; you run the Slurm array on Midway, pull back, and
+render. (The anneal is Mac-cheap: set `design.execution: local` for a ~2-min local
+run, or `auto` to route by predicted wall-time.) Full spec + Mac→Midway runbook:
+`docs/DESIGN_TWO_MODEL.md`.
 
 ```bash
-# [MAC] default size runs here (design.execution: auto|local)
+# [MAC] writes design/design_config.json + MIDWAY_HANDOFF.txt, then stops (cluster default)
 snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
     --config run_root=<combine_run> --cores 8 all
+git add -A && git commit -m "design run config" && bash scripts/sync_models.sh push
 
-# [MIDWAY] for scale (design.execution: cluster): the Mac writes design/design_config.json
-#   + MIDWAY_HANDOFF.txt, you run pipeline/external/run_design.sh <run_root>, then:
-bash scripts/sync_models.sh pull                                          # [MAC]
-snakemake -s Snakefile.combine --configfile <config> --config run_root=<combine_run> \
-    --cores 8 <combine_run>/figs/design_alignment.pdf                     # [MAC] render
+# [MIDWAY] run the joint-anneal Slurm array
+bash pipeline/external/run_design.sh <combine_run>
+
+# [MAC] pull the gathered trajectories back, then render the design figures
+bash scripts/sync_models.sh pull
+snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
+    --config run_root=<combine_run> --cores 8 <combine_run>/figs/design_alignment.pdf
 ```
 
 Outputs: `design/designed_sequences.fasta`, `design/designed.tsv`,
