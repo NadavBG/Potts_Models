@@ -71,3 +71,6 @@ Thumbs.db
 
 # Scratch Notebook
 scratch.ipynb
+
+# Built TMalign binary (per-machine; recipe in pipeline/external/build_tmalign.sh)
+pipeline/bin/
