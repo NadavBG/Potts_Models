@@ -82,9 +82,27 @@ cache and a re-submit continues.
   report.md                           human summary + control-sanity checks
   provenance/manifest.json
 
-results/<model>/<iter>/natural_folds/<msa_sha8>/   REUSABLE per-MSA cache
-  structures/<id>.pdb + fold_scores/shard_*.tsv    (folded once per input MSA)
+natural_folds/<msa_sha8>/                          content-addressed per-MSA cache (own top-level tree)
+  structures/<id>.pdb + fold_scores/shard_*.tsv    (folded once per input MSA; PDBs Midway-only)
+  tm_vs_refs/<refkey>.tsv + <refkey>.meta.json     (TM-aligned once per ref pair)
 ```
+
+**Natural TM-align is cached, not recomputed.** The naturals dominate the
+TMalign cost (~28k CM+PPIC vs 96 designs), yet each natural's TM-score is a pure
+function of (its ESMFold PDB, the two reference folds) — no design dependency.
+So `characterize.py` TM-aligns the designs fresh every run but reads the naturals
+from a content-addressed cache at the top-level `natural_folds/<sha8>/tm_vs_refs/<refkey>.tsv`
+(`<sha8>` = the source-FASTA sha8 — the fold/TM is a property of the MSA, not of any
+run, so it is its own tree beside `results/` and `combine/`), keyed by
+`<refkey>` = a hash of the two references' content-sha + chain. A cache **miss**
+(no file, a partial file missing ids, or `--force-natural-tm`) TM-aligns and
+writes the cache + a `.meta.json` provenance sidecar; a **hit** reuses it. Because
+`<refkey>` changes iff a reference PDB/chain changes, a stale cache is impossible.
+`structure_compare.tsv` is the union of the fresh design table and the cached
+natural tables (the downstream merge is unchanged). `tm_vs_refs/` is a distinct
+name from `structures/`, so `sync_models.sh` mirrors the small TSVs to the Mac
+while the bulky PDBs stay Midway-side. The manifest records the `refkey` and the
+per-family hit/miss.
 
 `summary.tsv` columns: `sequence_id, group, length, plddt_mean, plddt_class,
 ptm, tm_A, rmsd_A, tm_B, rmsd_B, delta_tm, fold_call, E_A, E_B, E_tot, delta_E,
@@ -123,8 +141,9 @@ explicitly to force it (fails loudly if the table is still missing). Direct CLI:
 The CLI is backward-compatible with the Midway `characterize.py` merge driver, so
 that driver still renders if you let it — but the intended flow is `--skip-render`
 on Midway and render on the Mac after the pull. `sync_models.sh` moves the tables
-but **excludes** the bulky `results/*/natural_folds/*/structures/*.pdb` fold cache
-(~28k tiny files; only `fold_scores/*.tsv` travels) — see `docs/MODEL_SYNC.md`.
+but **excludes** the bulky `natural_folds/*/structures/*.pdb` fold cache
+(~28k tiny files; only the distilled `fold_scores/*.tsv` and `tm_vs_refs/*.tsv`
+travel) — see `docs/MODEL_SYNC.md`.
 
 ## Correctness check (built in)
 

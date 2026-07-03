@@ -63,10 +63,14 @@ run_b = next(m["run_dir"] for m in models if "PPIC" in m["name"])
 print(run_a, run_b, file_sha256(sys.argv[2])[:8], file_sha256(sys.argv[3])[:8])
 PY
 )
-CACHE_A="${REPO_ROOT}/${RUN_A}/natural_folds/${SHA_CM}"
-CACHE_B="${REPO_ROOT}/${RUN_B}/natural_folds/${SHA_PPIC}"
-echo "model A (CM)   run_dir=${RUN_A}  cache=${CACHE_A}"
-echo "model B (PPIC) run_dir=${RUN_B}  cache=${CACHE_B}"
+# The natural fold cache is content-addressed by the source-FASTA sha8 and lives
+# in a top-level natural_folds/ tree — it is a property of the FASTA, not of any
+# model run or combine run, so two models sharing an MSA share the fold (see
+# docs/CHARACTERIZE.md). RUN_A/RUN_B are kept only to label which model's naturals.
+CACHE_A="${REPO_ROOT}/natural_folds/${SHA_CM}"
+CACHE_B="${REPO_ROOT}/natural_folds/${SHA_PPIC}"
+echo "model A (CM)   [${RUN_A}]  cache=${CACHE_A}"
+echo "model B (PPIC) [${RUN_B}]  cache=${CACHE_B}"
 
 # Submit from characterize/ so #SBATCH --output=logs/... lands there.
 CHAR_DIR="${RUN_DIR}/characterize"

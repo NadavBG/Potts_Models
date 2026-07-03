@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Sync the durable artifacts that don't belong in git between the Mac and
-# Midway, with end-to-end checksum verification. Covers two trees:
-#   results/  trained models (big .npy blobs; ~0.5 GB/run)
-#   combine/  two-model runs, incl. the potts_align alignment cache the Mac scores
-# Replaces the old (never-populated) Git-LFS handoff. Both live on BOTH
-# machines: models so a cluster align run can read them, and the alignment
-# cache so the combine SCORING can run on the Mac after that align. Sync
-# specifics in docs/MODEL_SYNC.md. (Retired DCAlign runs are excluded — they
+# Midway, with end-to-end checksum verification. Covers three trees:
+#   results/        trained models (big .npy blobs; ~0.5 GB/run)
+#   combine/        two-model runs, incl. the potts_align alignment cache the Mac scores
+#   natural_folds/  the content-addressed ESMFold cache of the naturals (keyed by
+#                   source-FASTA sha8; the bulky per-sequence PDBs stay Midway-side
+#                   — only the distilled fold_scores/ + tm_vs_refs/ TSVs travel)
+# Replaces the old (never-populated) Git-LFS handoff. models + alignment cache
+# live on BOTH machines: models so a cluster align run can read them, and the
+# alignment cache so the combine SCORING can run on the Mac after that align.
+# Sync specifics in docs/MODEL_SYNC.md. (Retired DCAlign runs are excluded — they
 # live under .archive/ and never travel; see docs/two_model_progress.md.)
 #
 # Each tree gets its own <tree>/SHA256SUMS manifest. A tree absent on one side
@@ -30,7 +33,7 @@
 #                  `verify`/`verify --remote`)
 #   --host HOST    override SBM_MIDWAY_HOST
 #   --repo PATH    override SBM_MIDWAY_REPO (remote repo root; each synced tree —
-#                  results/, combine/ — is appended)
+#                  results/, combine/, natural_folds/ — is appended)
 #
 # ssh connections are multiplexed (ControlMaster), so a whole command — transfer
 # AND verify — authenticates to Midway only ONCE (one Duo/password prompt).
@@ -46,9 +49,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Trees synced (repo-root-relative). results/ = trained models; combine/ =
-# two-model runs incl. the potts_align cache. Override with SBM_SYNC_ROOTS.
-# IFS is $'\n\t' here (no space), so split explicitly on whitespace.
-IFS=$' \t\n' read -r -a SYNC_ROOTS <<< "${SBM_SYNC_ROOTS:-results combine}"
+# two-model runs incl. the potts_align cache; natural_folds/ = the content-
+# addressed ESMFold cache (PDBs excluded, TSVs travel). Override with
+# SBM_SYNC_ROOTS. IFS is $'\n\t' here (no space), so split explicitly on whitespace.
+IFS=$' \t\n' read -r -a SYNC_ROOTS <<< "${SBM_SYNC_ROOTS:-results combine natural_folds}"
 
 DEFAULT_HOST="midway3.rcc.uchicago.edu"
 DEFAULT_REPO="/project/ranganathanr/nadavbg/Potts_Models"
@@ -188,17 +192,16 @@ rsync_excludes() {
         #           Midway copies back (mirrored in the find prunes below).
         printf '%s\n' 'work/' 'shards/' 'logs/' '*.tar.zst' '*dcalign*'
     fi
-    if [[ "${root}" == "results" && "${WITH_FIGS}" -eq 0 ]]; then
+    if [[ "${root}" == "natural_folds" && "${WITH_FIGS}" -eq 0 ]]; then
         # structures/  natural_folds/<sha8>/structures/ = one ESMFold PDB per natural
         #           sequence (~28k tiny files; docs/CHARACTERIZE.md). The Mac only needs
-        #           the distilled fold_scores/*.tsv for figures; the PDB cache is Midway-
-        #           side (0-SU to regenerate). Excluding it keeps the sync from being
-        #           dominated by tens of thousands of tiny files. --with-figs includes it
-        #           (a full archive). MUST stay mirrored in find_durable() AND
-        #           build_remote_manifest() (all three gate on WITH_FIGS), or a pull's
-        #           verify FAILs on the manifested-but-not-transferred PDBs. The only
-        #           structures/ dirs in results/ are under natural_folds/; the combine
-        #           tree keeps its 96 design PDBs.
+        #           the distilled fold_scores/*.tsv (+ tm_vs_refs/*.tsv) for figures; the
+        #           PDB cache is Midway-side (0-SU to regenerate). Excluding it keeps the
+        #           sync from being dominated by tens of thousands of tiny files.
+        #           --with-figs includes it (a full archive). MUST stay mirrored in
+        #           find_durable() AND build_remote_manifest() (all three gate on
+        #           WITH_FIGS), or a pull's verify FAILs on the manifested-but-not-
+        #           transferred PDBs. The combine tree keeps its 96 design PDBs.
         printf '%s\n' 'structures/'
     fi
 }
@@ -218,10 +221,11 @@ find_durable() {
         prune+=(-o -name work -o -name shards -o -name logs -o -name '*dcalign*')
         extra=(! -name '*.tar.zst')
     fi
-    if [[ "${root}" == "results" && "${WITH_FIGS}" -eq 0 ]]; then
+    if [[ "${root}" == "natural_folds" && "${WITH_FIGS}" -eq 0 ]]; then
         # Mirror rsync_excludes + build_remote_manifest: drop natural_folds/<sha8>/
         # structures/ (the ~28k per-sequence ESMFold PDBs) from the manifest so verify
-        # stays in lockstep. fold_scores/ (the distilled TSVs) is kept — different name.
+        # stays in lockstep. fold_scores/ + tm_vs_refs/ (distilled TSVs) are kept —
+        # different name.
         prune+=(-o -name structures)
     fi
     # ${extra[@]+...} guards against bash 3.2 (macOS default) treating an empty
@@ -274,7 +278,7 @@ for root in "${roots[@]}"; do
         prune+=(-o -name work -o -name shards -o -name logs -o -name '*dcalign*')
         extra=(! -name '*.tar.zst')
     fi
-    if [ "$root" = "results" ] && [ "$with_figs" -eq 0 ]; then
+    if [ "$root" = "natural_folds" ] && [ "$with_figs" -eq 0 ]; then
         # Mirror rsync_excludes/find_durable: omit the ~28k natural_folds/*/structures/
         # ESMFold PDBs from the REMOTE manifest too, so a pull (which downloads this
         # SHA256SUMS but not the excluded PDBs) does not FAIL verify on them.

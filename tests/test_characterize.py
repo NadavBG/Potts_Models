@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from SBM.characterize import blast, fold, summary, tmscore
+from SBM.characterize import blast, fold, natural_cache, summary, tmscore
 
 
 # ── Sharding ────────────────────────────────────────────────────────────────
@@ -209,3 +209,77 @@ def test_write_and_read_tsv_roundtrip(tmp_path: Path) -> None:
     summary.write_tsv(rows, ["sequence_id", "group", "tm_A"], p)
     back = summary.read_tsv(p)
     assert back[0]["sequence_id"] == "s1" and back[0]["tm_A"] == "0.6"
+
+
+# ── natural TM-align cache ──────────────────────────────────────────────────
+
+
+def test_ref_pair_key_deterministic_and_sensitive() -> None:
+    k = natural_cache.ref_pair_key("aaa", "A", "bbb", "A")
+    assert k == natural_cache.ref_pair_key("aaa", "A", "bbb", "A")  # deterministic
+    assert len(k) == natural_cache.REFKEY_LEN
+    # Any change to a reference sha or chain mints a new key.
+    assert k != natural_cache.ref_pair_key("aaZ", "A", "bbb", "A")  # ref A content
+    assert k != natural_cache.ref_pair_key("aaa", "B", "bbb", "A")  # ref A chain
+    assert k != natural_cache.ref_pair_key("aaa", "A", "bbb", "B")  # ref B chain
+    # A/B are distinct roles: swapping them is a different key.
+    assert k != natural_cache.ref_pair_key("bbb", "A", "aaa", "A")
+
+
+def _write_compare_tsv(path: Path, ids: list[str], group: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("id\tgroup\ttm_ref_A\ttm_ref_B\n")
+        for rid in ids:
+            fh.write(f"{rid}\t{group}\t0.60\t0.40\n")
+
+
+def test_cache_covers_superset_and_partial(tmp_path: Path) -> None:
+    tsv = tmp_path / "tm_vs_refs" / "key.tsv"
+    _write_compare_tsv(tsv, ["n1", "n2", "n3"], "CM-natural")
+    assert natural_cache.cache_covers(tsv, {"n1", "n2"})  # subset -> hit
+    assert natural_cache.cache_covers(tsv, {"n1", "n2", "n3"})  # exact -> hit
+    assert not natural_cache.cache_covers(tsv, {"n1", "n4"})  # missing id -> miss
+    assert not natural_cache.cache_covers(tmp_path / "absent.tsv", {"n1"})  # no file
+    assert not natural_cache.cache_covers(tsv, set())  # nothing required -> not a hit
+
+
+def test_ids_in_fold_scores_unions_shards(tmp_path: Path) -> None:
+    fs = tmp_path / "fold_scores"
+    fs.mkdir(parents=True)
+    (fs / "shard_0.tsv").write_text("id\tgroup\nn1\tCM\nn2\tCM\n", encoding="utf-8")
+    (fs / "shard_1.tsv").write_text("id\tgroup\nn3\tCM\n", encoding="utf-8")
+    assert natural_cache.ids_in_fold_scores(tmp_path) == {"n1", "n2", "n3"}
+
+
+def test_merge_compare_tsvs_dedup_and_sort(tmp_path: Path) -> None:
+    design = tmp_path / "design_compare.tsv"
+    nat_a = tmp_path / "a.tsv"
+    nat_b = tmp_path / "b.tsv"
+    _write_compare_tsv(design, ["d2", "d1"], "design")
+    _write_compare_tsv(nat_a, ["a1"], "CM-natural")
+    _write_compare_tsv(nat_b, ["b1", "a1"], "PPIC-natural")  # a1 duplicates nat_a
+    out = tmp_path / "structure_compare.tsv"
+    n = natural_cache.merge_compare_tsvs([design, nat_a, nat_b], out)
+    assert n == 4  # d1, d2, a1, b1 (a1 deduped)
+    rows = summary.read_tsv(out)
+    assert [r["id"] for r in rows] == ["a1", "b1", "d1", "d2"]  # sorted by id
+    # First source to define an id wins: a1 came from nat_a (CM-natural).
+    a1 = next(r for r in rows if r["id"] == "a1")
+    assert a1["group"] == "CM-natural"
+
+
+def test_write_meta_records_provenance(tmp_path: Path) -> None:
+    meta_path = natural_cache.cache_meta(tmp_path / "sha8abcd", "refkey123456")
+    meta = natural_cache.write_meta(
+        meta_path, refkey="refkey123456",
+        ref_a="data/1ECM.pdb", ref_a_sha256="aaa", chain_a="A",
+        ref_b="data/1JNT.pdb", ref_b_sha256="bbb", chain_b="A",
+        tmalign="pipeline/bin/TMalign", n_rows=1253, source_sha8="sha8abcd")
+    assert meta_path.exists()
+    import json
+    on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert on_disk["refkey"] == "refkey123456"
+    assert on_disk["n_rows"] == 1253
+    assert on_disk["source_sha8"] == "sha8abcd"
+    assert on_disk["ref_a_sha256"] == "aaa" and on_disk["ref_b_sha256"] == "bbb"

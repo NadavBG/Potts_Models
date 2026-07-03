@@ -18,13 +18,14 @@ written only on Midway is the Slurm orchestration (`pipeline/external/*.sh`).
 | 2. design (generate sequences) | the joint-anneal Slurm array | `design_*` figures |
 | 3. characterize (fold + TM + BLAST) | ESMFold (GPU) + TM-align + BLAST + merge | `characterization_*` figures |
 
-`sync_models.sh` moves two trees — `results/` (models, seed MSAs, the
-`natural_folds` fold-score caches) and `combine/` (query, potts_align cache,
-scores, design + characterize tables). It **excludes** the bulky regenerable
-scratch: the `combine/` shard/work dirs and, in `results/`, the per-sequence
+`sync_models.sh` moves three trees — `results/` (models, seed MSAs), `combine/`
+(query, potts_align cache, scores, design + characterize tables), and
+`natural_folds/` (the content-addressed ESMFold cache of the naturals, keyed by
+source-FASTA sha8 — a property of the MSA, not of any run). It **excludes** the
+bulky regenerable scratch: the `combine/` shard/work dirs and the per-sequence
 `natural_folds/*/structures/*.pdb` ESMFold cache (~28k tiny files — only the
-distilled `fold_scores/*.tsv` travels; the PDBs stay on Midway, 0-SU to
-regenerate). See `docs/MODEL_SYNC.md`.
+distilled `fold_scores/*.tsv` + `tm_vs_refs/*.tsv` travel; the PDBs stay on
+Midway, 0-SU to regenerate). See `docs/MODEL_SYNC.md`.
 
 ---
 
@@ -110,7 +111,7 @@ Outputs: `design/designed_sequences.fasta`, `design/designed.tsv`,
 Predict a structure for every designed sequence (ESMFold, GPU), ask which of the
 two reference folds it resembles (TM-align vs 1ECM = fold A / CM and 1JNT = fold B
 / PPIC), and BLAST it. Naturals from each seed MSA are folded once as controls
-(cached under `results/<model>/<iter>/natural_folds/`). **Compute is Midway-only**
+(cached under the top-level content-addressed `natural_folds/<msa_sha8>/`). **Compute is Midway-only**
 (GPU + TM-align + BLAST binaries); the merge lands the tidy tables. Full detail +
 knobs + cost: `docs/CHARACTERIZE.md`.
 

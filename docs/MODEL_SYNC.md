@@ -3,7 +3,7 @@
 `scripts/sync_models.sh` syncs the large, gitignored artifacts that don't belong
 in git between the Mac and Midway, wrapping `rsync` with an independent SHA-256
 verification pass so a corrupted or truncated transfer fails loudly instead of
-silently producing a wrong file on the far side. It covers **two trees**:
+silently producing a wrong file on the far side. It covers **three trees**:
 
 - **`results/`** — trained models (`model.npy` ~47 MB; ~4.4 GB across all
   families). Meant to exist on both machines so the cluster alignment can read
@@ -13,10 +13,15 @@ silently producing a wrong file on the far side. It covers **two trees**:
   large query set is aligned on the cluster, it produces the cache; you pull it
   back and score on the Mac. (A small query set is scored directly on the Mac
   with no cache — `docs/POTTS_ALIGN.md` §11.)
+- **`natural_folds/`** — the content-addressed ESMFold cache of the naturals
+  (`natural_folds/<msa_sha8>/`, keyed by source-FASTA sha8; `docs/CHARACTERIZE.md`).
+  The fold is a property of the FASTA content, not of any run, so it is its own
+  tree rather than nested under a model. Only the distilled `fold_scores/` +
+  `tm_vs_refs/` TSVs travel; the bulky per-sequence PDBs stay Midway-side.
 
 Each tree gets its own `<tree>/SHA256SUMS` manifest. A tree absent on one side
 is skipped (a fresh Mac has no `combine/` until a run); a command fails only if
-neither tree is present. Override the tree list with
+no tree is present. Override the tree list with
 `SBM_SYNC_ROOTS="results ..."`. The Mac-primary workflow that motivates all this
 is `docs/POTTS_ALIGN.md` §11 (running `potts_align` locally and at cluster scale).
 
@@ -42,23 +47,36 @@ score a model, not the regenerable figure caches:
 |---|---|
 | `model.npy` | `figs/` (PDFs + `figs/inputs/stats_*.npy`, ~0.4 GB/run) |
 | `inputs/msa.npy` + `inputs/*.json` | `__pycache__/`, `.snakemake/`, `*.pyc`, `.DS_Store` |
-| `synthetic/align_T*.npy` + `*.json` | `natural_folds/*/structures/*.pdb` (the ~28k ESMFold PDB cache) |
+| `synthetic/align_T*.npy` + `*.json` | |
 | `masks/*.npy` + `*.json` | |
-| `natural_folds/*/fold_scores/*.tsv` (distilled fold scores) | |
 | `manifest.json`, `run_manifest.json`, `train_meta.json` | |
 
 Durable-only is ~50–60 MB/run vs ~0.5 GB/run. Figures regenerate from `model.npy`
 + `synthetic/` via `scripts/render_sbm.sh` / `render_figures.py`. Pass `--with-figs`
-to mirror everything (e.g. archiving a finished run).
+to mirror everything (e.g. archiving a finished run). The naturals fold cache is a
+separate tree (below), no longer nested under `results/`.
 
-**`natural_folds/*/structures/` (characterization fold cache) is excluded.** The
-per-MSA ESMFold cache (`docs/CHARACTERIZE.md`) is one PDB per natural sequence —
-tens of thousands of tiny files (e.g. ~27k for PPIC) that otherwise dominate the
-rsync stat/checksum time. Only the distilled `fold_scores/*.tsv` sync; the PDB
-cache stays Midway-side (0-SU to regenerate, and the Mac only needs the scores to
-render figures). Excluded by a `structures`-basename prune in both `rsync_excludes()`
-and `find_durable()` (mirrored so `verify` stays in lock-step). The `combine/` tree
-keeps its `characterize/structures/` (only the ~96 design PDBs).
+## What gets synced — `natural_folds/` (fold cache)
+
+The per-MSA ESMFold cache (`docs/CHARACTERIZE.md`) lives in its own top-level tree,
+`natural_folds/<msa_sha8>/`, content-addressed by the source-FASTA sha8 — it is a
+property of the FASTA, not of any model run or combine run, so a model and a combine
+that share an MSA share the fold.
+
+| Synced (durable) | Skipped (regenerable / scratch) |
+|---|---|
+| `fold_scores/*.tsv` (distilled pLDDT/pTM per natural) | `structures/*.pdb` (one ESMFold PDB per natural — ~28k tiny files) |
+| `tm_vs_refs/<refkey>.tsv` + `.meta.json` (cached TM-scores) | `__pycache__/`, `.snakemake/`, `*.pyc`, `.DS_Store` |
+
+**`natural_folds/*/structures/` is excluded.** One PDB per natural sequence — tens
+of thousands of tiny files (e.g. ~27k for PPIC) that otherwise dominate the rsync
+stat/checksum time. Only the distilled TSVs sync; the PDB cache stays Midway-side
+(0-SU to regenerate on the GPU, and the Mac only needs the scores to render figures).
+Excluded by a `structures`-basename prune in `rsync_excludes()`, `find_durable()`,
+**and** `build_remote_manifest()` — all three gate on `--with-figs`, mirrored so
+`verify` stays in lock-step. `--with-figs` includes the full PDB archive. (The
+`combine/` tree separately keeps its `characterize/structures/` — only the ~96 design
+PDBs.)
 
 ## What gets synced — `combine/` (potts_align cache)
 
@@ -98,7 +116,7 @@ Two independent layers protect against silent corruption:
    extra file that an exclude rule failed to drop — that is a wasted-bandwidth
    concern, not a corruption one.)
 
-Each manifest (`results/SHA256SUMS`, `combine/SHA256SUMS`) is standard
+Each manifest (`results/SHA256SUMS`, `combine/SHA256SUMS`, `natural_folds/SHA256SUMS`) is standard
 `sha256sum` format with repo-root-relative paths (e.g.
 `results/CM-bm-dense/iter-002-base-model/model.npy`), so it verifies identically
 on macOS (`sha256sum` or `shasum -a 256`) and Linux. Each lives under its
