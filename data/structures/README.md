@@ -1,7 +1,7 @@
 # data/structures/
 
-Reference structures used for downstream analysis (e.g. ProteinMPNN
-foldability scoring). One single-model backbone per family.
+Reference PDB structures, one per family. Kept as immutable reference
+structures.
 
 ## 1ECM.pdb
 
@@ -14,10 +14,7 @@ E. coli chorismate mutase, anchor structure for the CM family.
 - WT MSA residue count: 94 (96 columns minus 2 gaps at columns 0 and 65)
 
 The PDB chain is missing the first 3 N-terminal residues (`TSE`) of the
-MSA wildtype. `SBM.utils.mpnn_score.build_msa_to_pdb_map` aligns the
-PDB chain sequence to the WT MSA row to produce the MSA-column ↔
-PDB-residue map at runtime; do not assume `len(pdb_residues)` equals
-the number of non-gap WT columns.
+MSA wildtype.
 
 ## 1JNT.pdb
 
@@ -37,14 +34,11 @@ single-model `MINIMIZED AVERAGE` of the canonical 18-conformer ensemble
 **1JNS** (`REMARK 210`: "ENSEMBLE (1JNS) WAS REGULARIZED"; 1JNS itself
 designates no single representative conformer — `BEST REPRESENTATIVE
 CONFORMER IN THIS ENSEMBLE : NULL`). 1JNT and 1JNS have identical
-chain-A sequences; 1JNT avoids the multi-MODEL ambiguity that upstream
-ProteinMPNN's `parse_PDB` would hit on the ensemble file.
+chain-A sequences; 1JNT avoids the multi-MODEL ambiguity of the
+ensemble file.
 
 The PDB chain has one extra N-terminal residue (`A`, residue 1)
-relative to the MSA wildtype, which starts at PDB residue 2 (`K`). As
-with 1ECM, `SBM.utils.mpnn_score.build_msa_to_pdb_map` aligns the PDB
-chain sequence to the WT MSA row at runtime to build the MSA-column ↔
-PDB-residue map; the extra residue is simply unscored.
+relative to the MSA wildtype, which starts at PDB residue 2 (`K`).
 
 Do not modify these files. Re-download from RCSB if a fresh copy is
 needed and update the sha256 above.

@@ -30,6 +30,7 @@ for _p in (_SCRIPTS_DIR, _REPO_ROOT / "pruning"):
         sys.path.insert(0, str(_p))
 
 from SBM import combine_config as cc  # noqa: E402
+from SBM import derive_config as dc  # noqa: E402
 from SBM import workflow_config as wc  # noqa: E402
 
 #: Keys accepted on the Snakemake CLI/config that are not part of the
@@ -62,6 +63,12 @@ def load_combine_cfg_from_snakemake(snakemake) -> cc.CombineRunConfig:
     """Validate ``snakemake.config`` into a :class:`CombineRunConfig` (Snakefile.combine)."""
     raw = {k: v for k, v in dict(snakemake.config).items() if k not in _SNAKEFILE_ONLY_KEYS}
     return cc.from_dict(raw)
+
+
+def load_derive_cfg_from_snakemake(snakemake) -> dc.DeriveRunConfig:
+    """Validate ``snakemake.config`` into a :class:`DeriveRunConfig` (Snakefile.derive)."""
+    raw = {k: v for k, v in dict(snakemake.config).items() if k not in _SNAKEFILE_ONLY_KEYS}
+    return dc.from_dict(raw)
 
 
 def setup_stage_logging(snakemake, stage_name: str, level: int = logging.INFO) -> logging.Logger:

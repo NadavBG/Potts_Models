@@ -34,8 +34,7 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | The packed-vector encoding | `src/SBM/utils/utils.py:Wj` / `Jw` |
 | The zero-sum gauge transform | `src/SBM/utils/utils.py:Zero_Sum_Gauge` |
 | Statistics / reweighting | `src/SBM/utils/utils.py:CalcWeights`, `CalcStatsWeighted`, `CalcThreeCorrWeighted` |
-| Plot recipes (used by `render_figures.py`) | `src/SBM/utils/utils_plot.py:plot_stats` (7 modes; `correlations` is rows=temperatures × cols=1st/2nd/3rd order, `pca` is 1×(1+N_temps)). The `mpnn` figure is separate: `src/SBM/utils/utils_mpnn_plot.py:plot_mpnn_foldability` reads `mpnn_scores.json` directly. |
-| The ProteinMPNN foldability sweep | `scripts/mpnn_sweep.py` (orchestrator; called by `sample_sbm.py --mpnn-sweep`) and `src/SBM/utils/mpnn_score.py` (subprocess driver for upstream `protein_mpnn_run.py --score_only`). See `docs/MPNN_FOLDABILITY.md`. |
+| Plot recipes (used by `render_figures.py`) | `src/SBM/utils/utils_plot.py:plot_stats` (7 modes; `correlations` is rows=temperatures × cols=1st/2nd/3rd order, `pca` is 1×(1+N_temps)). |
 | Run-level provenance helpers | `src/SBM/provenance.py` |
 | The pruning CLI | `pruning/build_mask.py` (auto-names a per-run subdir; `--out-file PATH` writes a single mask to an exact path for the pipeline) |
 | The figure-save helpers | `scripts/lab_plotting.py` (`save_figure`, `panel_label`, `LAB_COLORS`) |
@@ -44,6 +43,7 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | The two-model scoring CLI | `scripts/score_two_models.py` (single sequence or batch FASTA → `E_A`, `E_B`, `E_tot` + diagnostics; `--method`, `--weights`, `--n-samples`, `--seed`) |
 | Couplings-aware aligner (the production aligner; gap-placement Potts min) | `src/SBM/energy/potts_align.py` — `enumerate_align` (exact global Potts-frame argmin for `N≤L` queries; few-gap), `pt_align` (parallel tempering w/ teleport move, the g-adaptive default high-gap engine), `sa_align`, `potts_align` (dispatch: enum if `C(L,N)≤budget` else g-adaptive PT), `PTSchedule.for_gap_count`, `perturb_frame`. Solved the combine worse-than-native residual with **no DCAlign** (it was a BP search failure). Full spec + cost model + DCAlign comparison + combine/cluster runbook: `docs/POTTS_ALIGN.md`. Cache I/O `src/SBM/utils/potts_align_cache.py`; ground-state baseline `src/SBM/energy/potts_align_baseline.py`; tests `tests/test_potts_align.py`, `tests/test_potts_align_baseline.py`. Handles cross-family when `N≤L`; **not** `N>L` (insertions). |
 | The two-model `combine` pipeline | `Snakefile.combine` driven by `config/params_combine-*.yaml` (validated by `src/SBM/combine_config.py`); run with `python scripts/iter.py run <name> "<tag>" --snakefile Snakefile.combine`. See "Combine pipeline" below. |
+| The post-hoc `derive` pipeline (keep only *some* params of a trained model) | `Snakefile.derive` driven by `config/params_derive-*.yaml` (validated by `src/SBM/derive_config.py`); filters an already-trained `model.npy` (fields only / couplings only / mask subset), re-gauges, lands a **normal `results/` dir** the combine pipeline consumes by `run_dir`. Core `src/SBM/derive.py` (`apply_filter`, `build_derived_dict`); reuses `pruning/build_mask.py` for the mask subset; wrappers `scripts/wf/run_derive*.py` + `run_copy_inputs.py`; tests `tests/test_derive.py`. Run with `python scripts/iter.py run <name> "<tag>" --snakefile Snakefile.derive`. See "Derive pipeline" below. |
 | The potts_align combine wiring (score every (query,model) with `N≤L`) | `scoring.method: potts_align` in `config/params_combine-CM-PPIC-potts.yaml`; the `score` rule reads a cluster-built cache (or recomputes live), the `potts_align_baseline` rule reports ΔE-vs-native per home pair. Cluster wrappers `scripts/wf/run_potts_align_{shard,gather}.py` + `pipeline/external/{run_potts_align_align,sbatch_potts_align_shard,sbatch_potts_align_gather,finalize_potts_align}.sh` (pure Python, no Julia). Cost-bounding knobs (`pa_cross_subsample_*`, `query.n_random` control) + the full runbook: `docs/POTTS_ALIGN.md` §11. |
 | The two-model design engine (joint annealing over `E_tot`) | `src/SBM/design/anneal.py` — `anneal_chain` (SA over (core sequence, gap placement in each frame); alignment folded into the MC so per-step cost is O(L), gap-count-independent), `AnnealSchedule`, `_sub_delta` (covers sub/insert/delete), `initial_state_from_frame` (natural-seeded starts), `polish` (warm-started `potts_align` for the authoritative argmin `E_A`/`E_B`). **Wired into the combine pipeline** as a gated `design:` stage of `Snakefile.combine` (schema `DesignConfig` in `src/SBM/combine_config.py`) — see "Combine pipeline" below; CLI `scripts/design_two_model.py` still runs it directly. Chains are seeded from a **start mix** (`start_random`/`start_natural_a`/`start_natural_b`; naturals from each model's `seed_msa`, core ≤ min(L)=91); figures color trajectories **by start type** (`src/SBM/utils/utils_design_plot.py` + `scripts/render_design.py`: trajectories, `E_A`/`E_B` phase space w/ Pareto front + landing heatmap, a final-length histogram, and a **ZAPPO-colored alignment** of the designs in both model frames), landing in `<run_root>/figs/`. Each design's in-frame **polish alignment** is also exported as `design/design_aln_{A,B}.fasta` (L=96 / L=91 gapped MSAs, uploadable to an alignment viewer). `design.execution: auto\|local\|cluster` picks where the anneal runs (auto = predicted local wall-time ≤ `local_budget_minutes`); polish defaults to `fast` (warm-started, ~5.5 s/chain — the polish, not the anneal, is the cost). Snakemake wrappers `scripts/wf/run_design_{config,local,render,handoff}.py`; cluster wrappers `scripts/wf/run_design_{shard,gather}.py`; tests `tests/test_design_two_model.py`. Runs end-to-end on the Mac (~min); Midway optional for scale. Full spec + Mac→Midway runbook + Midway-Claude sbatch TODO: `docs/DESIGN_TWO_MODEL.md`. |
 | Model transfer Mac ↔ Midway (models **and** the potts_align cache) | `scripts/sync_models.sh` (checksummed rsync; `push`/`pull`/`verify`/`status`; covers both `results/` and `combine/`). Not in git. See "Model transfer" below and `docs/MODEL_SYNC.md`. |
@@ -92,7 +92,7 @@ The `workflow` extra adds Snakemake + PyYAML for the pipeline (below). It instal
 
 `pip install -e .` works equivalently. Runtime deps are pinned in `pyproject.toml`; `requirements.lock` records exact pins for reproducible installs (`uv pip sync requirements.lock` then `uv pip install -e . --no-deps`).
 
-**Where compute runs (Mac-primary).** Run everything on the Mac: training, sampling, figures, MPNN, MSA stats, and combine scoring (all methods, including `potts_align`, are pure numpy). The Midway cluster is **optional** — used only to pre-build the `potts_align` alignment cache for a *large* combine query set (embarrassingly parallel over (query, model) pairs, sharded on a Slurm array, pure Python — no Julia). That align step writes a cache; you `sync_models.sh pull` it to the Mac and score locally. A small query set needs no cluster step. Runbook: `docs/POTTS_ALIGN.md` §11. (DCAlign, which previously drove the cluster step, is retired — `docs/two_model_progress.md`.)
+**Where compute runs (Mac-primary).** Run everything on the Mac: training, sampling, figures, MSA stats, and combine scoring (all methods, including `potts_align`, are pure numpy). The Midway cluster is **optional** — used only to pre-build the `potts_align` alignment cache for a *large* combine query set (embarrassingly parallel over (query, model) pairs, sharded on a Slurm array, pure Python — no Julia). That align step writes a cache; you `sync_models.sh pull` it to the Mac and score locally. A small query set needs no cluster step. Runbook: `docs/POTTS_ALIGN.md` §11. (DCAlign, which previously drove the cluster step, is retired — `docs/two_model_progress.md`.)
 
 **macOS toolchain.** AppleClang has no OpenMP, so `pyproject.toml` forces `cmake/macos_llvm.cmake`, which hard-codes `/opt/homebrew/opt/llvm` and `libomp`. `brew install llvm libomp ninja cmake` is required; Intel-Mac or non-Homebrew prefixes need the toolchain file edited. On Linux, `python3-dev`, GCC/G++ with OpenMP, CMake, and Ninja are sufficient.
 
@@ -110,7 +110,7 @@ The `workflow` extra adds Snakemake + PyYAML for the pipeline (below). It instal
 
 It is pure numpy/scipy (no MCMC) and covers spec §6 (gauge invariance, in-frame base case, MAP≈marginal when unambiguous, ordering sanity, IS diagnostics) plus the **DP anchor**: the profile-HMM forward log-Z, FFBS sample frequencies, marginal-IS estimate, and Viterbi path are all checked against *brute-force enumeration of every alignment* of a tiny query — this is the gold-standard check for `hmm.py`, so no `pyhmmer`/HMMER dependency is needed.
 
-The rest of the codebase has no unit-test suite. After non-trivial changes, run the pipeline smoke test (tiny config: 5 L-BFGS iters, 4 chains, N=50, MPNN with `skip_scoring`):
+The rest of the codebase has no unit-test suite. After non-trivial changes, run the pipeline smoke test (tiny config: 5 L-BFGS iters, 4 chains, N=50):
 
 ```
 snakemake --configfile config/params_tiny.yaml --cores 8 all
@@ -118,7 +118,7 @@ snakemake --configfile config/params_tiny.yaml --cores 8 all
 snakemake -s Snakefile.combine --configfile config/params_combine-tiny.yaml --cores 8 all
 ```
 
-The first exercises the whole DAG — encode_msa → mask → train → sample(×2) → mpnn → render → manifest, plus the independent `msa_stats` branch — and lands deterministic outputs under `results/tiny/` (assert on `inputs/msa.npy`, `model.npy`, `manifest.json`, `synthetic/align_T*.npy`, `figs/*.pdf`, `msa_stats.pdf`, `run_manifest.json`). The legacy `bash pruning/CM_example.sh` still works but is superseded by the pipeline.
+The first exercises the whole DAG — encode_msa → mask → train → sample(×2) → render → manifest, plus the independent `msa_stats` branch — and lands deterministic outputs under `results/tiny/` (assert on `inputs/msa.npy`, `model.npy`, `manifest.json`, `synthetic/align_T*.npy`, `figs/*.pdf`, `msa_stats.pdf`, `run_manifest.json`). The legacy `bash pruning/CM_example.sh` still works but is superseded by the pipeline.
 
 **Pruning workflow** lives in `pruning/` with its own `README.md` and `CM_example.sh`. The `"sca"` strategy depends on `pysca`, gated behind the `[sca]` optional-dependency group; `"fij"` and `"cij"` don't need it.
 
@@ -135,7 +135,7 @@ snakemake --configfile config/params_CM-bm-dense.yaml \
 ```
 
 - **Run dirs:** `RUN_ROOT = config.get("run_root") or results/<run_name>/`. The iteration helper mints `results/<run_name>/iter-NNN-<tag>/` (history-preserving) and updates a `latest` symlink. Re-running Snakemake against the same `run_root` overwrites in place (Snakemake re-runs only stages whose inputs changed); start a new iteration to keep the old one.
-- **Rules:** `snapshot_config`, `encode_msa` (aligned FASTA `msa_fasta` → `<run_dir>/inputs/msa.npy` + `inputs/msa_manifest.json`; every MSA-consuming rule depends on this, not on the FASTA), `msa_stats` (MSA-only — no model dependency, the fix for "can't make the MSA figure without inference"), `build_mask_J`/`build_mask_h` (only when `pruning.enabled`), `train`, `sample` (one job per temperature → `synthetic/align_T<temp>.npy`), `mpnn_sweep` (only when `mpnn.enabled`), `render` (`figs/`), `run_manifest`. Target `msa_stats_only` renders just the MSA figure with no training.
+- **Rules:** `snapshot_config`, `encode_msa` (aligned FASTA `msa_fasta` → `<run_dir>/inputs/msa.npy` + `inputs/msa_manifest.json`; every MSA-consuming rule depends on this, not on the FASTA), `msa_stats` (MSA-only — no model dependency, the fix for "can't make the MSA figure without inference"), `build_mask_J`/`build_mask_h` (only when `pruning.enabled`), `train`, `sample` (one job per temperature → `synthetic/align_T<temp>.npy`), `render` (`figs/`), `run_manifest`. Target `msa_stats_only` renders just the MSA figure with no training.
 - **MSA figure lands at** `<run_dir>/msa_stats.pdf` (run-dir top level, NOT under `figs/`, because `render` deletes+regenerates `figs/` each call).
 - **Provenance chain:** `config_snapshot.yaml` (exact validated params) → `manifest.json` (training; input hashes incl. mask paths, options, seed, git) → `figs/inputs/sources.json` (model + synthetic sha256s per figure) + each PDF's `sbm_run_id` keyword → `run_manifest.json` (aggregate). `iteration_note.md` carries the human hypothesis.
 - **Determinism:** the `sample` rule passes `--seed (master_seed + temp_index)` to reproduce the old multi-T `t_seed = seed+i` offset. `run_train.py` pins `OMP_NUM_THREADS` before importing the MCMC kernel **only when `omp_num_threads` is set** in the config; the shipped configs leave it `null`, so default runs are not bit-identical (set it to a fixed int for reproducible arrays).
@@ -158,6 +158,22 @@ snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC.yaml -
 - **Efficiency:** `query.cap_per_group` (seeded subsample, drop logged) bounds the cost on large naturals (e.g. ~26k PPIC seqs); `scoring.pa_cross_subsample_*` further bounds the expensive `potts_align` cross block; per-(sequence,model) seeds derive from the master seed in stable record order, so the run is reproducible.
 - **Note on real-data ESS (`marginal` only):** the fields-only proposal gives low ESS on the cross-family term for these strongly-coupled models (flagged, not hidden). For natives that is benign (the alignment posterior is sharply peaked, so marginal ≈ MAP ≈ in-frame); a genuinely poor cross-fit also reads as low ESS. `method: potts_align` (the couplings-aware minimizer) or annealed IS is the upgrade path.
 
+## Derive pipeline (post-hoc parameter filtering)
+
+A **derive** run takes ONE already-trained model and writes a new model that keeps only a *subset* of its parameters — e.g. a dense model's fields with all couplings zeroed. This is how you combine models where each contributes only some of its parameters, **without retraining**: the filter is applied to the fitted arrays after the fact. It is a separate entity from the single-model and combine pipelines — its own validated schema (`src/SBM/derive_config.py`, `config/params_derive-*.yaml`) and its own `Snakefile.derive` — but it deliberately lands a **normal `results/` run dir** so the combine pipeline consumes the derived model by `run_dir` with no combine-side change.
+
+```
+python scripts/iter.py run derive-CM-profile "fields-only" --snakefile Snakefile.derive
+# or directly:
+snakemake -s Snakefile.derive --configfile config/params_derive-CM-profile.yaml --cores 8 all
+```
+
+- **Post-hoc ≠ retrained profile (important).** The retrain-based `config/params_CM-bm-profile.yaml` re-fits `h` to the single-site statistics with `J≡0`. The derive pipeline instead keeps the dense model's *already-fit* `h` and zeros/masks `J` — a **different energy function**, a clean ablation of the dense model's field component. Both are valid; pick deliberately. The `*-profile.yaml` retrain configs are unchanged.
+- **The filter (`filter:` block).** `couplings` and `fields` are each `keep` / `zero` / a `{strategy, percent}` **MaskSpec** (reusing the pruning masks — 1=keep, `percent` = fraction removed; `theta`/`lbda`/`label`/`Dia_prior` mirror `pruning:` and are read only for a MaskSpec). Fields only = `{couplings: zero, fields: keep}`; couplings only = `{couplings: keep, fields: zero}`.
+- **Rules:** `snapshot_config` → `copy_inputs` (copies the source's `inputs/msa.npy` [+ `msa_manifest.json`] so combine finds naturals + seed MSA; no re-encoding) → `build_mask_J`/`build_mask_h` (only when that block is a MaskSpec) → `derive` (`model.npy` + `manifest.json` recording the **source model sha256 + the filter** + `command.sh`) → `sample` (synthetics sampled *from the derived model*; a `J≡0` model samples independent-site sequences via the standard kernel) → `render` (`figs/`) → `run_manifest`.
+- **Reuse, don't reinvent:** the mask is `pruning/build_mask.py` (same `(L,L,q,q)`/`(L,q)` 0/1 format), the filter is `J*=mask` / `h*=mask` applied to the fitted arrays, and the gauge is `Zero_Sum_Gauge` (with `J≡0` its correction to `h` vanishes, so fields-only preserves `h`; on an already-gauged source, couplings-only leaves `h` at zero). `J` is always written as a full zeros array (never `None`) so `load_model`'s shape checks pass. The derived dict drops the training-replicate `W_all`/`Seeds` (meaningless post-filter, read nowhere) and stores a single-point `J_norm` = the derived mean Frobenius coupling norm.
+- **Smoke test:** `snakemake -s Snakefile.derive --configfile config/params_derive-tiny.yaml --cores 8 all` (fields-only from `results/tiny/`).
+
 ## Model transfer (Mac ↔ Midway)
 
 Trained models (`results/<fam>/<iter>/`, ~0.5 GB each, 4.4 GB total) are **not in
@@ -171,8 +187,8 @@ to the Mac to score) — it syncs **two trees**, `results/` and `combine/`. Full
   transfer) / `verify [--remote]` / `hash`. All iterate over both trees; a tree
   absent on one side is skipped (override the list with `SBM_SYNC_ROOTS`).
 - **Durable-only by default.** `results/`: `model.npy`, `inputs/`,
-  `synthetic/*.npy` + JSON, `masks/`, `mpnn_scores.json`, provenance JSON;
-  excludes `figs/` + `mpnn_tmp/`. `combine/`: `potts_align/cache/<model>/alignments.tsv`
+  `synthetic/*.npy` + JSON, `masks/`, provenance JSON;
+  excludes `figs/`. `combine/`: `potts_align/cache/<model>/alignments.tsv`
   + `meta.json`, `query/`, config, scores/manifests; **excludes** the per-shard
   `shards/`/`logs/`/`work/` scratch + `*.tar.zst`, plus `.archive/` and any retired
   `*dcalign*` run (never synced). `--with-figs` mirrors everything.
@@ -234,10 +250,6 @@ The figure-side equivalent is `lab_plotting.save_figure()` (in `scripts/lab_plot
 - Per-replicate seeds are spawned with `np.random.SeedSequence(S).spawn(N_av)`.
 - The C++ ABI is `MC(w, states, tburn, Q, seed)` — the seed is mandatory.
 - Reproducibility under fixed `--seed` requires fixing `OMP_NUM_THREADS` and `N_chains` too. The manifest records both.
-
-### ProteinMPNN foldability sweep
-
-`bash scripts/sample_sbm.sh <run_dir> --mpnn-sweep` is an alternate sampling mode that produces a temperature ladder (default 0.1..1.0 step 0.1, 100 seqs/T) plus interpretability controls (WT, uniform random, shuffled WT, natural-MSA bootstrap) and scores them against `data/structures/1ECM.pdb` via the upstream `dauparas/ProteinMPNN` repo. Outputs land in `<run_dir>/synthetic/mpnn_sweep_seed<seed>/` (a subdir, so existing figure auto-discovery is unaffected). The figure name is `mpnn`; `render_figures.py` auto-detects the sweep dir. ProteinMPNN is not pip-installable: the user clones it next to this repo and sets `PROTEINMPNN_PATH` (or passes `--mpnn-path`); scoring is delegated via subprocess so this codebase doesn't import torch. See `docs/MPNN_FOLDABILITY.md` for setup, score interpretation, and benchmark table.
 
 ## Gotchas
 

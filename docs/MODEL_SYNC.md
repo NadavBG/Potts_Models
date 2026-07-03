@@ -41,9 +41,8 @@ score a model, not the regenerable figure caches:
 | Synced (durable) | Skipped (regenerable / scratch) |
 |---|---|
 | `model.npy` | `figs/` (PDFs + `figs/inputs/stats_*.npy`, ~0.4 GB/run) |
-| `inputs/msa.npy` + `inputs/*.json` | `synthetic/mpnn_sweep_*/mpnn_tmp/` |
-| `synthetic/align_T*.npy` + `*.json` | `__pycache__/`, `.snakemake/`, `*.pyc`, `.DS_Store` |
-| `synthetic/.../mpnn_scores.json` | |
+| `inputs/msa.npy` + `inputs/*.json` | `__pycache__/`, `.snakemake/`, `*.pyc`, `.DS_Store` |
+| `synthetic/align_T*.npy` + `*.json` | |
 | `masks/*.npy` + `*.json` | |
 | `manifest.json`, `run_manifest.json`, `train_meta.json` | |
 
@@ -152,12 +151,12 @@ The shared connection is torn down when the command finishes.
 - `--no-verify` — transfer only; skip the checksum verify. Use when you want a
   fast push/pull and will verify later (`verify` / `verify --remote`). You still
   authenticate once for the transfer.
-- `--with-figs` — also sync `figs/` and `mpnn_tmp/` (full mirror).
+- `--with-figs` — also sync `figs/` (full mirror).
 - `--mirror` — add rsync `--delete`: delete destination files absent from the
   synced set (prompts first; `--yes` to skip the prompt). **Off by default** —
   normal `push`/`pull` are additive and never delete, so a model present on only
   one side is preserved until you explicitly mirror. Note `--delete` does **not**
-  remove excluded dirs (`figs/`, `mpnn_tmp/`), so `--mirror` without `--with-figs`
+  remove excluded dirs (`figs/`), so `--mirror` without `--with-figs`
   mirrors the *durable* set, not the full tree.
 - `--host HOST`, `--repo PATH` — override the Midway host / repo root.
 

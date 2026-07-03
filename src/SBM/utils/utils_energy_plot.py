@@ -20,7 +20,6 @@ import pandas as pd
 
 # scripts/lab_plotting.py is a sibling script, not a package module. Add the
 # scripts/ dir to sys.path so ``import lab_plotting`` works regardless of cwd.
-# Mirrors the pattern in src/SBM/utils/utils_mpnn_plot.py.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPTS_DIR = _REPO_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:

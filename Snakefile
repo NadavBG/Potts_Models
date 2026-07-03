@@ -1,5 +1,5 @@
 # Potts_Models single-model pipeline: one MSA -> one trained Potts model
-# (+ synthetic samples, figures, optional MPNN sweep).
+# (+ synthetic samples, figures).
 #
 # This is a SEPARATE pipeline from the two-model `Snakefile.combine` (two
 # already-trained models -> combined energy): different DAG, different validated
@@ -55,7 +55,6 @@ TRAIN_META     = f"{RUN_ROOT}/train_meta.json"
 SYNTH_NPY      = f"{RUN_ROOT}/synthetic/align_T{{temp}}.npy"
 SYNTH_JSON     = f"{RUN_ROOT}/synthetic/align_T{{temp}}.json"
 FIGS_DIR       = f"{RUN_ROOT}/figs"
-MPNN_DIR       = f"{RUN_ROOT}/synthetic/mpnn_sweep_seed{cfg.mpnn_seed}"
 RUN_MANIFEST   = f"{RUN_ROOT}/run_manifest.json"
 
 # Sampler formats temperatures with "%.10g" (0.75 -> "0.75", 1.0 -> "1").
@@ -79,7 +78,6 @@ rule all:
         *([MSA_STATS_PDF] if cfg.msa_stats.enabled else []),
         expand(SYNTH_NPY, temp=TEMPS),
         FIGS_DIR,
-        *([MPNN_DIR] if cfg.mpnn.enabled else []),
         RUN_MANIFEST,
 
 
@@ -226,33 +224,9 @@ rule sample:
         "scripts/wf/run_sample.py"
 
 
-# ── ProteinMPNN foldability sweep (only when enabled) ────────────────────
-if cfg.mpnn.enabled:
-
-    rule mpnn_sweep:
-        input:
-            model=MODEL,
-            manifest=TRAIN_MANIFEST,
-        output:
-            directory(MPNN_DIR),
-        params:
-            run_root=RUN_ROOT,
-        log:
-            f"{RUN_ROOT}/logs/mpnn_sweep.log"
-        threads: 4
-        resources:
-            mem_mb=8000,
-            runtime=240,
-        script:
-            "scripts/wf/run_mpnn_sweep.py"
-
-
 # ── Figures ──────────────────────────────────────────────────────────────
 def _render_inputs(wildcards):
-    inputs = {"model": MODEL, "synthetic": expand(SYNTH_NPY, temp=TEMPS)}
-    if cfg.mpnn.enabled:
-        inputs["mpnn"] = MPNN_DIR
-    return inputs
+    return {"model": MODEL, "synthetic": expand(SYNTH_NPY, temp=TEMPS)}
 
 
 rule render:

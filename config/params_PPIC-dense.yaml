@@ -45,16 +45,3 @@ figures:
   sector: none                 # "emily" sector is CM-specific (L=96); n/a for PPIC
   max_seqs_per_group: 2000     # cap for O(N^2) similarity/diversity (0 = no cap);
                                # bounds the ~26k-seq PPIC MSA, seeded by the run seed
-
-mpnn:                          # on by default; scoring needs path + python (or the env vars)
-  enabled: true
-  pdb: data/structures/1JNT.pdb   # minimized-average of the canonical 1JNS NMR ensemble (E. coli Par10)
-  chain: A
-  seed: null                   # null = inherit the run's master seed
-  temperatures: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-  N_per_T: 100
-  controls: [wt, random, shuffled, natural]
-  model_name: v_48_020
-  skip_scoring: false
-  path: ../ProteinMPNN         # clone of github.com/dauparas/ProteinMPNN; null → $PROTEINMPNN_PATH
-  python: /Users/nadav/miniforge3/envs/proteinmpnn/bin/python  # torch env (machine-specific); null → $PROTEINMPNN_PYTHON

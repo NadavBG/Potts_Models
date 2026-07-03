@@ -4,7 +4,7 @@ A Potts-model inference tool for protein multiple-sequence alignments (MSAs).
 
 Given an MSA, SBM learns the fields `h_i(a)` and pairwise couplings `J_ij(a,b)` of a Potts model whose single- and pairwise-residue frequencies match the data. The optimizer is L-BFGS against statistics estimated from a parallel C++/OpenMP MCMC sampler.
 
-The whole workflow — MSA statistics figure, optional pruning masks, inference, synthetic sampling, figures, and an optional ProteinMPNN foldability sweep — is driven by **one Snakemake pipeline** from **one YAML config file**. Each run lands in its own directory carrying everything needed to know exactly which parameters produced which figure.
+The whole workflow — MSA statistics figure, optional pruning masks, inference, synthetic sampling, and figures — is driven by **one Snakemake pipeline** from **one YAML config file**. Each run lands in its own directory carrying everything needed to know exactly which parameters produced which figure.
 
 ---
 
@@ -24,7 +24,7 @@ uv pip install -e ".[plotting,analysis,dev,workflow]"
 python scripts/iter.py run CM-bm-dense "first-try"
 ```
 
-That last command reads `config/params_CM-bm-dense.yaml`, creates a fresh run directory `results/CM-bm-dense/iter-001-first-try/`, and builds everything into it: the MSA-statistics figure, the trained model, synthetic alignments, all the figures, the ProteinMPNN sweep, and a provenance manifest. (`CM-bm-dense` is a plain BM run with no pruning; the `params_CM-bm-*` variants under `config/` add coupling/field pruning.)
+That last command reads `config/params_CM-bm-dense.yaml`, creates a fresh run directory `results/CM-bm-dense/iter-001-first-try/`, and builds everything into it: the MSA-statistics figure, the trained model, synthetic alignments, all the figures, and a provenance manifest. (`CM-bm-dense` is a plain BM run with no pruning; the `params_CM-bm-*` variants under `config/` add coupling/field pruning.)
 
 To try the fast smoke-test config first (5 iterations, tiny everything — finishes in well under a minute):
 
@@ -66,7 +66,6 @@ MSA ──┬─► msa_stats ────────────────�
                                                     │
                                                     ├─► sample(T=0.75) ─► synthetic/align_T0.75.npy
                                                     ├─► sample(T=1.0)  ─► synthetic/align_T1.npy
-                                                    ├─► mpnn_sweep ─► synthetic/mpnn_sweep_seed<seed>/
                                                     └─► render ─► figs/
                                                             │
    config_snapshot + every stage ──────────────────────────┴─► run_manifest.json
@@ -78,7 +77,7 @@ The `msa_stats` figure depends **only on the MSA** — you can make it without t
 snakemake --configfile config/params_<run_name>.yaml --config run_root=<dir> --cores 8 msa_stats_only
 ```
 
-`build_mask_*` exist only when `pruning.enabled`, and `mpnn_sweep` only when `mpnn.enabled`.
+`build_mask_*` exist only when `pruning.enabled`.
 
 ### What a run directory contains
 
@@ -96,11 +95,9 @@ results/<run_name>/iter-NNN-<tag>/
 ├── train_meta.json        # small inter-stage summary
 ├── synthetic/
 │   ├── align_T0.75.npy   align_T0.75.json     # one alignment + sidecar per temperature
-│   ├── align_T1.npy      align_T1.json
-│   └── mpnn_sweep_seed42/                      # only if mpnn.enabled
-│       ├── align_T*.npy   control_*.npy   mpnn_scores.json   manifest.json
+│   └── align_T1.npy      align_T1.json
 ├── figs/                  # regenerated wholesale by every render
-│   ├── coupling_evol.pdf  params.pdf  correlations.pdf  pca.pdf  (energy/similarity/diversity/length/mpnn as data allows)
+│   ├── coupling_evol.pdf  params.pdf  correlations.pdf  pca.pdf  (energy/similarity/diversity/length as data allows)
 │   └── inputs/
 │       ├── stats_align_T*.npy   # cache of the (slow) 3-point-correlation stats, one per alignment
 │       └── sources.json         # paths + sha256 of model.npy and every synthetic alignment that fed the figures
@@ -120,7 +117,7 @@ The provenance chain is end-to-end and needs no extra bookkeeping from you:
 
 ## Writing a config
 
-Start from `config/params_CM-bm-dense.yaml` (a full BM run with MPNN, no pruning) or the minimal `config/params_tiny.yaml`. The schema is defined and validated in `src/SBM/workflow_config.py`. Fields, with defaults:
+Start from `config/params_CM-bm-dense.yaml` (a full BM run, no pruning) or the minimal `config/params_tiny.yaml`. The schema is defined and validated in `src/SBM/workflow_config.py`. Fields, with defaults:
 
 ```yaml
 run_name: CM-bm-dense           # required; names results/<run_name>/...
@@ -167,17 +164,6 @@ sample:
 figures:
   which: null                   # null = every figure whose data is present; or a list e.g. [coupling_evol, params]
   sector: emily
-
-mpnn:                           # ProteinMPNN foldability sweep; on by default
-  enabled: true
-  pdb: data/structures/1ECM.pdb
-  chain: A
-  seed: null                    # null = inherit the run's master seed
-  temperatures: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-  N_per_T: 100
-  controls: [wt, random, shuffled, natural]
-  model_name: v_48_020
-  skip_scoring: false           # true samples + writes controls but skips scoring (no torch/PROTEINMPNN_PATH needed)
 ```
 
 **BM vs SBM** are the same L-BFGS algorithm with different knobs (per Summary Note 3):
@@ -188,7 +174,7 @@ mpnn:                           # ProteinMPNN foldability sweep; on by default
 | `lambda_J`, `lambda_h` | 0.01 | 0 |
 | `N_chains` | 100 | 50 |
 
-The `sca` (couplings) and `dia` (fields) pruning strategies require pySCA: `uv pip install -e ".[sca]"`. The ProteinMPNN sweep with `skip_scoring: false` needs a clone of [`dauparas/ProteinMPNN`](https://github.com/dauparas/ProteinMPNN) on `PROTEINMPNN_PATH`; set `skip_scoring: true` (as the tiny config does) to exercise sampling without it. See `docs/MPNN_FOLDABILITY.md`.
+The `sca` (couplings) and `dia` (fields) pruning strategies require pySCA: `uv pip install -e ".[sca]"`.
 
 ---
 
@@ -222,7 +208,7 @@ Conventional layout (the raw FASTA is the committed source of truth; encoded arr
 ```text
 data/
 ├── fasta/<fam>.fasta             # raw inputs (committed, immutable)
-└── structures/<pdb>.pdb          # PDBs for the ProteinMPNN sweep
+└── structures/<pdb>.pdb          # reference PDB structures
 results/<run>/inputs/msa.npy      # derived integer alignment (one per run)
 ```
 

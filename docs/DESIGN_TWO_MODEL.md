@@ -64,13 +64,63 @@ Substitute/insert/delete share one primitive — `_sub_delta`, "change column `c
 from state `s0` to `s1`" (delete = `→GAP`, insert = `GAP→`) — which mirrors
 `potts_align._move_delta` (diagonal self-term carried to match `compute_energies`).
 
+### Move proposals (`move_kind`) — exact, reproducible mechanics
+
+The table above says *what* each move changes; **how** the substitute and insert
+*propose* their new residue (and, for insert, its columns) is set by
+`schedule.move_kind`. Three strategies, of increasing sophistication; slide and
+delete are identical across all three. All use the per-column **field**
+
+```
+g[s] = h[c,s] + Σ_{d≠c} J[c,d,s,frame[d]] + ½ J[c,c,s,s]        (SBM.design.anneal._local_field)
+```
+
+which is the exact negated energy contribution of column `c` in state `s` given the
+rest of the frame fixed, so `E_contrib(c=s) = −g[s]` and `ΔE(s0→s1) = g[s0] − g[s1]`
+(matches `_sub_delta` term-for-term; drift-canary checked). **`_local_field` always
+evaluates the full coupling sum — there is no `J == 0` / "profile" fast path.** For a
+profile model the gather is identically zero so `g == h[c]` *exactly* (bit-identical),
+which means a profiles-only run exercises and times the *same* code path a coupled
+model runs — the reason the search study below (done on profiles) is valid for the
+coupled models. A regression test (`test_local_field_is_field_row_when_couplings_zero`)
+guards against re-introducing a shortcut.
+
+Write `w·g` for the joint field `w_A·g_A + w_B·g_B` at a core position's two columns.
+
+- **`metropolis`** — the original. *Substitute:* propose a residue uniformly from the
+  `q−2` residues `≠` current; accept by Metropolis on `w_A·ΔE_A + w_B·ΔE_B`.
+  *Insert:* pick the interval, pick a free column in each frame **uniformly**, propose
+  a residue **uniformly** from `1..q−1`; Metropolis-accept the length change. At cold
+  `T` almost every uniform proposal is rejected → residues freeze and length cannot grow.
+- **`heatbath`** — Gibbs local moves. *Substitute:* resample the residue from its exact
+  joint conditional `P(a) ∝ exp(β·w·g[a])` over `a ∈ 1..q−1` — **no rejection**, so it
+  keeps optimizing residues at any `T`. *Insert:* columns still uniform, but the residue
+  is drawn from that conditional at the chosen columns (then Metropolis on the length
+  change), so a grown residue is *favorable* rather than random.
+- **`colaware`** — heat-bath substitute **plus** a column-aware insert (the current
+  **default**). For the chosen interval, let `C_A`, `C_B` be its free columns in each
+  frame and `r(c_A,c_B,a) = w_A(g_A[c_A,a]−g_A[c_A,0]) + w_B(g_B[c_B,a]−g_B[c_B,0])` the
+  reduced insertion field vs. the gap (state 0). Sample the **pairing**
+  `(c_A,c_B) ∝ Σ_{a=1}^{q−1} exp(β·r)` (the residue-marginal), then the **residue**
+  `a ∝ exp(β·r)` at that pairing, then Metropolis-accept on the true `ΔE`. Only
+  `|C_A|+|C_B|` field evaluations per insert (the residue max is a reduction), so it is
+  cheap at the 5–25% insert frequency. This lets `N` grow to *good* column pairings
+  *inside* the cooling schedule — where the uniform-pairing insert stalls — while the
+  Gibbs substitute keeps the residues optimized.
+
+The default schedule uses `move_kind="colaware"` with an **insert-biased** mixture
+(below): the bias supplies the net growth pressure that lifts the *typical* chain to
+near-optimal length, not just the luckiest one (see the study).
+
 - **Length cap.** Insertion needs a free gap in *both* frames; at `N=91` the
   shorter (PPIC) frame is gap-free, so insertion is always rejected → `N` never
   exceeds 91. Deletions are floored at `schedule.min_length` (default 70).
 - **Schedule.** `AnnealSchedule`: geometric `beta` from `beta_start=1.0` to
-  `beta_end=10.0` (T: 1→0.1) over `n_steps` (default 500k); move mixture default
-  sub 0.70 / slide_A 0.10 / slide_B 0.10 / insert 0.05 / delete 0.05;
-  `teleport_frac=0.3`; `record_every=1000`.
+  `beta_end=10.0` (T: 1→0.1) over `n_steps` (default 500k); `move_kind="colaware"`
+  with the insert-biased mixture **sub 0.50 / slide_A 0.10 / slide_B 0.10 /
+  insert 0.25 / delete 0.05** (default); `teleport_frac=0.3`; `record_every=1000`.
+  The mixture and `move_kind` were chosen by the search study below; the actual
+  values are recorded per run in `design/design_config.json`.
 - **Start mix (Pareto coverage).** Chains are seeded from three kinds of start,
   counted independently: `start_random` (a random sequence, as before),
   `start_natural_a` (a **model-A / CM natural**), `start_natural_b` (a **model-B /
@@ -221,6 +271,126 @@ high-quality polish at cluster scale. Use `--no-polish` for a quick look.
 - Because per-step cost is gap-count-independent, a **fixed** step budget gives a
   **predictable** anneal SU; the `execution: auto` gate bounds the polish cost too, by
   comparing a per-schedule estimate to `local_budget_minutes`.
+
+## Search-method study: how the default schedule was chosen
+
+The default `move_kind="colaware"` + insert-biased mixture was not guessed; it is the
+outcome of a controlled search-method study run on the **profiles-only control**
+(`combine/combine-profiles/iter-001-profile-eval`; both models fields-only, `J ≡ 0`,
+weights `w_A=0.5461` CM / `w_B=0.4539` PPIC). Profiles were chosen deliberately: with
+no couplings the joint objective is **exactly solvable**, giving a *provable floor* to
+score every search variant against. All conclusions transfer to the coupled models
+because the code is model-neutral (the field gather always includes couplings; §"Move
+proposals").
+
+### The benchmark: an exact floor from a DP
+
+With `J ≡ 0`, `E_tot = −(w_A Σ_i h_A[i,f_A[i]] + w_B Σ_j h_B[j,f_B[j]])` is separable
+given the alignment, so the global minimum over **all** (core sequence, gap placement
+in each frame) is a Needleman–Wunsch-style alignment of the two profiles: a match at
+columns `(i,j)` scores `max_a (w_A h_A[i,a] + w_B h_B[j,a])`, an unmatched column
+scores its gap field `w_X h_X[·,0]`. A 96×91 (×N) DP gives the **provable** optimum:
+
+> **Floor `E_tot = −164.46` at `N* = 85`** (11 CM / 6 PPIC gaps; 5 / 4 *interior*
+> gaps, i.e. excluding ±5 termini). It beats *both* native medians simultaneously
+> (CM −160.2 vs native −137.1; PPIC −169.6 vs native −165.0) — so for profiles the two
+> families are **jointly satisfiable**, and the whole gap-to-floor of any anneal is
+> pure search inefficiency, cleanly decomposable (below).
+
+The DP also yields `E*_best(N)` = the best achievable `E_tot` at *exactly* `N`
+residues, which splits any run's best-chain gap into a **length shortfall**
+(`E*_best(N) − floor`, from `N < 85`) and a **given-length residue gap**
+(`achieved − E*_best(N)`, from imperfect residues/alignment at that `N`).
+
+### Results (96 chains: 48 random / 24 CM-nat / 24 PPIC-nat; seed 0; matched budget)
+
+`Δfloor` = `E_tot_polish − (−164.46)`; lower is better. Interior gaps are the median
+over designs. "best-N decomp" is `length+residue` for the best chain.
+
+| method | best (Δfloor) | median (Δ) | N med | gaps CM/PPIC | best-N decomp |
+|---|---|---|---|---|---|
+| SA metropolis 500k *(= original run)* | +4.36 | +12.99 | 78 | 12/11 | N=81: +1.4 +3.0 |
+| SA heatbath 500k | +2.10 | +11.71 | 79 | 11/10 | N=82: +0.9 +1.2 |
+| SA metropolis 2M *(4× slower)* | +3.78 | +9.28 | 78.5 | 11/10 | N=81: +1.4 +2.4 |
+| PT metropolis, 8 replicas *(matched budget)* | +7.93 | +15.4 | — | — | **invalid: swaps froze** |
+| PT heatbath, 24 replicas *(tuned, 3× budget)* | +7.77 | +11.57 | 85 | 6/4 | N=88: +1.6 **+6.2** |
+| SA colaware 500k | +1.38 | +11.55 | 80 | 11/10 | N=83: +0.5 +0.9 |
+| **SA colaware + insert-bias (default)** | **+1.44** | **+8.74** | 82 | **8/7** | N=84: +0.2 +1.3 |
+| DP optimum | 0 | — | 85 | 5/4 | — |
+
+### What we learned
+
+1. **Two coordinates want opposite temperatures.** Residue identity is optimized
+   *cold* (Gibbs concentrates on the best residue); alignment/length is explored *hot*
+   (inserts only accept when warm). This framing explains every result.
+2. **Heat-bath (Gibbs) local moves are essential.** Replacing uniform-propose-Metropolis
+   with an exact-conditional resample cut the best chain's *given-length* residue gap
+   from +3.0 → +1.2 (best −160.1 → −162.4). The `metropolis` substitute freezes at cold
+   `T` (nearly all uniform proposals rejected); Gibbs never rejects.
+3. **A cooling schedule is the right framework; parallel tempering is not.** PT holds
+   replicas at *fixed* temperatures, so it perpetually trades the two coordinates: a
+   config that gained good residues cold has its alignment scrambled when swapped hot,
+   and vice versa. Even **well-tuned** PT (24 replicas — 8 was mis-spaced, mid-ladder
+   swap acceptance ≈ 0; calibration: 8→0.00, 16→0.10, **24→0.25**, 32→0.33 min-pair)
+   with **3× the per-design budget** reached optimal *length* (N=85, gaps 6/4) but
+   botched *residues* (best-chain residue gap **+6.2**), landing +7.77 — the worst of
+   the serious methods. **PT actively hurt here.** Cooling co-settles both coordinates
+   hot→cold; that is why it wins.
+4. **The residual after heat-bath is a length problem, and it is a *proposal* problem.**
+   Slower cooling (2M steps, 4×) did **not** grow N (78→78.5) — so length is not a
+   *time* problem. The uniform insert commits a residue to a column in *each* frame at
+   once; a randomly-paired slot rarely hosts a residue that beats the gap cold, so N
+   freezes ~6 short.
+5. **Column-aware insert fixes the length coordinate inside cooling.** Drawing the
+   *column pairing* (not just the residue) from its conditional grew the best chain to
+   N=83 and gave the best design overall: **+1.38, i.e. 0.84% above the provable
+   optimum**, improving *both* gap components (length +0.9→+0.5, residue +1.2→+0.9).
+6. **Insert-bias lifts the *typical* chain; it is the bias, not the churn.** Column-aware
+   alone left the median stuck (N med 80, +11.55) — at 5% insert frequency it doesn't
+   fire enough during cooling to drag the median up. Raising insert to 25% vs delete 5%
+   lifted the median to **+8.74** and typical interior gaps 11/10 → **8/7**, with the
+   best chain unchanged (+1.44) and no runaway (N max 86, gated by Metropolis). A
+   *symmetric* increase (insert=delete=15%, **same** 30% total indel activity) did
+   **not** help (median +11.36) — so it is the net **growth pressure** that matters,
+   because the chains were stuck too *short*, and the accept step protects quality.
+
+### Decisions
+
+- **Default = `colaware` + insert-biased mixture** (`sub .50 / slide .10/.10 /
+  insert .25 / delete .05`). Best design ~0.9% above the provable optimum; the typical
+  chain much healthier (+8.7, gaps 8/7). Set as the `AnnealSchedule` / CLI defaults, so
+  it flows to the combine pipeline unchanged.
+- **PT (`pt_anneal_chain`) is kept as a tested-but-unused option**, not the default: it
+  lost decisively here, but the mechanism that sank it (fixed-T decorrelation of two
+  coordinates) may not bind the *coupled* landscape the same way, so it is retained
+  (with full tests) for future use rather than deleted.
+- **Model neutrality is enforced**, not incidental: the field gather never special-cases
+  `J = 0`, so this profile study validates the exact code path the coupled models take
+  (a regression test locks it in). This was a deliberate correction after an earlier
+  profile fast-path was found and removed.
+
+### Transferable methodology (for the coupled case, where no floor exists)
+
+**Gibbs local moves + a cooling schedule (not fixed-T PT) + a Gibbs-over-the-alignment
+indel proposal + insert-bias.** The profiles study is the calibration; the coupled runs
+inherit the same engine and defaults.
+
+### Reproduce
+
+The study's runs are ordinary design runs at different `move_kind` / move-mix / schedule
+settings against the same combine control; e.g. the baseline and the default:
+
+```bash
+# baseline (metropolis) vs the default (colaware + insert-bias)
+python scripts/design_two_model.py --combine-run combine/combine-profiles/iter-001-profile-eval \
+    --move-kind metropolis --p-sub 0.70 --p-insert 0.05 --p-delete 0.05 --seed 0 --jobs 8
+python scripts/design_two_model.py --combine-run combine/combine-profiles/iter-001-profile-eval \
+    --seed 0 --jobs 8      # colaware + insert-bias are now the defaults
+```
+
+The exact floor is a short DP over the two profiles' fields (`h_A`, `h_B`) in the
+zero-sum gauge (aligning the two profiles as above); it needs only the two `model.npy`
+files and the weights from `data/energy_weights.json`.
 
 ## Mac → Midway → Mac runbook (optional; only to scale up)
 

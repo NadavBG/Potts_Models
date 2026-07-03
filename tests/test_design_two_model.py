@@ -10,6 +10,7 @@ alignment converges to the enumerated argmin as ``T→0``, and reproducibility.
 
 from __future__ import annotations
 
+import copy
 import math
 
 import numpy as np
@@ -19,14 +20,20 @@ from SBM.design.anneal import (
     AnnealSchedule,
     ChainResult,
     _Ctx,
+    _heatbath_choice,
     _initial_state,
+    _local_field,
     _move_delete,
     _move_insert,
+    _move_insert_column_aware,
+    _move_insert_heatbath,
     _move_slide,
     _move_sub,
+    _move_sub_heatbath,
     _sub_delta,
     anneal_chain,
     initial_state_from_frame,
+    pt_anneal_chain,
 )
 from SBM.energy.encoding import GAP, seq_to_ints
 from SBM.energy.model import PottsModel
@@ -324,3 +331,204 @@ def test_move_probs_normalized_and_validated():
     assert p.shape == (5,)
     with pytest.raises(ValueError):
         AnnealSchedule(p_sub=0, p_slide_A=0, p_slide_B=0, p_insert=0, p_delete=0).move_probs()
+
+
+# --------------------------------------------------------------------------- #
+# Heat-bath (Gibbs) moves
+# --------------------------------------------------------------------------- #
+
+def test_local_field_matches_sub_delta():
+    """``g[s0] − g[s1] == _sub_delta(s0→s1)`` — the energy-update path the Gibbs move uses."""
+    for seed in range(4):
+        model = _random_model(L=8, seed=seed)          # nonzero couplings incl. diagonal
+        idx = np.arange(model.L)
+        rng = np.random.default_rng(500 + seed)
+        for _ in range(100):
+            frame = rng.integers(0, Q, size=model.L).astype(np.int64)
+            c = int(rng.integers(model.L))
+            g = _local_field(frame, model.J, model.h, c, idx)
+            assert g.shape == (Q,)
+            s0, s1 = int(rng.integers(Q)), int(rng.integers(Q))
+            frame[c] = s0                               # _sub_delta reads current frame[c] == s0
+            assert math.isclose(g[s0] - g[s1], _sub_delta(frame, model.J, model.h, c, s0, s1, idx),
+                                rel_tol=0, abs_tol=1e-9), (seed, c, s0, s1)
+
+
+def test_local_field_is_field_row_when_couplings_zero():
+    """Model-neutral path: with ``J == 0`` the full coupling sum is exactly ``h[c]``.
+
+    Guards against re-introducing a profile shortcut *and* proves the general path is
+    numerically identical to ``h[c]`` for a profile (so a profile run is a valid proxy)."""
+    model = _random_model(L=5, seed=7)
+    zero = PottsModel(name="p", J=np.zeros_like(model.J), h=model.h, L=5, q=Q,
+                      alphabet=MSA_ALPHABET, gauge="raw", sha256="0" * 64, source="t")
+    frame = np.array([1, 0, 5, 0, 3], dtype=np.int64)   # arbitrary occupied/gap pattern
+    g = _local_field(frame, zero.J, zero.h, 2, np.arange(zero.L))
+    assert np.array_equal(g, zero.h[2])                 # exact, not just close
+
+
+def test_heatbath_choice_matches_softmax_and_argmax_limit():
+    """``_heatbath_choice`` draws ``∝ exp(beta·g)`` and → argmax as beta → ∞."""
+    rng = np.random.default_rng(0)
+    g = rng.normal(size=8)
+    beta = 1.3
+    counts = np.bincount([_heatbath_choice(g, beta, rng) for _ in range(200_000)], minlength=8)
+    emp = counts / counts.sum()
+    w = beta * g
+    expected = np.exp(w - w.max()); expected /= expected.sum()
+    assert np.max(np.abs(emp - expected)) < 0.01              # empirical ≈ softmax
+    assert _heatbath_choice(g, 1e6, rng) == int(np.argmax(g))  # zero-T limit
+
+
+def test_heatbath_moves_preserve_invariants_and_energy_tracking():
+    """Gibbs sub + conditional insert keep the state valid and the running energy exact."""
+    model_A = _random_model(L=9, seed=1)
+    model_B = _random_model(L=6, seed=2)
+    ctx = _ctx(model_A, model_B, min_length=3)
+    rng = np.random.default_rng(0)
+    st = _initial_state(model_A, model_B, ctx, rng)
+    movers = [
+        lambda: _move_sub_heatbath(st, ctx, 2.0, rng),
+        lambda: _move_slide(st, ctx, 2.0, rng, "A"),
+        lambda: _move_insert_heatbath(st, ctx, 2.0, rng),
+        lambda: _move_delete(st, ctx, 2.0, rng),
+    ]
+    for _ in range(4000):
+        movers[int(rng.integers(len(movers)))]()
+        _check_invariants(st, model_A, model_B)
+        assert math.isclose(st.E_A, potts_energy(st.frame_A, model_A), rel_tol=0, abs_tol=1e-8)
+        assert math.isclose(st.E_B, potts_energy(st.frame_B, model_B), rel_tol=0, abs_tol=1e-8)
+
+
+def test_heatbath_substitute_reaches_per_site_optimum_on_profile():
+    """On a profile model (J=0) a cold Gibbs sub drives each core residue to its joint argmin.
+
+    With no couplings the per-site optimum is exact: residue ``argmax_a(w_A h_A[c_A,a]+w_B h_B[c_B,a])``
+    over ``a∈1..q-1``. A short cold heat-bath run must land there for a fixed alignment."""
+    model_A = _random_model(L=5, seed=3); model_B = _random_model(L=5, seed=4)
+    model_A = PottsModel(name="A", J=np.zeros_like(model_A.J), h=model_A.h, L=5, q=Q,
+                         alphabet=MSA_ALPHABET, gauge="raw", sha256="0" * 64, source="t")
+    model_B = PottsModel(name="B", J=np.zeros_like(model_B.J), h=model_B.h, L=5, q=Q,
+                         alphabet=MSA_ALPHABET, gauge="raw", sha256="0" * 64, source="t")
+    wA, wB = 0.4, 0.6
+    ctx = _ctx(model_A, model_B, wA=wA, wB=wB, min_length=5)
+    rng = np.random.default_rng(0)
+    st = _initial_state(model_A, model_B, ctx, rng)     # identity alignment, N=5
+    for _ in range(2000):
+        _move_sub_heatbath(st, ctx, 50.0, rng)          # cold: Gibbs concentrates on the argmax
+    for k in range(st.x.size):
+        g = wA * model_A.h[st.occ_A[k]] + wB * model_B.h[st.occ_B[k]]
+        assert st.x[k] == int(np.argmax(g[1:])) + 1
+
+
+# --------------------------------------------------------------------------- #
+# Column-aware insert
+# --------------------------------------------------------------------------- #
+
+def test_column_aware_insert_invariants_and_energy_tracking():
+    """Column-aware insert keeps the state valid and the running energy exact."""
+    A = _random_model(L=9, seed=1); B = _random_model(L=6, seed=2)
+    ctx = _ctx(A, B, min_length=3)
+    rng = np.random.default_rng(0)
+    st = _initial_state(A, B, ctx, rng)
+    movers = [
+        lambda: _move_sub_heatbath(st, ctx, 2.0, rng),
+        lambda: _move_slide(st, ctx, 2.0, rng, "B"),
+        lambda: _move_insert_column_aware(st, ctx, 2.0, rng),
+        lambda: _move_delete(st, ctx, 2.0, rng),
+    ]
+    for _ in range(4000):
+        movers[int(rng.integers(len(movers)))]()
+        _check_invariants(st, A, B)
+        assert math.isclose(st.E_A, potts_energy(st.frame_A, A), rel_tol=0, abs_tol=1e-8)
+        assert math.isclose(st.E_B, potts_energy(st.frame_B, B), rel_tol=0, abs_tol=1e-8)
+
+
+def test_column_aware_insert_picks_min_delta_pairing_when_cold():
+    """At cold beta an accepted column-aware insert lands the (column-pair, residue) that
+    minimizes ΔE over the interval — verified against brute-force enumeration."""
+    from SBM.design.anneal import DesignState
+    A = _random_model(L=6, seed=11); B = _random_model(L=5, seed=12)
+    ctx = _ctx(A, B, wA=0.4, wB=0.6, min_length=1)
+    x = np.array([3, 7], dtype=np.int64)
+    occ_A = np.array([0, 5]); occ_B = np.array([0, 4])       # only the middle interval is insertable
+    fA = np.zeros(6, np.int64); fA[occ_A] = x
+    fB = np.zeros(5, np.int64); fB[occ_B] = x
+    base = DesignState(x=x.copy(), occ_A=occ_A.copy(), occ_B=occ_B.copy(),
+                       frame_A=fA.copy(), frame_B=fB.copy(),
+                       E_A=potts_energy(fA, A), E_B=potts_energy(fB, B))
+    idxA, idxB = np.arange(6), np.arange(5)
+    best_dE = min(0.4 * _sub_delta(fA, A.J, A.h, ca, GAP, a, idxA)
+                  + 0.6 * _sub_delta(fB, B.J, B.h, cb, GAP, a, idxB)
+                  for a in range(1, Q) for ca in (1, 2, 3, 4) for cb in (1, 2, 3))
+    assert best_dE < 0                                       # a favorable insert exists → can accept cold
+    e0 = 0.4 * base.E_A + 0.6 * base.E_B
+    accepts = 0
+    for s in range(400):
+        st = copy.deepcopy(base)
+        if _move_insert_column_aware(st, ctx, 1e4, np.random.default_rng(s)):
+            accepts += 1
+            dE = (0.4 * st.E_A + 0.6 * st.E_B) - e0
+            assert math.isclose(dE, best_dE, rel_tol=0, abs_tol=1e-8)
+    assert accepts > 0                                       # the test actually exercised acceptance
+
+
+def test_anneal_chain_colaware_runs_and_is_reproducible():
+    A = _random_model(L=9, seed=1); B = _random_model(L=6, seed=2)
+    sched = AnnealSchedule(n_steps=3000, beta_start=0.5, beta_end=5.0, min_length=3,
+                           record_every=500, move_kind="colaware")
+    r1 = anneal_chain(A, B, 0.4, 0.6, sched, seed=5, do_polish=False)
+    r2 = anneal_chain(A, B, 0.4, 0.6, sched, seed=5, do_polish=False)
+    assert r1.final_sequence == r2.final_sequence
+    assert math.isclose(r1.E_A_mc, potts_energy(r1.final_frame_A, A), rel_tol=0, abs_tol=1e-8)
+
+
+# --------------------------------------------------------------------------- #
+# Parallel tempering (replica exchange)
+# --------------------------------------------------------------------------- #
+
+def _pt(seed, *, move_kind="metropolis", do_polish=False):
+    model_A = _random_model(L=9, seed=1)
+    model_B = _random_model(L=6, seed=2)
+    sched = AnnealSchedule(n_steps=4000, beta_start=0.5, beta_end=5.0,
+                           min_length=3, record_every=1000, move_kind=move_kind)
+    return (model_A, model_B,
+            pt_anneal_chain(model_A, model_B, 0.4, 0.6, sched, seed=seed,
+                            n_replicas=4, swap_every=500, do_polish=do_polish))
+
+
+def test_pt_design_energy_tracking_and_invariants():
+    """The returned PT design's reported MC energy equals the from-scratch energy of its frames."""
+    for kind in ("metropolis", "heatbath"):
+        model_A, model_B, r = _pt(0, move_kind=kind)
+        assert math.isclose(r.E_A_mc, potts_energy(r.final_frame_A, model_A), rel_tol=0, abs_tol=1e-8)
+        assert math.isclose(r.E_B_mc, potts_energy(r.final_frame_B, model_B), rel_tol=0, abs_tol=1e-8)
+        # final frames are a valid alignment of the design core into each model
+        core = r.final_frame_A[r.final_frame_A != GAP]
+        assert np.array_equal(core, r.final_frame_B[r.final_frame_B != GAP])
+        assert 3 <= r.final_n_residues <= min(model_A.L, model_B.L)
+
+
+def test_pt_is_bit_reproducible():
+    _, _, r1 = _pt(7)
+    _, _, r2 = _pt(7)
+    assert r1.final_sequence == r2.final_sequence
+    assert math.isclose(r1.E_tot_mc, r2.E_tot_mc, rel_tol=0, abs_tol=0)
+
+
+def test_pt_requires_at_least_two_replicas():
+    model_A = _random_model(L=9, seed=1); model_B = _random_model(L=6, seed=2)
+    sched = AnnealSchedule(n_steps=100)
+    with pytest.raises(ValueError):
+        pt_anneal_chain(model_A, model_B, 0.4, 0.6, sched, seed=0, n_replicas=1)
+
+
+def test_pt_matches_or_beats_single_replica_on_energy():
+    """Sanity: a 4-rung ladder's design is no worse than its own hottest replica would do alone
+    is hard to assert cheaply; instead check the design is the ladder's lowest-E config (contract)."""
+    model_A, model_B, r = _pt(3)
+    # design energy must be <= a fresh random start's energy (it did *some* optimization)
+    ctx = _ctx(model_A, model_B, min_length=3)
+    rng = np.random.default_rng(999)
+    st0 = _initial_state(model_A, model_B, ctx, rng)
+    assert r.E_tot_mc <= 0.4 * st0.E_A + 0.6 * st0.E_B

@@ -157,7 +157,10 @@ class DesignConfig:
     (emit the config + hand-off and stop, run the array on Midway, pull back), or
     ``auto`` (Snakefile predicts the local wall-time and runs local iff it is
     ``<= local_budget_minutes``). ``n_shards`` sizes the Slurm array for the cluster
-    path. Move probabilities are left at the engine defaults (not exposed here)."""
+    path. The move kind and proposal mixture are left at the engine defaults (not
+    exposed here) — currently the insert-biased ``colaware`` recipe
+    (``AnnealSchedule``; docs/DESIGN_TWO_MODEL.md search study); the actual schedule
+    is still recorded per run in ``design/design_config.json``."""
 
     enabled: bool = False
     start_random: int = 48

@@ -1,0 +1,26 @@
+# PPIC profile model derived post-hoc from the dense PPIC model: keep the
+# fields, zero all couplings. NO retraining (see params_derive-CM-profile.yaml
+# for the post-hoc-vs-retrain distinction).
+#
+#   python scripts/iter.py run derive-PPIC-profile "fields-only" --snakefile Snakefile.derive
+# or
+#   snakemake -s Snakefile.derive --configfile config/params_derive-PPIC-profile.yaml --cores 8 all
+
+run_name: derive-PPIC-profile
+description: PPIC fields-only model (couplings zeroed post-hoc from the dense model)
+family: PPIC
+source_run_dir: results/PPIC-dense/iter-001-baseline
+seed: 42
+omp_num_threads: null
+
+filter:
+  couplings: zero      # fields only
+  fields: keep
+
+sample:
+  N: 2000
+  temperatures: [0.75, 1.0]
+
+figures:
+  which: null          # null = every figure whose data is present
+  sector: none         # "emily" sector is CM-specific (L=96); n/a for PPIC

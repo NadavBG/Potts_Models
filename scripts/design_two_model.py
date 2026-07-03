@@ -446,11 +446,16 @@ def _build_parser() -> argparse.ArgumentParser:
     sch.add_argument("--record-every", type=int, default=1000, help="trajectory sub-sampling stride")
     sch.add_argument("--min-length", type=int, default=70, help="deletion floor on N")
     sch.add_argument("--teleport-frac", type=float, default=0.3, help="non-local slide fraction")
-    sch.add_argument("--p-sub", type=float, default=0.70)
+    # Defaults are the insert-biased "colaware" recipe (docs/DESIGN_TWO_MODEL.md search study).
+    sch.add_argument("--p-sub", type=float, default=0.50)
     sch.add_argument("--p-slide-a", type=float, default=0.10)
     sch.add_argument("--p-slide-b", type=float, default=0.10)
-    sch.add_argument("--p-insert", type=float, default=0.05)
+    sch.add_argument("--p-insert", type=float, default=0.25)
     sch.add_argument("--p-delete", type=float, default=0.05)
+    sch.add_argument("--move-kind", choices=["metropolis", "heatbath", "colaware"], default="colaware",
+                     help="substitute/insert proposal (default 'colaware'): 'metropolis' (uniform), "
+                          "'heatbath' (Gibbs substitute + conditional-residue insert), or "
+                          "'colaware' (heatbath + column-aware insert pairing)")
 
     out = p.add_argument_group("polish & output")
     out.add_argument("--polish", dest="polish", action="store_true", default=True,
@@ -489,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
         p_sub=args.p_sub, p_slide_A=args.p_slide_a, p_slide_B=args.p_slide_b,
         p_insert=args.p_insert, p_delete=args.p_delete,
         teleport_frac=args.teleport_frac, min_length=args.min_length,
-        record_every=args.record_every,
+        record_every=args.record_every, move_kind=args.move_kind,
     )
     sched.move_probs()  # validate probabilities early
 

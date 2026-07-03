@@ -1,0 +1,24 @@
+# Fast end-to-end smoke test of the derive DAG (copy_inputs -> derive ->
+# sample x2 -> render -> manifest). Fields-only: all couplings zeroed post-hoc.
+# Sources the tiny single-model run, so build results/tiny first if needed:
+#   snakemake --configfile config/params_tiny.yaml --cores 8 all   # optional
+#   snakemake -s Snakefile.derive --configfile config/params_derive-tiny.yaml --cores 8 all
+
+run_name: derive-tiny
+description: Fast smoke test of the derive pipeline (fields only)
+family: CM
+source_run_dir: results/tiny/iter-001-tiny-test
+seed: 42
+omp_num_threads: null
+
+filter:
+  couplings: zero      # keep | zero | {strategy, percent}
+  fields: keep
+
+sample:
+  N: 50
+  temperatures: [0.75, 1.0]
+
+figures:
+  which: [coupling_evol, params, correlations, pca]
+  sector: emily

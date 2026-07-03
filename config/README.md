@@ -1,8 +1,8 @@
 # Pipeline configuration (`config/*.yaml`)
 
 One YAML file describes **one pipeline run end-to-end**: input MSA → optional
-pruning masks → training → synthetic sampling → figures → optional ProteinMPNN
-sweep. The `Snakefile` loads it, `src/SBM/workflow_config.py` validates it, and
+pruning masks → training → synthetic sampling → figures. The `Snakefile` loads
+it, `src/SBM/workflow_config.py` validates it, and
 the thin `scripts/wf/run_*.py` wrappers translate each section into a call to
 the underlying CLI.
 
@@ -14,7 +14,7 @@ python scripts/iter.py run <run_name> "<tag>"
 snakemake --configfile config/params_<run_name>.yaml --cores 8 all
 ```
 
-**Two kinds of config live here.** Single-model runs (`params_<family>-*.yaml`)
+**Three kinds of config live here.** Single-model runs (`params_<family>-*.yaml`)
 train one model and are validated by `src/SBM/workflow_config.py` against the
 main `Snakefile`. **Combine** runs (`params_combine-*.yaml`) score a query set
 under *two already-trained* models and are validated by
@@ -26,9 +26,28 @@ snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC.yaml -
 ```
 
 The combine schema is documented in `combine_config.py`; keys are `models` (a
-list of exactly two `{name, run_dir, weight}`), `query` (`source` / `include` /
+list of exactly two `{name, run_dir}`), `query` (`source` / `include` /
 `cap_per_group`), `scoring` (`method` / `n_samples` / `ess_threshold`), and
-`figures`. The rest of this doc covers the **single-model** schema.
+`figures`.
+
+**Derive** runs (`params_derive-*.yaml`) take *one already-trained* model and
+write a new model that keeps only a subset of its parameters (e.g. fields only,
+couplings zeroed) — no retraining. They are validated by
+`src/SBM/derive_config.py` against `Snakefile.derive` and land a normal
+`results/` dir the combine pipeline consumes by `run_dir`:
+
+```bash
+python scripts/iter.py run derive-CM-profile "fields-only" --snakefile Snakefile.derive
+snakemake -s Snakefile.derive --configfile config/params_derive-CM-profile.yaml --cores 8 all
+```
+
+The derive schema is documented in `derive_config.py`; keys are `source_run_dir`
+(the trained model to filter) and `filter` (`couplings` and `fields`, each
+`keep` / `zero` / a `{strategy, percent}` mask), plus `sample` / `figures`.
+Post-hoc filtering keeps the source's already-fit `h` and zeros/masks `J` — a
+different energy function from the retrain-based `params_<family>-*-profile`
+configs, which re-fit `h` with `J≡0`. The rest of this doc covers the
+**single-model** schema.
 
 **How to read this doc.** Defaults below are the *schema* defaults from
 `workflow_config.py` (what you get if you omit the key). The values in the
@@ -50,7 +69,6 @@ A few enum vocabularies are fixed in `workflow_config.py`:
 | `sector` | `emily`, `rama`, `none` |
 | `train.mode` | `BM`, `SBM` |
 | `train.optimizer` | `LBFGS`, `GD` |
-| `mpnn.controls` | `wt`, `random`, `shuffled`, `natural`, `none` |
 
 ---
 
@@ -62,11 +80,11 @@ A few enum vocabularies are fixed in `workflow_config.py`:
 | `msa_fasta` | — | **yes** | Path (relative to the repo root) to the input MSA as an **aligned FASTA**. The `encode_msa` rule converts it once into a run-local integer array `<run_dir>/inputs/msa.npy` (alphabet `-ACDEFGHIKLMNPQRSTVWY`, gap=0, dtype int64), and every downstream stage consumes that array. The FASTA is treated as immutable raw input; the `.npy` is a derived, regenerable artifact. See "MSA input" below. |
 | `description` | `""` | no | Free-text label carried into provenance. |
 | `family` | `""` | no | Protein family tag (e.g. `CM`); used only for organizing/labelling. |
-| `seed` | `42` | no | **Master seed.** Seeds the Python RNG and the C++ MCMC kernels (per-thread seed = `seed + thread_id`). The `sample` rule derives a per-temperature seed `seed + temperature_index`; `mpnn` inherits it unless `mpnn.seed` is set. |
+| `seed` | `42` | no | **Master seed.** Seeds the Python RNG and the C++ MCMC kernels (per-thread seed = `seed + thread_id`). The `sample` rule derives a per-temperature seed `seed + temperature_index`. |
 | `omp_num_threads` | `null` | no | OpenMP thread count, pinned **before** the MCMC kernel imports. **`null` ⇒ runs are *not* bit-reproducible** even with a fixed `seed` (thread count varies). Set to a fixed int (e.g. `8`) for bit-identical arrays. See "Reproducibility" below. |
 
-Then six nested sections: `msa_stats`, `pruning`, `train`, `sample`, `figures`,
-`mpnn`. Each may be omitted entirely (the schema default applies).
+Then five nested sections: `msa_stats`, `pruning`, `train`, `sample`, and
+`figures`. Each may be omitted entirely (the schema default applies).
 
 ### MSA input
 
@@ -209,31 +227,6 @@ Figure names and their data requirements:
 | `similarity` | `TestTrain: 1` | Sequence-similarity violins. |
 | `diversity` | `TestTrain: 1` | Sequence-diversity violins. |
 | `length` | `TestTrain: 1` | Sequence-length histograms. |
-| `mpnn` | `mpnn` sweep present + scored | ProteinMPNN foldability; auto-detected from the sweep dir. |
-
----
-
-## `mpnn` — ProteinMPNN foldability sweep
-
-A temperature-ladder sampling + scoring sweep against a reference structure.
-Outputs land in `<run_dir>/synthetic/mpnn_sweep_seed<seed>/`.
-
-> **If `enabled: false`, the whole section is ignored** (no sweep, no `mpnn`
-> figure). When `enabled: true` *and* `skip_scoring: false`, scoring needs the
-> upstream `dauparas/ProteinMPNN` repo — set `PROTEINMPNN_PATH` (or pass
-> `--mpnn-path`). See `docs/MPNN_FOLDABILITY.md`.
-
-| Key | Default | Description / notes |
-| --- | --- | --- |
-| `enabled` | `true` | Master switch for the sweep + `mpnn` figure. |
-| `pdb` | `data/structures/1ECM.pdb` | Reference backbone scored against. |
-| `chain` | `A` | Chain in the PDB to score. |
-| `seed` | `null` | Sweep seed. `null` ⇒ inherit the run's master `seed`. |
-| `temperatures` | `[0.1 … 1.0]` (step 0.1) | The sampling ladder (all `> 0`). Lower T = sharper distribution near modes; T=1.0 = native fit. |
-| `N_per_T` | `100` | Sequences sampled per temperature (and per control group). |
-| `controls` | `[wt, random, shuffled, natural]` | Interpretability baselines: `wt` (wild-type), `random` (uniform AAs at non-gap columns), `shuffled` (per-row permutation of WT — composition preserved, structure destroyed), `natural` (bootstrap from the training MSA). `none` = no controls (use it alone). |
-| `model_name` | `v_48_020` | ProteinMPNN weight file basename (`vanilla_model_weights/<name>.pt`); `v_48_020` = the soluble model at 0.20 Å backbone noise. |
-| `skip_scoring` | `false` | `true` ⇒ generate the sweep alignments + manifest but **skip the torch/ProteinMPNN scoring**. Used by the smoke test (`params_tiny.yaml`) so it needs no torch or `PROTEINMPNN_PATH`. No `mpnn_scores.json`, so the `mpnn` figure won't render. |
 
 ---
 
@@ -251,6 +244,5 @@ arrays are — it stores wall-clock execution times. Compare arrays, not pickles
 - `src/SBM/workflow_config.py` — the validated schema (single source of truth).
 - `CLAUDE.md` (repo root) — pipeline overview, data flow, gotchas.
 - `pruning/README.md` — pruning strategies in depth.
-- `docs/MPNN_FOLDABILITY.md` — ProteinMPNN setup and score interpretation.
 - `config/params_tiny.yaml` — minimal end-to-end smoke-test config.
 - `config/params_CM-bm-dense.yaml` — the CM BM positive-control worked example (no pruning; the `params_CM-bm-*` variants add coupling/field pruning).

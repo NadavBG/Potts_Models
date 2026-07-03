@@ -1,0 +1,231 @@
+# Potts_Models derive pipeline: one trained model -> a filtered ("derived")
+# model that keeps only a subset of its parameters (fields only, couplings
+# only, or a mask-selected subset), + synthetic samples + figures.
+#
+# This is a SEPARATE pipeline from the single-model `Snakefile` (which trains
+# from an MSA) and the two-model `Snakefile.combine`: different DAG, its own
+# validated config schema (derive_config.py), but it lands a NORMAL results/
+# run dir so the combine pipeline consumes the derived model unchanged.
+#
+# No training and no MSA FASTA: the source model's encoded MSA is copied and
+# the (J, h) arrays are filtered post-hoc. Post-hoc filtering keeps the source's
+# already-fit h and zeros/masks J — a different energy function from a retrained
+# profile model. See CLAUDE.md / docs.
+#
+#   snakemake -s Snakefile.derive --configfile config/params_derive-<name>.yaml --cores 8 all
+#
+# By default the run dir is results/<run_name>/; the iteration helper
+# scripts/iter.py --snakefile Snakefile.derive mints results/<run_name>/iter-NNN-<tag>/.
+
+import sys
+
+from SBM import derive_config as dc
+
+# ── Config: validate, reject unknown keys ────────────────────────────────
+if "run_name" not in config or "source_run_dir" not in config:
+    sys.exit(
+        "ERROR: missing config. Invoke with a derive config file, e.g.\n"
+        "  snakemake -s Snakefile.derive --configfile config/params_derive-CM-profile.yaml "
+        "--cores 8 all"
+    )
+
+cfg = dc.from_dict({k: v for k, v in config.items() if k not in {"run_root"}})
+
+RUN_NAME = cfg.run_name
+RUN_ROOT = config.get("run_root") or f"results/{RUN_NAME}"
+
+# ── Path scheme (all rooted under RUN_ROOT) ──────────────────────────────
+SOURCE_MODEL   = cfg.source_model_path  # input; the trained model to filter
+MSA            = f"{RUN_ROOT}/inputs/msa.npy"            # copied from the source
+ENCODE_MANIFEST = f"{RUN_ROOT}/inputs/msa_manifest.json"
+CONFIG_SNAP    = f"{RUN_ROOT}/config_snapshot.yaml"
+MASK_J         = f"{RUN_ROOT}/masks/J_mask.npy"
+MASK_H         = f"{RUN_ROOT}/masks/h_mask.npy"
+MODEL          = f"{RUN_ROOT}/model.npy"
+DERIVE_MANIFEST = f"{RUN_ROOT}/manifest.json"
+COMMAND_SH     = f"{RUN_ROOT}/command.sh"
+SYNTH_NPY      = f"{RUN_ROOT}/synthetic/align_T{{temp}}.npy"
+SYNTH_JSON     = f"{RUN_ROOT}/synthetic/align_T{{temp}}.json"
+FIGS_DIR       = f"{RUN_ROOT}/figs"
+RUN_MANIFEST   = f"{RUN_ROOT}/run_manifest.json"
+
+# Sampler formats temperatures with "%.10g" (0.75 -> "0.75", 1.0 -> "1").
+TEMPS = [f"{t:.10g}" for t in cfg.sample.temperatures]
+
+# A mask is only built when the corresponding filter block is a MaskSpec
+# (a {strategy, percent} subset); "keep" / "zero" need no mask.
+_MASK_J = cfg.filter.couplings_mask is not None
+_MASK_H = cfg.filter.fields_mask is not None
+
+wildcard_constraints:
+    temp=r"[0-9]+(\.[0-9]+)?",
+
+
+# ── Aggregate targets ────────────────────────────────────────────────────
+rule all:
+    default_target: True
+    input:
+        CONFIG_SNAP,
+        MSA,
+        ENCODE_MANIFEST,
+        MODEL,
+        DERIVE_MANIFEST,
+        COMMAND_SH,
+        expand(SYNTH_NPY, temp=TEMPS),
+        FIGS_DIR,
+        RUN_MANIFEST,
+
+
+# ── Provenance: freeze the validated config into the run dir ─────────────
+rule snapshot_config:
+    output:
+        CONFIG_SNAP,
+    log:
+        f"{RUN_ROOT}/logs/snapshot_config.log"
+    threads: 1
+    resources:
+        mem_mb=256,
+        runtime=2,
+    script:
+        "scripts/wf/run_derive_snapshot_config.py"
+
+
+# ── Copy the source model's encoded MSA into the derived run dir ─────────
+# So combine finds the naturals + seed MSA next to the derived model.npy, and
+# any mask is built from the same statistics the source was trained on.
+rule copy_inputs:
+    output:
+        npy=MSA,
+        manifest=ENCODE_MANIFEST,
+    log:
+        f"{RUN_ROOT}/logs/copy_inputs.log"
+    threads: 1
+    resources:
+        mem_mb=1000,
+        runtime=5,
+    script:
+        "scripts/wf/run_copy_inputs.py"
+
+
+# ── Optional masks (only when a filter block is a {strategy, percent} subset)
+if _MASK_J:
+
+    rule build_mask_J:
+        input:
+            msa=MSA,
+        output:
+            MASK_J,
+        log:
+            f"{RUN_ROOT}/logs/build_mask_J.log"
+        threads: 1
+        resources:
+            mem_mb=4000,
+            runtime=20,
+        script:
+            "scripts/wf/run_derive_build_mask_J.py"
+
+
+if _MASK_H:
+
+    rule build_mask_h:
+        input:
+            msa=MSA,
+        output:
+            MASK_H,
+        log:
+            f"{RUN_ROOT}/logs/build_mask_h.log"
+        threads: 1
+        resources:
+            mem_mb=4000,
+            runtime=20,
+        script:
+            "scripts/wf/run_derive_build_mask_h.py"
+
+
+# ── Derive: filter the source model's (J, h), re-gauge, write model.npy ──
+def _derive_inputs(wildcards):
+    inputs = {"source_model": SOURCE_MODEL}
+    if _MASK_J:
+        inputs["mask_J"] = MASK_J
+    if _MASK_H:
+        inputs["mask_h"] = MASK_H
+    return inputs
+
+
+rule derive:
+    input:
+        unpack(_derive_inputs),
+    output:
+        model=MODEL,
+        manifest=DERIVE_MANIFEST,
+        command=COMMAND_SH,
+    params:
+        run_root=RUN_ROOT,
+    log:
+        f"{RUN_ROOT}/logs/derive.log"
+    threads: 1
+    resources:
+        mem_mb=4000,
+        runtime=15,
+    script:
+        "scripts/wf/run_derive.py"
+
+
+# ── Synthetic sampling from the derived model (one job per temperature) ──
+rule sample:
+    input:
+        model=MODEL,
+        manifest=DERIVE_MANIFEST,
+    output:
+        align=SYNTH_NPY,
+        sidecar=SYNTH_JSON,
+    params:
+        run_root=RUN_ROOT,
+    log:
+        f"{RUN_ROOT}/logs/sample_T{{temp}}.log"
+    threads: 4
+    resources:
+        mem_mb=4000,
+        runtime=60,
+    script:
+        "scripts/wf/run_derive_sample.py"
+
+
+# ── Figures ──────────────────────────────────────────────────────────────
+rule render:
+    input:
+        model=MODEL,
+        synthetic=expand(SYNTH_NPY, temp=TEMPS),
+    output:
+        directory(FIGS_DIR),
+    params:
+        run_root=RUN_ROOT,
+    log:
+        f"{RUN_ROOT}/logs/render.log"
+    threads: 2
+    resources:
+        mem_mb=8000,
+        runtime=120,
+    script:
+        "scripts/wf/run_derive_render.py"
+
+
+# ── Aggregate run manifest (last) ────────────────────────────────────────
+rule run_manifest:
+    input:
+        CONFIG_SNAP,
+        ENCODE_MANIFEST,
+        DERIVE_MANIFEST,
+        FIGS_DIR,
+    output:
+        RUN_MANIFEST,
+    params:
+        run_root=RUN_ROOT,
+    log:
+        f"{RUN_ROOT}/logs/run_manifest.log"
+    threads: 1
+    resources:
+        mem_mb=512,
+        runtime=10,
+    script:
+        "scripts/wf/run_derive_manifest.py"

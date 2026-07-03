@@ -22,7 +22,7 @@
 #
 # Options:
 #   --dry-run      show what rsync would transfer; skip the verify step
-#   --with-figs    also sync figs/ and mpnn_tmp/ (default: durable artifacts only)
+#   --with-figs    also sync figs/ (default: durable artifacts only)
 #   --mirror       add rsync --delete: delete destination files absent from the
 #                  synced set (excluded dirs like figs/ are NOT deleted); prompts
 #   --yes          skip the --mirror confirmation prompt
@@ -176,7 +176,7 @@ rsync_excludes() {
     # pull can't restore archived runs onto the Mac.
     printf '%s\n' '__pycache__/' '.snakemake/' '.DS_Store' '*.pyc' '.archive/'
     if [[ "${WITH_FIGS}" -eq 0 ]]; then
-        printf '%s\n' 'figs/' 'mpnn_tmp/'
+        printf '%s\n' 'figs/'
     fi
     if [[ "${root}" == "combine" ]]; then
         # work/   ~7-8 GB/model of BP-solver scratch (deleted by the finalizer)
@@ -196,7 +196,7 @@ find_durable() {
     local root="$1"
     local prune=(-name __pycache__ -o -name .snakemake -o -name .archive)
     if [[ "${WITH_FIGS}" -eq 0 ]]; then
-        prune+=(-o -name figs -o -name mpnn_tmp)
+        prune+=(-o -name figs)
     fi
     local extra=()
     if [[ "${root}" == "combine" ]]; then
@@ -247,7 +247,7 @@ present=0
 for root in "${roots[@]}"; do
     [ -d "$root" ] || continue
     prune=(-name __pycache__ -o -name .snakemake -o -name .archive)
-    [ "$with_figs" -eq 0 ] && prune+=(-o -name figs -o -name mpnn_tmp)
+    [ "$with_figs" -eq 0 ] && prune+=(-o -name figs)
     extra=()
     if [ "$root" = "combine" ]; then
         # '*dcalign*' matches rsync_excludes so the remote manifest omits retired

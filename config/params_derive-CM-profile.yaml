@@ -1,0 +1,28 @@
+# CM profile model derived post-hoc from the dense CM model: keep the fields,
+# zero all couplings. NO retraining — the dense model's already-fit h is kept
+# and J is zeroed (a different energy function from the retrain-based
+# params_CM-bm-profile.yaml, which re-fits h with J=0). Lands a normal results/
+# dir that the combine pipeline consumes by run_dir.
+#
+#   python scripts/iter.py run derive-CM-profile "fields-only" --snakefile Snakefile.derive
+# or
+#   snakemake -s Snakefile.derive --configfile config/params_derive-CM-profile.yaml --cores 8 all
+
+run_name: derive-CM-profile
+description: CM fields-only model (couplings zeroed post-hoc from the dense model)
+family: CM
+source_run_dir: results/CM-bm-dense/iter-002-base-model
+seed: 42
+omp_num_threads: null
+
+filter:
+  couplings: zero      # fields only
+  fields: keep
+
+sample:
+  N: 2000
+  temperatures: [0.75, 1.0]
+
+figures:
+  which: null          # null = every figure whose data is present
+  sector: emily

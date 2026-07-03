@@ -45,16 +45,3 @@ figures:
   sector: emily
   max_seqs_per_group: 2000     # cap for O(N^2) similarity/diversity (0 = no cap);
                                # CM Train (~1.3k) is under the cap, so this is a no-op here
-
-mpnn:                          # on by default; scoring needs path + python (or the env vars)
-  enabled: true
-  pdb: data/structures/1ECM.pdb
-  chain: A
-  seed: null                   # null = inherit the run's master seed
-  temperatures: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-  N_per_T: 100
-  controls: [wt, random, shuffled, natural]
-  model_name: v_48_020
-  skip_scoring: false
-  path: ../ProteinMPNN         # clone of github.com/dauparas/ProteinMPNN; null → $PROTEINMPNN_PATH
-  python: /Users/nadav/miniforge3/envs/proteinmpnn/bin/python  # torch env (machine-specific); null → $PROTEINMPNN_PYTHON

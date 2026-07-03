@@ -1,8 +1,8 @@
 """Typed, validated configuration for the Snakemake pipeline.
 
 One YAML config file describes one run end-to-end: the input MSA, the
-optional pruning masks, the training regime, the synthetic sampling, the
-figures, and the optional ProteinMPNN sweep. The Snakefile loads it,
+optional pruning masks, the training regime, the synthetic sampling, and
+the figures. The Snakefile loads it,
 ``from_dict`` validates it (unknown keys are an error), and the per-stage
 wrappers in ``scripts/wf/`` read fields off the resulting frozen
 dataclass.
@@ -33,7 +33,6 @@ _DIA_PRIORS = ("gap-corrected", "uniform")
 _SECTORS = ("emily", "rama", "none")
 _MODES = ("BM", "SBM")
 _OPTIMIZERS = ("LBFGS", "GD")
-_MPNN_CONTROLS = ("wt", "random", "shuffled", "natural", "none")
 
 
 class ConfigError(ValueError):
@@ -211,41 +210,6 @@ class FiguresConfig:
 
 
 @dataclass(frozen=True)
-class MpnnConfig:
-    enabled: bool = True
-    pdb: str = "data/structures/1ECM.pdb"
-    chain: str = "A"
-    seed: int | None = None  # None → inherit the run's master seed
-    temperatures: list[float] = field(
-        default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-    )
-    N_per_T: int = 100
-    controls: list[str] = field(default_factory=lambda: ["wt", "random", "shuffled", "natural"])
-    model_name: str = "v_48_020"
-    skip_scoring: bool = False
-    path: str | None = None  # ProteinMPNN clone; None → PROTEINMPNN_PATH env
-    python: str | None = None  # interpreter with torch; None → PROTEINMPNN_PYTHON env, else sys.executable
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "MpnnConfig":
-        _reject_unknown(cls, data, "mpnn")
-        rest = {k: v for k, v in data.items() if k not in ("temperatures", "controls")}
-        raw_temps = data.get("temperatures", MpnnConfig().temperatures)
-        raw_controls = data.get("controls", MpnnConfig().controls)
-        _require(isinstance(raw_temps, list), "mpnn.temperatures must be a list")
-        _require(isinstance(raw_controls, list), "mpnn.controls must be a list")
-        temps = [float(t) for t in raw_temps]
-        controls = [str(c).lower() for c in raw_controls]
-        obj = cls(temperatures=temps, controls=controls, **rest)
-        _require(obj.N_per_T >= 1, "mpnn.N_per_T must be >= 1")
-        _require(len(obj.temperatures) >= 1, "mpnn.temperatures must be non-empty")
-        _require(all(t > 0 for t in obj.temperatures), "mpnn.temperatures must all be > 0")
-        bad = set(obj.controls) - set(_MPNN_CONTROLS)
-        _require(not bad, f"mpnn.controls has unknown value(s) {sorted(bad)}; allowed: {_MPNN_CONTROLS}")
-        return obj
-
-
-@dataclass(frozen=True)
 class SBMRunConfig:
     """The complete, validated configuration for one pipeline run."""
 
@@ -260,12 +224,6 @@ class SBMRunConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
     sample: SampleConfig = field(default_factory=SampleConfig)
     figures: FiguresConfig = field(default_factory=FiguresConfig)
-    mpnn: MpnnConfig = field(default_factory=MpnnConfig)
-
-    @property
-    def mpnn_seed(self) -> int:
-        """The MPNN sweep seed, defaulting to the run's master seed."""
-        return self.seed if self.mpnn.seed is None else self.mpnn.seed
 
     def as_dict(self) -> dict[str, Any]:
         """Plain-dict form suitable for YAML round-trip (config_snapshot.yaml)."""
@@ -282,7 +240,6 @@ class SBMRunConfig:
             "train": TrainConfig,
             "sample": SampleConfig,
             "figures": FiguresConfig,
-            "mpnn": MpnnConfig,
         }
         kwargs = {k: v for k, v in data.items() if k not in nested}
         for key, sub_cls in nested.items():
