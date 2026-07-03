@@ -8,8 +8,8 @@ sequence space** (BLAST vs SwissProt + the CM and PPIC families, kept as
 separate columns). Natural sequences from each model's seed MSA are folded too,
 as calibration controls and as a reusable per-MSA reference set.
 
-This replaces the ProteinMPNN foldability proxy (`docs/MPNN_FOLDABILITY.md`),
-which was uninformative, with real single-sequence structure prediction.
+This replaces the ProteinMPNN foldability proxy (removed — it was uninformative)
+with real single-sequence structure prediction.
 
 ## Predictor + environment (important)
 
@@ -75,7 +75,10 @@ cache and a re-submit continues.
   data/fold_scores.tsv                gathered design fold scores
   data/blast/blast_{swissprot,cmfam,ppicfam}.tsv   raw -outfmt 6 (kept separate)
   data/blast/blast_report.txt         per-design best hit per DB
-  figs/{plddt_distribution,tm_A_vs_B,energy_vs_structure,blast_identity}.pdf
+  data/characterization_stats.tsv     tidy (group, metric, value) — the numbers the figures cite (Mac)
+  figs/characterization_overview.pdf  consolidated 2x2: fold / pLDDT / energy-vs-structure / BLAST (Mac)
+  figs/tm_A_vs_B.pdf                   standalone "which fold?" scatter (Mac)
+  figs/fold_call_breakdown.pdf         fold-call composition per group (Mac)
   report.md                           human summary + control-sanity checks
   provenance/manifest.json
 
@@ -95,6 +98,33 @@ ppicfam_top_hit/pident`.
 - pLDDT answers "does it fold at all"; TM answers "which of A/B".
 - **Caveat**: 1ECM chain A is one arm of a domain-swapped dimer, so an
   isolated-monomer `tm_A` is a lower bound — flagged in `report.md`.
+
+## Rendering on the Mac (authoritative figures)
+
+The compute above (fold + TM + BLAST + merge) runs on Midway and lands the tidy
+tables under `characterize/data/`. **The figures are made on the Mac** from those
+tables — pure numpy/matplotlib, no binaries — via
+`src/SBM/utils/utils_characterize_plot.py` (recipes) + `scripts/characterize/render_characterize.py`
+(thin CLI), routed through `scripts/lab_plotting.py` and laid out from inch budgets.
+It is wired into `Snakefile.combine` as the gated **`characterize_render`** stage
+(`characterize.enabled` in the combine config): once `characterize/data/summary.tsv`
+has been pulled from Midway, `snakemake … all` renders the three PDFs +
+`characterization_stats.tsv` automatically; until then it is skipped from `all`
+with a note (the pipeline is never blocked on un-pulled data). Target a fig
+explicitly to force it (fails loudly if the table is still missing). Direct CLI:
+
+```sh
+.venv/bin/python scripts/characterize/render_characterize.py \
+    --summary <run_dir>/characterize/data/summary.tsv \
+    --natural-summary <run_dir>/characterize/data/natural_summary.tsv \
+    --figs-dir <run_dir>/figs
+```
+
+The CLI is backward-compatible with the Midway `characterize.py` merge driver, so
+that driver still renders if you let it — but the intended flow is `--skip-render`
+on Midway and render on the Mac after the pull. `sync_models.sh` moves the tables
+but **excludes** the bulky `results/*/natural_folds/*/structures/*.pdb` fold cache
+(~28k tiny files; only `fold_scores/*.tsv` travels) — see `docs/MODEL_SYNC.md`.
 
 ## Correctness check (built in)
 

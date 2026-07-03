@@ -46,7 +46,9 @@ Two training regimes share the L-BFGS algorithm and differ only in parameter val
 | The post-hoc `derive` pipeline (keep only *some* params of a trained model) | `Snakefile.derive` driven by `config/params_derive-*.yaml` (validated by `src/SBM/derive_config.py`); filters an already-trained `model.npy` (fields only / couplings only / mask subset), re-gauges, lands a **normal `results/` dir** the combine pipeline consumes by `run_dir`. Core `src/SBM/derive.py` (`apply_filter`, `build_derived_dict`); reuses `pruning/build_mask.py` for the mask subset; wrappers `scripts/wf/run_derive*.py` + `run_copy_inputs.py`; tests `tests/test_derive.py`. Run with `python scripts/iter.py run <name> "<tag>" --snakefile Snakefile.derive`. See "Derive pipeline" below. |
 | The potts_align combine wiring (score every (query,model) with `N≤L`) | `scoring.method: potts_align` in `config/params_combine-CM-PPIC-potts.yaml`; the `score` rule reads a cluster-built cache (or recomputes live), the `potts_align_baseline` rule reports ΔE-vs-native per home pair. Cluster wrappers `scripts/wf/run_potts_align_{shard,gather}.py` + `pipeline/external/{run_potts_align_align,sbatch_potts_align_shard,sbatch_potts_align_gather,finalize_potts_align}.sh` (pure Python, no Julia). Cost-bounding knobs (`pa_cross_subsample_*`, `query.n_random` control) + the full runbook: `docs/POTTS_ALIGN.md` §11. |
 | The two-model design engine (joint annealing over `E_tot`) | `src/SBM/design/anneal.py` — `anneal_chain` (SA over (core sequence, gap placement in each frame); alignment folded into the MC so per-step cost is O(L), gap-count-independent), `AnnealSchedule`, `_sub_delta` (covers sub/insert/delete), `initial_state_from_frame` (natural-seeded starts), `polish` (warm-started `potts_align` for the authoritative argmin `E_A`/`E_B`). **Wired into the combine pipeline** as a gated `design:` stage of `Snakefile.combine` (schema `DesignConfig` in `src/SBM/combine_config.py`) — see "Combine pipeline" below; CLI `scripts/design_two_model.py` still runs it directly. Chains are seeded from a **start mix** (`start_random`/`start_natural_a`/`start_natural_b`; naturals from each model's `seed_msa`, core ≤ min(L)=91); figures color trajectories **by start type** (`src/SBM/utils/utils_design_plot.py` + `scripts/render_design.py`: trajectories, `E_A`/`E_B` phase space w/ Pareto front + landing heatmap, a final-length histogram, and a **ZAPPO-colored alignment** of the designs in both model frames), landing in `<run_root>/figs/`. Each design's in-frame **polish alignment** is also exported as `design/design_aln_{A,B}.fasta` (L=96 / L=91 gapped MSAs, uploadable to an alignment viewer). `design.execution: auto\|local\|cluster` picks where the anneal runs (auto = predicted local wall-time ≤ `local_budget_minutes`); polish defaults to `fast` (warm-started, ~5.5 s/chain — the polish, not the anneal, is the cost). Snakemake wrappers `scripts/wf/run_design_{config,local,render,handoff}.py`; cluster wrappers `scripts/wf/run_design_{shard,gather}.py`; tests `tests/test_design_two_model.py`. Runs end-to-end on the Mac (~min); Midway optional for scale. Full spec + Mac→Midway runbook + Midway-Claude sbatch TODO: `docs/DESIGN_TWO_MODEL.md`. |
-| Model transfer Mac ↔ Midway (models **and** the potts_align cache) | `scripts/sync_models.sh` (checksummed rsync; `push`/`pull`/`verify`/`status`; covers both `results/` and `combine/`). Not in git. See "Model transfer" below and `docs/MODEL_SYNC.md`. |
+| The design characterization (fold + BLAST) | **Midway compute** (ESMFold GPU + TM-align + BLAST + merge): `scripts/characterize/characterize.py` driver + `src/SBM/characterize/` (`summary.py` merge; `fold`/`tmscore`/`blast` parsers) + `pipeline/external/*characterize*`/`*esmfold*` sbatch. **Mac renders** the figures + stats from the merged `characterize/data/summary.tsv` (pure numpy) via `src/SBM/utils/utils_characterize_plot.py` + `scripts/characterize/render_characterize.py`, wired as the gated `characterize_render` stage of `Snakefile.combine` (schema `CharacterizeConfig`). Figures land in `<run_root>/figs/`: `characterization_overview.pdf` (2×2), `tm_A_vs_B.pdf`, `fold_call_breakdown.pdf` + `characterize/data/characterization_stats.tsv`. Tests `tests/test_characterize.py` (parsers) + `tests/test_characterize_plot.py` (render). See "Characterize pipeline" below + `docs/CHARACTERIZE.md`. |
+| The end-to-end runbook (two `results/` model dirs → designed, characterized seqs + figures) | `docs/RUNBOOK.md` — the ordering + Mac-vs-Midway split across combine → design → characterize → render; cross-links the detailed docs. |
+| Model transfer Mac ↔ Midway (models **and** the potts_align cache) | `scripts/sync_models.sh` (checksummed rsync; `push`/`pull`/`verify`/`status`; covers both `results/` and `combine/`; excludes the `natural_folds/*/structures/` PDB fold cache). Not in git. See "Model transfer" below and `docs/MODEL_SYNC.md`. |
 | Retired DCAlign campaign (code + artifacts) | `.archive/` (gitignored, excluded from `sync_models.sh`) — all `dcalign_*` modules, the Julia drivers, the DCAlign cluster scripts, the iter-003 experiment scripts/run dirs, and `docs/{PIPELINE,ITER003_RUNBOOK}.md`. Verdict + why: `docs/two_model_progress.md`. |
 
 `src/SBM/__init__.py` is empty by design — users import submodules directly (`SBM.SBM_GD.SBM_proteins`, `SBM.utils.utils`, `SBM.provenance`).
@@ -173,6 +175,43 @@ snakemake -s Snakefile.derive --configfile config/params_derive-CM-profile.yaml 
 - **Rules:** `snapshot_config` → `copy_inputs` (copies the source's `inputs/msa.npy` [+ `msa_manifest.json`] so combine finds naturals + seed MSA; no re-encoding) → `build_mask_J`/`build_mask_h` (only when that block is a MaskSpec) → `derive` (`model.npy` + `manifest.json` recording the **source model sha256 + the filter** + `command.sh`) → `sample` (synthetics sampled *from the derived model*; a `J≡0` model samples independent-site sequences via the standard kernel) → `render` (`figs/`) → `run_manifest`.
 - **Reuse, don't reinvent:** the mask is `pruning/build_mask.py` (same `(L,L,q,q)`/`(L,q)` 0/1 format), the filter is `J*=mask` / `h*=mask` applied to the fitted arrays, and the gauge is `Zero_Sum_Gauge` (with `J≡0` its correction to `h` vanishes, so fields-only preserves `h`; on an already-gauged source, couplings-only leaves `h` at zero). `J` is always written as a full zeros array (never `None`) so `load_model`'s shape checks pass. The derived dict drops the training-replicate `W_all`/`Seeds` (meaningless post-filter, read nowhere) and stores a single-point `J_norm` = the derived mean Frobenius coupling norm.
 - **Smoke test:** `snakemake -s Snakefile.derive --configfile config/params_derive-tiny.yaml --cores 8 all` (fields-only from `results/tiny/`).
+
+## Characterize pipeline (structural + BLAST QC of designs)
+
+Downstream QC for the two-model **design** outputs: predict a structure for each
+designed sequence (ESMFold), ask **which of the two reference folds it resembles**
+(TM-align vs 1ECM = fold A / CM, 1JNT = fold B / PPIC), and **what it looks like in
+sequence space** (BLAST vs SwissProt + the CM/PPIC families). Naturals from each seed
+MSA are folded once as controls (the positive control: a family's naturals must match
+their own reference). It **replaced** the retired ProteinMPNN foldability proxy. Full
+spec: `docs/CHARACTERIZE.md`; end-to-end ordering: `docs/RUNBOOK.md`.
+
+- **Compute is Midway-only; figures are Mac-only** (the deliberate split — see `docs/RUNBOOK.md`).
+  Midway runs `scripts/characterize/characterize.py` (driver) which folds (ESMFold GPU,
+  `src/SBM/characterize/fold.py`), TM-aligns (`TMalign`, `tmscore.py`), BLASTs
+  (`blastp`, `blast.py`), and **merges** into the tidy tables (`summary.py` — pure
+  python) under `<run_dir>/characterize/data/`. Orchestration: `pipeline/external/{run_characterize,run_esmfold_probe,sbatch_esmfold_shard,sbatch_characterize_cpu,build_tmalign,prefetch_esmfold}.sh`.
+- **Mac render (authoritative figures).** `src/SBM/utils/utils_characterize_plot.py`
+  (recipes; inch-budget layout, `lab_plotting`) + `scripts/characterize/render_characterize.py`
+  (thin CLI, backward-compatible with the Midway driver) consume `summary.tsv` (+ optional
+  `natural_summary.tsv`) — **pure numpy/matplotlib, no binaries**. Wired as the gated
+  `characterize_render` stage of `Snakefile.combine` (`CharacterizeConfig.enabled` in the
+  combine config). Because the input is Midway-produced and pulled via `sync_models.sh`,
+  the figs are folded into `rule all` only once `summary.tsv` is on disk (checked at DAG
+  build; a skip note prints otherwise — `all` is never blocked on un-pulled data);
+  targeting a fig explicitly fails loudly if the table is missing. Outputs:
+  `figs/characterization_overview.pdf` (2×2: fold / pLDDT / energy-vs-structure / BLAST),
+  `figs/tm_A_vs_B.pdf`, `figs/fold_call_breakdown.pdf`, and the tidy
+  `characterize/data/characterization_stats.tsv` (the numbers the figures cite —
+  medians, fold-call counts, control-sanity PASS/FAIL, `Spearman(ΔE, ΔTM)`).
+- **Reuse, don't reinvent:** `summary.read_tsv` / `summary.fold_call` / the column
+  constants for I/O; `lab_plotting` + the `utils_design_plot` inch-budget helpers for
+  layout. `fold_call ∈ {A, B, ambiguous, neither, na}` from the TM≥0.5 rule.
+- **Sync:** the ~28k per-sequence ESMFold PDBs (`results/*/natural_folds/*/structures/`)
+  are **excluded** from `sync_models.sh` (only the distilled `fold_scores/*.tsv` travel;
+  the PDB cache stays Midway-side). This is the fix for the slow rsync.
+- **Test:** `.venv/bin/python -m pytest tests/test_characterize.py tests/test_characterize_plot.py -q`
+  (both pure-python, no binaries needed).
 
 ## Model transfer (Mac ↔ Midway)
 

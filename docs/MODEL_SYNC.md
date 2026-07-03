@@ -42,13 +42,23 @@ score a model, not the regenerable figure caches:
 |---|---|
 | `model.npy` | `figs/` (PDFs + `figs/inputs/stats_*.npy`, ~0.4 GB/run) |
 | `inputs/msa.npy` + `inputs/*.json` | `__pycache__/`, `.snakemake/`, `*.pyc`, `.DS_Store` |
-| `synthetic/align_T*.npy` + `*.json` | |
+| `synthetic/align_T*.npy` + `*.json` | `natural_folds/*/structures/*.pdb` (the ~28k ESMFold PDB cache) |
 | `masks/*.npy` + `*.json` | |
+| `natural_folds/*/fold_scores/*.tsv` (distilled fold scores) | |
 | `manifest.json`, `run_manifest.json`, `train_meta.json` | |
 
 Durable-only is ~50–60 MB/run vs ~0.5 GB/run. Figures regenerate from `model.npy`
 + `synthetic/` via `scripts/render_sbm.sh` / `render_figures.py`. Pass `--with-figs`
 to mirror everything (e.g. archiving a finished run).
+
+**`natural_folds/*/structures/` (characterization fold cache) is excluded.** The
+per-MSA ESMFold cache (`docs/CHARACTERIZE.md`) is one PDB per natural sequence —
+tens of thousands of tiny files (e.g. ~27k for PPIC) that otherwise dominate the
+rsync stat/checksum time. Only the distilled `fold_scores/*.tsv` sync; the PDB
+cache stays Midway-side (0-SU to regenerate, and the Mac only needs the scores to
+render figures). Excluded by a `structures`-basename prune in both `rsync_excludes()`
+and `find_durable()` (mirrored so `verify` stays in lock-step). The `combine/` tree
+keeps its `characterize/structures/` (only the ~96 design PDBs).
 
 ## What gets synced — `combine/` (potts_align cache)
 

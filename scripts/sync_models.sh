@@ -188,6 +188,19 @@ rsync_excludes() {
         #           Midway copies back (mirrored in the find prunes below).
         printf '%s\n' 'work/' 'shards/' 'logs/' '*.tar.zst' '*dcalign*'
     fi
+    if [[ "${root}" == "results" && "${WITH_FIGS}" -eq 0 ]]; then
+        # structures/  natural_folds/<sha8>/structures/ = one ESMFold PDB per natural
+        #           sequence (~28k tiny files; docs/CHARACTERIZE.md). The Mac only needs
+        #           the distilled fold_scores/*.tsv for figures; the PDB cache is Midway-
+        #           side (0-SU to regenerate). Excluding it keeps the sync from being
+        #           dominated by tens of thousands of tiny files. --with-figs includes it
+        #           (a full archive). MUST stay mirrored in find_durable() AND
+        #           build_remote_manifest() (all three gate on WITH_FIGS), or a pull's
+        #           verify FAILs on the manifested-but-not-transferred PDBs. The only
+        #           structures/ dirs in results/ are under natural_folds/; the combine
+        #           tree keeps its 96 design PDBs.
+        printf '%s\n' 'structures/'
+    fi
 }
 
 # Emit a newline-separated list of durable files under ONE tree (cwd = repo
@@ -204,6 +217,12 @@ find_durable() {
         # archived, so drop them from the manifest too (keeps verify in lockstep).
         prune+=(-o -name work -o -name shards -o -name logs -o -name '*dcalign*')
         extra=(! -name '*.tar.zst')
+    fi
+    if [[ "${root}" == "results" && "${WITH_FIGS}" -eq 0 ]]; then
+        # Mirror rsync_excludes + build_remote_manifest: drop natural_folds/<sha8>/
+        # structures/ (the ~28k per-sequence ESMFold PDBs) from the manifest so verify
+        # stays in lockstep. fold_scores/ (the distilled TSVs) is kept — different name.
+        prune+=(-o -name structures)
     fi
     # ${extra[@]+...} guards against bash 3.2 (macOS default) treating an empty
     # array under `set -u` as unbound — expands to nothing when extra is empty.
@@ -254,6 +273,12 @@ for root in "${roots[@]}"; do
         # DCAlign runs — a pull excludes them AND verify won't flag them missing.
         prune+=(-o -name work -o -name shards -o -name logs -o -name '*dcalign*')
         extra=(! -name '*.tar.zst')
+    fi
+    if [ "$root" = "results" ] && [ "$with_figs" -eq 0 ]; then
+        # Mirror rsync_excludes/find_durable: omit the ~28k natural_folds/*/structures/
+        # ESMFold PDBs from the REMOTE manifest too, so a pull (which downloads this
+        # SHA256SUMS but not the excluded PDBs) does not FAIL verify on them.
+        prune+=(-o -name structures)
     fi
     files="$(mktemp)"
     find "$root" -type d \( "${prune[@]}" \) -prune -o \

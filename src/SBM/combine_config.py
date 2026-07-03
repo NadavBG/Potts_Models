@@ -206,6 +206,26 @@ class DesignConfig:
 
 
 @dataclass(frozen=True)
+class CharacterizeConfig:
+    """Design-characterization render stage (docs/CHARACTERIZE.md).
+
+    Off by default. The heavy characterization compute (ESMFold + TM-align + BLAST
+    + merge) runs on Midway and lands the tidy tables under
+    ``<run_dir>/characterize/data/``; this stage only *renders* the Mac-authoritative
+    figures + stats from those tables (pure numpy/matplotlib — no binaries). Enabling
+    it makes ``render_combine`` also emit the characterization figures once
+    ``characterize/data/summary.tsv`` has been pulled from Midway (a missing table
+    fails the rule loudly, telling you to ``sync_models.sh pull``)."""
+
+    enabled: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CharacterizeConfig":
+        _reject_unknown(cls, data, "characterize")
+        return cls(**data)
+
+
+@dataclass(frozen=True)
 class CombineRunConfig:
     """The complete, validated configuration for one combine run."""
 
@@ -218,6 +238,7 @@ class CombineRunConfig:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     figures: CombineFiguresConfig = field(default_factory=CombineFiguresConfig)
     design: DesignConfig = field(default_factory=DesignConfig)
+    characterize: CharacterizeConfig = field(default_factory=CharacterizeConfig)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -239,7 +260,8 @@ class CombineRunConfig:
         names = [m.name for m in models]
         _require(len(set(names)) == len(names), f"config.models names must be unique; got {names}")
         nested = {"query": QueryConfig, "scoring": ScoringConfig,
-                  "figures": CombineFiguresConfig, "design": DesignConfig}
+                  "figures": CombineFiguresConfig, "design": DesignConfig,
+                  "characterize": CharacterizeConfig}
         kwargs = {k: v for k, v in data.items() if k not in nested and k != "models"}
         for key, sub_cls in nested.items():
             if data.get(key) is not None:

@@ -23,6 +23,7 @@
 # Runs inside the project's uv venv (no `conda:` directive), like the main
 # Snakefile; `threads`/`resources` declared on every rule for cluster use.
 
+import os
 import sys
 
 from SBM import combine_config as cc
@@ -163,6 +164,36 @@ if cfg.design.enabled:
         DESIGN_OUTPUTS = [DESIGN_CONFIG, DESIGN_HANDOFF]
 
 
+# ── Characterization render stage (fold + BLAST; docs/CHARACTERIZE.md) ────
+# Off unless characterize.enabled. The heavy compute (ESMFold + TM-align + BLAST +
+# merge) runs on Midway and lands the tidy tables under characterize/data/; this
+# stage only RENDERS the Mac-authoritative figures + stats from summary.tsv (pure
+# numpy/matplotlib). Its input is Midway-produced and pulled via sync_models.sh, so
+# no Mac rule "produces" it. Like design_render in cluster mode, the figs are only
+# folded into `rule all` once the table is on disk (checked at DAG build) — so `all`
+# isn't blocked on Midway data that hasn't been pulled. The rule is defined whenever
+# characterize.enabled, so once pulled you either re-run `all` or target a fig
+# explicitly (`snakemake ... <run_root>/figs/characterization_overview.pdf`), which
+# fails loudly if summary.tsv is still missing. natural_summary.tsv is optional (the
+# wrapper overlays it only when present).
+CHAR_DIR          = f"{RUN_ROOT}/characterize"
+CHAR_SUMMARY      = f"{CHAR_DIR}/data/summary.tsv"
+CHAR_NAT_SUMMARY  = f"{CHAR_DIR}/data/natural_summary.tsv"
+CHAR_STATS_TSV    = f"{CHAR_DIR}/data/characterization_stats.tsv"
+CHAR_OVERVIEW_FIG = f"{RUN_ROOT}/figs/characterization_overview.pdf"
+CHAR_TM_FIG       = f"{RUN_ROOT}/figs/tm_A_vs_B.pdf"
+CHAR_FOLDCALL_FIG = f"{RUN_ROOT}/figs/fold_call_breakdown.pdf"
+
+CHARACTERIZE_OUTPUTS = []
+if cfg.characterize.enabled and cfg.figures.enabled:
+    if os.path.exists(CHAR_SUMMARY):
+        CHARACTERIZE_OUTPUTS = [CHAR_OVERVIEW_FIG, CHAR_TM_FIG, CHAR_FOLDCALL_FIG, CHAR_STATS_TSV]
+    else:
+        print(f"[characterize] {CHAR_SUMMARY} not found — skipping from `all` "
+              f"(pull it from Midway, then re-run or target a fig explicitly)",
+              file=sys.stderr)
+
+
 # ── Aggregate target ──────────────────────────────────────────────────────
 rule all:
     default_target: True
@@ -175,6 +206,7 @@ rule all:
         *([ENERGY_FIG] if cfg.figures.enabled else []),
         *POTTS_BASELINE_OUTPUTS,
         *DESIGN_OUTPUTS,
+        *CHARACTERIZE_OUTPUTS,
         RUN_MANIFEST,
 
 
@@ -375,6 +407,34 @@ if cfg.design.enabled:
                 "scripts/wf/run_render_design.py"
 
 
+# ── Characterization figures (Mac-render of Midway's summary.tsv) ─────────
+if cfg.characterize.enabled and cfg.figures.enabled:
+
+    rule characterize_render:
+        input:
+            summary=CHAR_SUMMARY,
+            # natural_summary.tsv is optional (controls); declare it as a tracked input
+            # only when it is already on disk, so a re-pulled controls table triggers a
+            # re-render — but its absence never blocks the rule. The wrapper resolves it
+            # from disk regardless.
+            **({"natural": CHAR_NAT_SUMMARY} if os.path.exists(CHAR_NAT_SUMMARY) else {}),
+        output:
+            CHAR_OVERVIEW_FIG,
+            CHAR_TM_FIG,
+            CHAR_FOLDCALL_FIG,
+            CHAR_STATS_TSV,
+        params:
+            run_root=RUN_ROOT,
+        log:
+            f"{RUN_ROOT}/logs/characterize_render.log"
+        threads: 1
+        resources:
+            mem_mb=4000,
+            runtime=30,
+        script:
+            "scripts/wf/run_render_characterize.py"
+
+
 # ── potts_align ground-state-recovery baseline (only when method=potts_align) ──
 if cfg.scoring.method == "potts_align":
 
@@ -411,6 +471,7 @@ rule run_manifest:
         *([ENERGY_FIG] if cfg.figures.enabled else []),
         *POTTS_BASELINE_OUTPUTS,
         *DESIGN_OUTPUTS,
+        *CHARACTERIZE_OUTPUTS,
     output:
         RUN_MANIFEST,
     params:

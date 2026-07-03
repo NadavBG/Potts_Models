@@ -94,3 +94,7 @@ design:                          # two-model joint annealing over E_tot (docs/DE
   local_budget_minutes: 30.0     # used only by execution: auto; raise chains/steps for Midway
 
   n_shards: 64                   # Slurm array size if it goes CLUSTER
+
+characterize:                    # Mac-render of Midway's fold + BLAST tables (docs/CHARACTERIZE.md)
+  enabled: true                  # renders characterization figs once characterize/data/ is pulled
+                                 # from Midway; skipped from `all` (with a note) until then
