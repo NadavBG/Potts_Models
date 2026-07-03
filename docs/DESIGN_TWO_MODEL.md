@@ -435,33 +435,41 @@ The Mac-side cluster wrappers already exist and are tested locally:
   `--allow-missing`), and the warm-started polish never worse than the MC frame
   (`E_polish ≤ E_mc`).
 
-### Midway Claude TODO (needs cluster knowledge + testing — not written here)
+### Midway cluster scripts (DONE — `pipeline/external/*design*`)
 
-Write four shell scripts under `pipeline/external/`, mirroring the
-`*_potts_align_*` ones one-to-one (same accounting, resume, `afterok` chaining):
+Four shell scripts under `pipeline/external/` mirror the `*_potts_align_*` ones
+one-to-one (same accounting, resume, `afterok` chaining). Written + tested on
+Midway (plan → run → gather exercised end-to-end with a tiny config; resume and
+the tar+zstd reclaim verified). Pure numpy — no Julia.
 
 - **`sbatch_design_shard.sh`** — the array task: `#SBATCH --account=pi-ranganathanr
   --partition=caslake --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=2G
-  --time=<sized>`, `export OMP_NUM_THREADS=1` (the loop is serial numpy — fan out
-  over the array, not threads), then
-  `python scripts/wf/run_design_shard.py run --run-dir "$D" --shard "$SLURM_ARRAY_TASK_ID"`.
-  Size `--time` from `chains_per_shard × (steps × ~15 µs + polish_seconds)`; the
-  polish term dominates and depends on `--polish-schedule` (bound it, or run with
-  `--no-polish` and polish the survivors in a second pass).
+  --time=04:00:00` (overridden by the driver's sized `--time`), `export
+  OMP_NUM_THREADS=1` (the loop is serial numpy — fan out over the array, not
+  threads), then `python scripts/wf/run_design_shard.py run --run-dir
+  "$RUN_ROOT/design" --shard "$SLURM_ARRAY_TASK_ID"`. Resumable: chains already in
+  the shard JSONL are skipped, so a TIME_LIMIT kill + re-submit continues.
 - **`sbatch_design_gather.sh`** — `--cpus-per-task=1 --mem=4G --time=00:30:00`,
   runs `run_design_gather.py`.
-- **`run_design.sh`** — login-node driver: refuse a dirty tree, `git pull
-  --ff-only`, preflight `design_config.json`, `run_design_shard.py plan`,
-  `sbatch --parsable --array=0-<N-1>%<conc>` for shards + `sbatch
-  --dependency=afterok:<arrayid>` for gather, write `.shard_jids`.
+- **`run_design.sh`** — login-node driver, takes `<run_root> [<n_shards>]`: refuse
+  a dirty tree, `git pull --ff-only`, preflight `design/design_config.json` + the
+  referenced model/seed_msa files, **size `--time`** from `2 × chains_per_shard ×
+  (steps × 15 µs + polish_seconds)` (floored 30 min, capped 36 h — resume makes an
+  under-estimate non-fatal; the polish term dominates and is a per-`polish_schedule`
+  constant, fast ≈ 6 s / auto·default ≈ 220 s / thorough ≈ 440 s), `run_design_shard.py
+  plan`, `sbatch --array=0-<N-1>%<conc>` for shards + `--dependency=afterok` gather,
+  write `.shard_jids`. `n_shards` from CLI arg > `design.n_shards` in
+  `config_snapshot.yaml`; `DESIGN_MAX_CONCURRENT` caps the array.
 - **`finalize_design.sh`** — after the gather END mail: `sacct`-validate all jobs
-  COMPLETED, confirm the run outputs exist, tar+zstd the raw `shards/` to reclaim
-  space (the Mac only needs the gathered artifacts).
+  COMPLETED, confirm the gathered outputs exist, tar+zstd the raw `shards/` + `logs/`
+  to reclaim space (the Mac only needs the gathered artifacts).
 
-Also add the design paths to `scripts/sync_models.sh`'s **combine** include list
-(the file is not in git): sync `design/{design_config.json, shards_manifest.json,
-trajectories.npz, designed_sequences.fasta, design_aln_A.fasta, design_aln_B.fasta,
-designed.tsv, design_manifest.json, gather_status.json}`; **exclude** `design/shards/`
-(raw per-shard scratch), matching
-how the `potts_align/shards/` scratch is excluded. The figures live in
-`<run_root>/figs/` and are regenerable on the Mac.
+**`scripts/sync_models.sh` needs no change.** It syncs the `combine/` tree by a
+*denylist* (directory-name prune), not an include list: the design outputs at
+`design/` (`design_config.json`, `shards_manifest.json`, `trajectories.npz`,
+`designed_sequences.fasta`, `design_aln_{A,B}.fasta`, `designed.tsv`,
+`design_manifest.json`, `gather_status.json`) are captured automatically, while
+`design/shards/`, `design/logs/`, and the `design_*.tar.zst` reclaim archives are
+already excluded by the same generic `shards`/`logs`/`*.tar.zst` prunes that drop
+the potts_align scratch. (Verified: the `find_durable` prune captures exactly those
+eight files.) The figures live in `<run_root>/figs/` and are regenerable on the Mac.
