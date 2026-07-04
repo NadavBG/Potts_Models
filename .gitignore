@@ -35,6 +35,7 @@ src/SBM/**/*.pyd
 # the rsync integrity manifest and is covered by this ignore too.
 results/
 combine/
+logs/
 # natural_folds/ = the content-addressed ESMFold cache of the naturals, keyed by
 # source-FASTA sha8 (docs/CHARACTERIZE.md). A property of the MSA, not any run, so
 # it is its own top-level tree; synced (minus the PDBs) by scripts/sync_models.sh.
