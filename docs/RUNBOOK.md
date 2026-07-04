@@ -162,5 +162,5 @@ BLAST), `figs/tm_A_vs_B.pdf`, `figs/fold_call_breakdown.pdf`, and the tidy
 
 See also: `CLAUDE.md` (component map), `docs/POTTS_ALIGN.md` (aligner + cluster),
 `docs/DESIGN_TWO_MODEL.md` (design engine), `docs/CHARACTERIZE.md` (characterization),
-`docs/MODEL_SYNC.md` (Mac↔Midway transfer), `docs/MIDWAY_HANDOFF.md` (current
-next steps for the Midway side).
+`docs/MODEL_SYNC.md` (Mac↔Midway transfer), `docs/two_model_progress.md`
+(project status + design decisions).

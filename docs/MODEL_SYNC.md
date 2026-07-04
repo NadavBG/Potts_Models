@@ -47,7 +47,7 @@ score a model, not the regenerable figure caches:
 |---|---|
 | `model.npy` | `figs/` (PDFs + `figs/inputs/stats_*.npy`, ~0.4 GB/run) |
 | `inputs/msa.npy` + `inputs/*.json` | `__pycache__/`, `.snakemake/`, `*.pyc`, `.DS_Store` |
-| `synthetic/align_T*.npy` + `*.json` | |
+| `synthetic/align_T*.npy` + `*.json` | `synthetic/mpnn_sweep*/` (retired ProteinMPNN scratch) |
 | `masks/*.npy` + `*.json` | |
 | `manifest.json`, `run_manifest.json`, `train_meta.json` | |
 

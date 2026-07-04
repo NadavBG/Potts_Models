@@ -177,8 +177,11 @@ rsync_excludes() {
     local root="$1"
     # Always-excluded caches/junk. .archive/ = the retired-code/artifact store
     # (DCAlign, docs/two_model_progress.md); it must never travel either way, so a
-    # pull can't restore archived runs onto the Mac.
-    printf '%s\n' '__pycache__/' '.snakemake/' '.DS_Store' '*.pyc' '.archive/'
+    # pull can't restore archived runs onto the Mac. mpnn_sweep* = the retired
+    # ProteinMPNN foldability-sweep scratch under results/*/synthetic/ (replaced by
+    # the characterize pipeline; docs/CHARACTERIZE.md) — ~50 MB of stale .npz that is
+    # NOT durable (mirrored in find_durable() + build_remote_manifest() below).
+    printf '%s\n' '__pycache__/' '.snakemake/' '.DS_Store' '*.pyc' '.archive/' 'mpnn_sweep*'
     if [[ "${WITH_FIGS}" -eq 0 ]]; then
         printf '%s\n' 'figs/'
     fi
@@ -210,7 +213,8 @@ rsync_excludes() {
 # root). The prunes mirror rsync_excludes() for the same tree.
 find_durable() {
     local root="$1"
-    local prune=(-name __pycache__ -o -name .snakemake -o -name .archive)
+    # mpnn_sweep* = retired ProteinMPNN scratch (mirrors rsync_excludes; see there).
+    local prune=(-name __pycache__ -o -name .snakemake -o -name .archive -o -name 'mpnn_sweep*')
     if [[ "${WITH_FIGS}" -eq 0 ]]; then
         prune+=(-o -name figs)
     fi
@@ -231,7 +235,7 @@ find_durable() {
     # ${extra[@]+...} guards against bash 3.2 (macOS default) treating an empty
     # array under `set -u` as unbound — expands to nothing when extra is empty.
     find "${root}" -type d \( "${prune[@]}" \) -prune -o \
-         -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' ${extra[@]+"${extra[@]}"} -print
+         -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' ! -name 'mpnn_sweep*' ${extra[@]+"${extra[@]}"} -print
 }
 
 # Build <tree>/SHA256SUMS locally for each present tree (cwd = repo root,
@@ -269,7 +273,8 @@ if command -v sha256sum >/dev/null 2>&1; then SHA=(sha256sum); else SHA=(shasum 
 present=0
 for root in "${roots[@]}"; do
     [ -d "$root" ] || continue
-    prune=(-name __pycache__ -o -name .snakemake -o -name .archive)
+    # mpnn_sweep* = retired ProteinMPNN scratch (mirrors rsync_excludes/find_durable).
+    prune=(-name __pycache__ -o -name .snakemake -o -name .archive -o -name 'mpnn_sweep*')
     [ "$with_figs" -eq 0 ] && prune+=(-o -name figs)
     extra=()
     if [ "$root" = "combine" ]; then
@@ -286,7 +291,7 @@ for root in "${roots[@]}"; do
     fi
     files="$(mktemp)"
     find "$root" -type d \( "${prune[@]}" \) -prune -o \
-         -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' "${extra[@]}" -print \
+         -type f ! -name '.DS_Store' ! -name '*.pyc' ! -name 'SHA256SUMS' ! -name 'mpnn_sweep*' "${extra[@]}" -print \
          | LC_ALL=C sort > "$files"
     if [ -s "$files" ]; then
         tr '\n' '\0' < "$files" | xargs -0 "${SHA[@]}" > "$root/SHA256SUMS"
