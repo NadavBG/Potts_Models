@@ -56,6 +56,22 @@ SCORE_MANIFEST = f"{RUN_ROOT}/provenance/score_manifest.json"
 ENERGY_FIG     = f"{RUN_ROOT}/figs/two_model_energy.pdf"
 RUN_MANIFEST   = f"{RUN_ROOT}/provenance/run_manifest.json"
 
+# The config the user invokes Snakemake with (becomes $CFG in RUNBOOK.txt); falls
+# back to the in-run snapshot if invoked without a --configfile (never, in practice).
+# Snakemake resolves configfiles to absolute paths; relativize to the repo cwd so
+# the runbook shows `config/params_…yaml` (matching what new_combine.py writes).
+_CONFIGFILES = list(getattr(workflow, "configfiles", []) or [])
+if _CONFIGFILES:
+    try:
+        CONFIG_PATH = os.path.relpath(str(_CONFIGFILES[0]))
+    except ValueError:
+        CONFIG_PATH = str(_CONFIGFILES[0])
+else:
+    CONFIG_PATH = CONFIG_SNAP
+# Per-run, copy-pasteable runbook (score -> design -> characterize). Regenerated on
+# every `all` from the validated config so it can never drift (SBM.combine_runbook).
+RUNBOOK_TXT    = f"{RUN_ROOT}/RUNBOOK.txt"
+
 # E_tot combining weights, derived post-hoc from the naturals (compute_weights
 # rule): the weights equalize each family's median native energy so E_tot is not
 # biased toward one family. JSON = the calculation; sweep TSV backs the figure.
@@ -199,6 +215,7 @@ rule all:
     default_target: True
     input:
         CONFIG_SNAP,
+        RUNBOOK_TXT,
         MODELS_JSON,
         QUERY_FASTA,
         SCORES,
@@ -222,6 +239,27 @@ rule snapshot_config:
         runtime=2,
     script:
         "scripts/wf/run_snapshot_config_combine.py"
+
+
+# ── Per-run copy-pasteable runbook (regenerated from the config each `all`) ──
+# Dependency-free, cheap. The `fingerprint` param carries the full validated
+# config so Snakemake's params rerun-trigger regenerates RUNBOOK.txt whenever the
+# config changes for the same run_root — it can never go stale.
+rule runbook:
+    output:
+        RUNBOOK_TXT,
+    params:
+        run_root=RUN_ROOT,
+        config_path=CONFIG_PATH,
+        fingerprint=repr(cfg.as_dict()),
+    log:
+        f"{RUN_ROOT}/logs/runbook.log"
+    threads: 1
+    resources:
+        mem_mb=256,
+        runtime=2,
+    script:
+        "scripts/wf/run_runbook.py"
 
 
 # ── Resolve the two referenced models (paths, hashes, L, seed MSAs) ──────
@@ -367,6 +405,7 @@ if cfg.design.enabled:
                 DESIGN_HANDOFF,
             params:
                 run_root=RUN_ROOT,
+                config_path=CONFIG_PATH,
             log:
                 f"{RUN_ROOT}/logs/design_handoff.log"
             threads: 1

@@ -1,163 +1,100 @@
 # End-to-end runbook: two trained models → designed, characterized sequences
 
-This is the one-page path from **two already-trained single-model runs in
-`results/`** to **designed two-model sequences with structure + BLAST
-characterization and all figures**. Each step links to the doc that covers it in
-depth; this page is the ordering + the Mac-vs-Midway split.
+The path from **two already-trained single-model runs in `results/`** to
+**designed two-model sequences with structure + BLAST characterization and all
+figures** is now **one scaffold command that writes a per-run, copy-pasteable
+`RUNBOOK.txt`**. This page is the concept + the quickstart; the exact commands,
+with every path filled in and only the stages you enabled, live in that generated
+file.
 
-## The compute split (Mac-primary figures, Midway-primary compute)
+## The workflow
 
-Heavy compute runs on **Midway**; **all figures are rendered on the Mac** from the
-data tables Midway produces (pulled with `scripts/sync_models.sh`). The one thing
-written only on Midway is the Slurm orchestration (`pipeline/external/*.sh`).
+![Two-model combine pipeline — Mac ↔ Midway](workflow/combine_workflow.png)
 
-| Step | Heavy compute (Midway) | Figures / light (Mac) |
-|---|---|---|
-| 0. (optional) derive | — | `Snakefile.derive` (post-hoc param filter) |
-| 1. combine (natural energies + `E_tot` weights) | `potts_align` align cache (large query sets) | scoring, weights, `two_model_energy.pdf`, `energy_weights.pdf` |
-| 2. design (generate sequences) | the joint-anneal Slurm array | `design_*` figures |
-| 3. characterize (fold + TM + BLAST) | ESMFold (GPU) + TM-align + BLAST + merge | `characterization_*` figures |
+Heavy compute runs on **Midway**; **all figures render on the Mac** from the tables
+Midway produces (pulled with `scripts/sync_models.sh`). `sync_models.sh` always runs
+**from the Mac** — `push` before a Midway stage, `pull` after; the Midway blocks
+never call it. It moves three trees: `results/` (models, seed MSAs), `combine/`
+(query, potts_align cache, scores, design + characterize tables), and `natural_folds/`
+(the content-addressed ESMFold cache of the naturals). See `docs/MODEL_SYNC.md`.
 
-`sync_models.sh` moves three trees — `results/` (models, seed MSAs), `combine/`
-(query, potts_align cache, scores, design + characterize tables), and
-`natural_folds/` (the content-addressed ESMFold cache of the naturals, keyed by
-source-FASTA sha8 — a property of the MSA, not of any run). It **excludes** the
-bulky regenerable scratch: the `combine/` shard/work dirs and the per-sequence
-`natural_folds/*/structures/*.pdb` ESMFold cache (~28k tiny files — only the
-distilled `fold_scores/*.tsv` + `tm_vs_refs/*.tsv` travel; the PDBs stay on
-Midway, 0-SU to regenerate). See `docs/MODEL_SYNC.md`.
+## Quickstart
 
----
+```bash
+# [MAC] one command: generate a validated config, mint the run dir, write RUNBOOK.txt
+python scripts/new_combine.py \
+    results/CM-bm-dense/iter-002-base-model \
+    results/PPIC-dense/iter-001-baseline \
+    --tag potts-eval
+```
 
-## Starting point
+That command (`scripts/new_combine.py`):
 
-Two trained single-model runs, e.g. `results/CM-bm-dense/iter-001-…/` and
-`results/PPIC-dense/iter-001-…/`, each with `model.npy` + `inputs/` (the naturals
-/ seed MSA). Train them with the single-model `Snakefile` (see `CLAUDE.md`) if you
-don't have them yet.
+- validates each dir has `model.npy` + `inputs/msa.npy`;
+- infers the model names, and picks the two error-prone potts_align knobs from the
+  data itself — `pa_cross_subsample_origin` = the larger-N family (the PT cost
+  driver), `query.random_length` = `min(L_A, L_B)`;
+- writes a clean `config/params_combine-<run_name>.yaml` (no 30-line embedded
+  runbook to prune) after round-tripping it through the same validator the pipeline
+  uses; and
+- mints `combine/<run_name>/iter-NNN-<tag>/` and writes its **`RUNBOOK.txt`**.
 
-**Step 0 (optional) — derive a parameter-filtered model.** To have a model
-contribute only *some* of its parameters (e.g. its fields with couplings zeroed),
-run the derive pipeline; it lands a normal `results/` dir the combine step
-consumes by `run_dir` (`docs`: `CLAUDE.md` "Derive pipeline").
+Then **open `combine/<run_name>/iter-NNN-<tag>/RUNBOOK.txt` and paste each
+`[MAC]` / `[MIDWAY]` block as a unit.** It sets `RR` / `CFG` / `SNAKE` once and
+threads them through every command (nothing to substitute), includes the
+finalizers, and — because it is regenerated from the config on every
+`snakemake … all` — can never drift from the params in effect.
+
+Useful flags: `--method map` (scores locally, no cluster round-trip),
+`--no-design`, `--no-characterize`, `--design-local`, `--run-name NAME`,
+`--config-only`. Run `python scripts/new_combine.py -h` for the full list.
+
+**Step 0 (optional) — derive a parameter-filtered model** first if a model should
+contribute only *some* of its parameters (e.g. fields with couplings zeroed); it
+lands a normal `results/` dir the scaffold consumes (`CLAUDE.md` "Derive pipeline"):
 
 ```bash
 # [MAC]
 python scripts/iter.py run derive-CM-profile "fields-only" --snakefile Snakefile.derive
 ```
 
----
+## The three stages (what `RUNBOOK.txt` walks you through)
 
-## Step 1 — combine: natural energies + `E_tot` weights
+| Stage | Midway (heavy compute) | Mac (figures / light) |
+| --- | --- | --- |
+| 1. **combine** — natural energies + `E_tot` weights | `potts_align` align cache (Slurm array) | scoring, weights, `two_model_energy.pdf`, `energy_weights.pdf` |
+| 2. **design** — generate sequences | the joint-anneal Slurm array | `design_*` figures |
+| 3. **characterize** — fold + which-fold + BLAST | ESMFold (GPU) + TM-align + BLAST + merge | `characterization_*` figures |
 
-Point a combine config (`config/params_combine-CM-PPIC-potts.yaml`) at the two
-`results/` run dirs. The combine pipeline scores each family's naturals (+
-synthetics) under **both** models with the couplings-aware `potts_align` aligner,
-then derives the `E_tot = w_A·E_A + w_B·E_B` weights post-hoc from the native
-medians. For a large query set the `potts_align` alignment cache is pre-built on a
-Midway Slurm array (`docs/POTTS_ALIGN.md §11`); a small set needs no cluster step.
+Each stage is a `[MAC] build/push → [MIDWAY] one driver + finalize → [MAC] pull +
+render` round-trip. The Midway drivers are one-argument (`run_potts_align_align.sh
+$RR`, `run_design.sh $RR`, `run_characterize.sh $RR`, plus the `finalize_*.sh`).
+Detail + cost + knobs: `docs/POTTS_ALIGN.md` §11 (align), `docs/DESIGN_TWO_MODEL.md`
+(design), `docs/CHARACTERIZE.md` (characterize).
 
-```bash
-# [MAC] mint the run dir, commit + push code/config to Midway
-python scripts/iter.py new combine-CM-PPIC-potts "eval" --snakefile Snakefile.combine
-git add -A && git commit -m "combine run config" && bash scripts/sync_models.sh push
+## The Snakemake DAG
 
-# [MIDWAY] build the potts_align cache (large query sets only), then score
-#   see docs/POTTS_ALIGN.md §11 for the align→gather array + finalize
-bash scripts/sync_models.sh pull        # [MAC] pull the cache back
-snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
-    --config run_root=<combine_run> --cores 8 all   # [MAC] score + weights + figs
-```
+`bash scripts/render_dag.sh [<config>]` regenerates these into `docs/workflow/`
+(needs `brew install graphviz`). The simplified DAG (rules + dependencies):
 
-Outputs: `data/scores.tsv`, `data/energy_weights.json`, and the figures
-`figs/two_model_energy.pdf` + `figs/energy_weights.pdf`. Full detail:
-`docs/POTTS_ALIGN.md`, `docs/two_model_progress.md`.
+![combine rulegraph](workflow/combine_rulegraph.svg)
 
----
-
-## Step 2 — design: generate two-model sequences
-
-Design is a gated stage of the *same* combine config: add a `design:` block
-(`design.enabled: true`) and it anneals `E_tot` from random + CM/PPIC-natural
-starts. **The shipped configs default to `design.execution: cluster`** — sequence
-generation is a Midway step by policy — so `snakemake … all` on the Mac writes the
-run spec + hand-off and stops; you run the Slurm array on Midway, pull back, and
-render. (The anneal is Mac-cheap: set `design.execution: local` for a ~2-min local
-run, or `auto` to route by predicted wall-time.) Full spec + Mac→Midway runbook:
-`docs/DESIGN_TWO_MODEL.md`.
-
-```bash
-# [MAC] writes design/design_config.json + MIDWAY_HANDOFF.txt, then stops (cluster default)
-snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
-    --config run_root=<combine_run> --cores 8 all
-git add -A && git commit -m "design run config" && bash scripts/sync_models.sh push
-
-# [MIDWAY] run the joint-anneal Slurm array
-bash pipeline/external/run_design.sh <combine_run>
-
-# [MAC] pull the gathered trajectories back, then render the design figures
-bash scripts/sync_models.sh pull
-snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
-    --config run_root=<combine_run> --cores 8 <combine_run>/figs/design_alignment.pdf
-```
-
-Outputs: `design/designed_sequences.fasta`, `design/designed.tsv`,
-`design/trajectories.npz`, and the four `figs/design_*.pdf`.
-
----
-
-## Step 3 — characterize: fold + which-fold + BLAST (Midway compute → Mac figures)
-
-Predict a structure for every designed sequence (ESMFold, GPU), ask which of the
-two reference folds it resembles (TM-align vs 1ECM = fold A / CM and 1JNT = fold B
-/ PPIC), and BLAST it. Naturals from each seed MSA are folded once as controls
-(cached under the top-level content-addressed `natural_folds/<msa_sha8>/`). **Compute is Midway-only**
-(GPU + TM-align + BLAST binaries); the merge lands the tidy tables. Full detail +
-knobs + cost: `docs/CHARACTERIZE.md`.
-
-```bash
-# [MIDWAY] one-time prep, then the 3 fold arrays + a CPU merge job (afterok)
-RR=<combine_run>
-bash pipeline/external/build_tmalign.sh      # -> pipeline/bin/TMalign
-bash pipeline/external/prefetch_esmfold.sh   # warm the HF cache
-bash pipeline/external/run_characterize.sh "$RR"   # writes characterize/data/*.tsv
-bash scripts/sync_models.sh push             # send the tables (NOT the 28k PDBs) back-to-Mac side
-```
-
-Then render the **Mac-authoritative** figures. Enabling `characterize:` in the
-combine config makes `snakemake … all` render them automatically once the tables
-are on disk (until then it prints a skip note — the pipeline is never blocked on
-un-pulled Midway data). Or target them explicitly:
-
-```bash
-# [MAC]
-bash scripts/sync_models.sh pull
-snakemake -s Snakefile.combine --configfile config/params_combine-CM-PPIC-potts.yaml \
-    --config run_root=<combine_run> --cores 8 \
-    <combine_run>/figs/characterization_overview.pdf
-# or directly:
-.venv/bin/python scripts/characterize/render_characterize.py \
-    --summary <combine_run>/characterize/data/summary.tsv \
-    --natural-summary <combine_run>/characterize/data/natural_summary.tsv \
-    --figs-dir <combine_run>/figs
-```
-
-Outputs: `figs/characterization_overview.pdf` (fold / pLDDT / energy-vs-structure /
-BLAST), `figs/tm_A_vs_B.pdf`, `figs/fold_call_breakdown.pdf`, and the tidy
-`characterize/data/characterization_stats.tsv` (the numbers the figures cite).
-
----
+The **full** job DAG (`docs/workflow/combine_dag.svg`) is near-identical here: this
+pipeline has no Snakemake-level fan-out — the per-(query, model) and per-chain
+fan-out happens on the Slurm array, *outside* Snakemake. All three artifacts are
+also written as PDF/DOT alongside the SVGs.
 
 ## Where each result lands
 
-```
+```text
 <combine_run>/
-  data/scores.tsv, energy_weights.json          # step 1
-  design/designed_sequences.fasta, designed.tsv # step 2
-  characterize/data/summary.tsv, natural_summary.tsv, characterization_stats.tsv  # step 3
-  figs/two_model_energy.pdf, energy_weights.pdf                 # step 1 (Mac)
-  figs/design_{trajectories,phase_space,lengths,alignment}.pdf # step 2 (Mac)
-  figs/characterization_overview.pdf, tm_A_vs_B.pdf, fold_call_breakdown.pdf  # step 3 (Mac)
+  RUNBOOK.txt                                   # the per-run copy-paste steps
+  data/scores.tsv, energy_weights.json          # stage 1
+  design/designed_sequences.fasta, designed.tsv # stage 2
+  characterize/data/summary.tsv                 # stage 3 (from Midway)
+  figs/two_model_energy.pdf, energy_weights.pdf                 # stage 1 (Mac)
+  figs/design_{trajectories,phase_space,lengths,alignment}.pdf  # stage 2 (Mac)
+  figs/characterization_overview.pdf, tm_A_vs_B.pdf, fold_call_breakdown.pdf  # stage 3 (Mac)
 ```
 
 See also: `CLAUDE.md` (component map), `docs/POTTS_ALIGN.md` (aligner + cluster),

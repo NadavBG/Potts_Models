@@ -291,9 +291,20 @@ def load_config(path: Path | str) -> CombineRunConfig:
     return from_dict(raw)
 
 
-def dump_config(cfg: CombineRunConfig, path: Path | str) -> Path:
+def dump_config(cfg: CombineRunConfig, path: Path | str, *, header: str | None = None) -> Path:
+    """Serialize ``cfg`` to YAML at ``path``.
+
+    ``header`` is optional free text written as a leading ``# ``-prefixed comment
+    block (used by ``scripts/new_combine.py`` to point the generated config at its
+    ``RUNBOOK.txt`` without re-embedding a long runbook). The body is the full
+    validated config, so no field is left implicit.
+    """
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as handle:
+        if header:
+            for line in header.splitlines():
+                handle.write(f"# {line}\n" if line else "#\n")
+            handle.write("\n")
         yaml.safe_dump(cfg.as_dict(), handle, sort_keys=False, default_flow_style=False)
     return out
