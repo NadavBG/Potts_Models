@@ -43,6 +43,63 @@ def test_shard_records_roundtrips() -> None:
     assert sorted(got) == sorted(recs)
 
 
+# ── Resume (done_ids): robust to a change in shard count ─────────────────────
+
+
+def _write_fold_cache(
+    scores_dir: Path, structures_dir: Path, ids: list[str], n_shards: int,
+    *, pdbs: set[str] | None = None,
+) -> None:
+    """Write a fold-score cache exactly as fold_sequences.py leaves it: one
+    ``shard_<t>.tsv`` per shard with the round-robin rows, one ``<id>.pdb`` per
+    folded id (``pdbs`` defaults to all ids)."""
+    scores_dir.mkdir(parents=True, exist_ok=True)
+    structures_dir.mkdir(parents=True, exist_ok=True)
+    recs = [(rid, "ACDE") for rid in ids]
+    for t in range(n_shards):
+        lines = ["id\tgroup\tlength\tplddt_mean\tptm"]
+        lines += [f"{rid}\tG\t4\t90.00\t0.9000"
+                  for rid, _ in fold.shard_records(recs, n_shards, t)]
+        (scores_dir / f"shard_{t}.tsv").write_text("\n".join(lines) + "\n",
+                                                   encoding="utf-8")
+    for rid in (set(ids) if pdbs is None else pdbs):
+        (structures_dir / f"{rid}.pdb").write_text("ATOM\n", encoding="utf-8")
+
+
+def test_done_ids_finds_all_regardless_of_shard_layout(tmp_path: Path) -> None:
+    ids = [f"seq{i}" for i in range(20)]
+    sc, st = tmp_path / "fold_scores", tmp_path / "structures"
+    _write_fold_cache(sc, st, ids, n_shards=7)
+    assert fold.done_ids(sc, st) == set(ids)
+
+
+def test_done_ids_resume_survives_shard_count_change(tmp_path: Path) -> None:
+    # Regression: cache built with 7 shards, re-run with 3. Every record of every
+    # new shard must already be "done" so nothing re-folds. The old per-shard
+    # check (read only shard_<t>.tsv) re-folded ~all of them here.
+    ids = [f"seq{i}" for i in range(20)]
+    sc, st = tmp_path / "fold_scores", tmp_path / "structures"
+    _write_fold_cache(sc, st, ids, n_shards=7)
+    done = fold.done_ids(sc, st)
+    recs = [(rid, "ACDE") for rid in ids]
+    for new_shard in range(3):
+        todo = [rid for rid, _ in fold.shard_records(recs, 3, new_shard)
+                if rid not in done]
+        assert todo == []
+
+
+def test_done_ids_torn_write_is_not_done(tmp_path: Path) -> None:
+    # A score row whose PDB is missing (torn/deleted) must be re-folded.
+    ids = [f"seq{i}" for i in range(6)]
+    sc, st = tmp_path / "fold_scores", tmp_path / "structures"
+    _write_fold_cache(sc, st, ids, n_shards=2, pdbs=set(ids) - {"seq3"})
+    assert fold.done_ids(sc, st) == set(ids) - {"seq3"}
+
+
+def test_done_ids_missing_scores_dir(tmp_path: Path) -> None:
+    assert fold.done_ids(tmp_path / "nope", tmp_path / "structures") == set()
+
+
 # ── FASTA + degap ───────────────────────────────────────────────────────────
 
 

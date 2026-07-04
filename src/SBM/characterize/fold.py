@@ -14,6 +14,7 @@ transformers 4.29), which vendors openfold — no separate openfold install.
 
 from __future__ import annotations
 
+import csv
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
@@ -94,6 +95,38 @@ def shard_records(
     """Apply :func:`shard_indices` to a list of ``(id, seq)`` records."""
     idx = shard_indices(len(records), n_shards, shard)
     return [records[i] for i in idx]
+
+
+# ── Resume: which ids are already folded ────────────────────────────────────
+
+
+def done_ids(scores_dir: Path | str, structures_dir: Path | str) -> set[str]:
+    """Ids already fully folded: a recorded score row AND a ``<id>.pdb`` on disk.
+
+    Scans **every** ``*.tsv`` shard in ``scores_dir`` (not just the current
+    shard's file), so resume is robust to a change in ``n_shards`` between runs.
+    The round-robin partition reshuffles when the shard count changes, but the
+    per-id ``<id>.pdb`` + score row is shared, content-addressed state that any
+    shard may have produced. Reading only the current shard's TSV — the old
+    behaviour — silently re-folds *and* re-appends every already-cached sequence
+    whenever ``n_shards`` differs from the run that built the cache, which both
+    wastes GPU-hours and corrupts the cache with cross-shard duplicate rows.
+
+    The PDB check guards a torn write (a row flushed before its PDB, or a PDB
+    deleted): such an id is treated as not-done and re-folded.
+    """
+    scores_dir = Path(scores_dir)
+    if not scores_dir.is_dir():
+        return set()
+    structures_dir = Path(structures_dir)
+    done: set[str] = set()
+    for tsv in sorted(scores_dir.glob("*.tsv")):
+        with open(tsv, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh, delimiter="\t"):
+                rid = row.get("id", "")
+                if rid and rid not in done and (structures_dir / f"{rid}.pdb").exists():
+                    done.add(rid)
+    return done
 
 
 # ── pLDDT extraction from an ESMFold PDB ────────────────────────────────────

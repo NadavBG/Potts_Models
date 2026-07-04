@@ -32,19 +32,6 @@ logger = logging.getLogger("fold_sequences")
 _SCORE_COLUMNS = ["id", "group", "length", "plddt_mean", "ptm"]
 
 
-def _load_done_ids(scores_tsv: Path, structures_dir: Path) -> set[str]:
-    """Ids already fully done: present in the scores TSV AND with a PDB on disk."""
-    if not scores_tsv.exists():
-        return set()
-    done: set[str] = set()
-    with open(scores_tsv, newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh, delimiter="\t"):
-            rid = row.get("id", "")
-            if rid and (structures_dir / f"{rid}.pdb").exists():
-                done.add(rid)
-    return done
-
-
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -74,7 +61,9 @@ def main() -> int:
     structures_dir.mkdir(parents=True, exist_ok=True)
     args.out_scores.parent.mkdir(parents=True, exist_ok=True)
 
-    done = _load_done_ids(args.out_scores, structures_dir)
+    # Resume against ALL shard TSVs in the scores dir, not just this shard's
+    # file, so a change in --n-shards between runs does not re-fold the cache.
+    done = fold.done_ids(args.out_scores.parent, structures_dir)
     todo = [(rid, seq) for rid, seq in shard if rid not in done]
     logger.info("%d already done, %d to fold", len(done), len(todo))
 
