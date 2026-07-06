@@ -1,0 +1,56 @@
+# ECCM (E. coli chorismate mutase, self-generated MSA), BM regime — profile
+# model (all couplings pruned; fields only, retrained). This RE-FITS h with
+# J=0; contrast params_derive-ECCM-profile.yaml, which keeps the dense
+# model's already-fit h and zeros J post-hoc (a different energy function).
+# L=94, so sectors are dropped from all figures.
+#
+#   python scripts/iter.py run ECCM-profile "profile"
+# or
+#   snakemake --configfile config/params_ECCM-profile.yaml --cores 8 all
+
+run_name: ECCM-profile
+description: ECCM profile model (fields only) # No colons!
+family: ECCM
+msa_fasta: data/fasta/eccm_msa.fasta
+seed: 42
+omp_num_threads: 8          # pin (e.g. 8) for bit-identical re-runs
+
+msa_stats:                     # MSA-only figure; independent of training
+  enabled: true
+  theta: 0.7
+  lbda: 0.03
+  Dia_prior: gap-corrected
+  sector: none
+
+pruning:
+  enabled: true
+  theta: 0.7
+  lbda: 0.03
+  label: ECCM
+  Dia_prior: gap-corrected
+  couplings: { strategy: fij, percent: 100 }
+  fields: null
+
+train:                         # BM regime (Summary Note 3)
+  mode: BM
+  optimizer: LBFGS
+  N_iter: 400
+  N_chains: 100
+  m: 20
+  lambda_J: 0.01
+  lambda_h: 0.01
+  theta: 0.3
+  k_MCMC: 100000
+  TestTrain: 0
+  record_every: 5
+  ignore_gaps: false
+
+sample:
+  N: 2000
+  temperatures: [0.75, 1.0]
+
+figures:
+  which: null                  # null = every figure whose data is present
+  sector: none                 # dropped: ECCM is L=94, the "emily" sector is L=96-specific
+  max_seqs_per_group: 2000     # cap for O(N^2) similarity/diversity (0 = no cap);
+                               # bounds the ~15k-seq ECCM MSA, seeded by the run seed

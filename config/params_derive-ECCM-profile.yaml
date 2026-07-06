@@ -1,0 +1,28 @@
+# ECCM profile model derived post-hoc from the dense ECCM model: keep the
+# fields, zero all couplings. NO retraining — the dense model's already-fit h
+# is kept and J is zeroed (a different energy function from the retrain-based
+# params_ECCM-profile.yaml, which re-fits h with J=0). Lands a normal results/
+# dir that the combine pipeline consumes by run_dir.
+#
+#   python scripts/iter.py run derive-ECCM-profile "fields-only" --snakefile Snakefile.derive
+# or
+#   snakemake -s Snakefile.derive --configfile config/params_derive-ECCM-profile.yaml --cores 8 all
+
+run_name: derive-ECCM-profile
+description: ECCM fields-only model (couplings zeroed post-hoc from the dense model)
+family: ECCM
+source_run_dir: results/ECCM-dense/iter-001-baseline
+seed: 42
+omp_num_threads: null
+
+filter:
+  couplings: zero      # fields only
+  fields: keep
+
+sample:
+  N: 2000
+  temperatures: [0.75, 1.0]
+
+figures:
+  which: null          # null = every figure whose data is present
+  sector: none         # dropped: ECCM is L=94, the "emily" sector is L=96-specific
