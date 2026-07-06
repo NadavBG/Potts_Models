@@ -137,7 +137,10 @@ mm, ss = divmod(rem, 60)
 print(n_chains, steps, sched if do_polish else "off", chains_per_shard, f"{hh:02d}:{mm:02d}:{ss:02d}")
 PY
 )"
-read -r N_CHAINS STEPS POLISH_SCHED CHAINS_PER_SHARD WALLTIME <<< "${PREFLIGHT_OUT}"
+# The python prints its 5 fields space-separated; the script header sets
+# IFS=$'\n\t' (no space), so scope a space-inclusive IFS to just this read —
+# otherwise the whole line lands in N_CHAINS and WALLTIME comes back empty.
+IFS=$' \t\n' read -r N_CHAINS STEPS POLISH_SCHED CHAINS_PER_SHARD WALLTIME <<< "${PREFLIGHT_OUT}"
 [[ -n "${WALLTIME}" ]] || { echo "FATAL: preflight produced no walltime (see errors above)." >&2; exit 6; }
 echo "preflight OK: ${N_CHAINS} chains, ${STEPS} steps, polish=${POLISH_SCHED}, ${CHAINS_PER_SHARD} chains/shard (max)"
 
