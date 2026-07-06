@@ -43,9 +43,21 @@ def make_cfg(
 def test_paths_are_interpolated_no_placeholders():
     text = combine_runbook.render_runbook(make_cfg(), RR, CFG)
     assert RR in text and CFG in text
-    # $RR / $CFG / $SNAKE are threaded, and no <placeholder> survives.
-    assert "$RR" in text and "$CFG" in text and "$SNAKE" in text
+    # $RR / $CFG are threaded, the snake() helper wraps snakemake, and no
+    # <placeholder> survives.
+    assert "$RR" in text and "$CFG" in text
+    assert "snake()" in text and "snake all" in text
     assert "<combine_run>" not in text and "<config>" not in text
+
+
+def test_snakemake_wrapper_is_a_function_not_a_zsh_unsafe_string_var():
+    """Regression: a `SNAKE="…"` string var does not word-split under zsh (the
+    macOS default shell), so `$SNAKE all` fails with 'no such file or directory'.
+    The runbook must use a shell function, which is bash- and zsh-safe."""
+    text = combine_runbook.render_runbook(make_cfg(), RR, CFG)
+    assert 'SNAKE="' not in text and "$SNAKE" not in text
+    # The function must forward extra args ("$@") and quote the interpolated vars.
+    assert 'snake() { snakemake' in text and '"$@"' in text
 
 
 def test_potts_align_full_pipeline_shows_all_cluster_drivers():
@@ -68,7 +80,7 @@ def test_map_method_collapses_to_single_local_command():
     # No cluster round-trip, no design/characterize stages.
     assert "run_potts_align_align.sh" not in text
     assert "STAGE 2" not in text and "STAGE 3" not in text
-    assert "$SNAKE all" in text
+    assert "snake all" in text
 
 
 def test_design_local_note_when_not_cluster():

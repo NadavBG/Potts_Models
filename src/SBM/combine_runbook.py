@@ -16,9 +16,12 @@ Two consumers share this renderer so the instructions never drift:
 Design notes baked into the output:
 
 * Each ``[MAC]`` / ``[MIDWAY]`` block is contiguous, so it pastes as a unit.
-* ``$RR`` / ``$CFG`` / ``$SNAKE`` are set once per shell and threaded through every
-  command — the long ``combine/<run>/iter-NNN-<tag>`` path is never re-typed
-  (the historical source of typos that silently minted a fresh run dir).
+* ``$RR`` / ``$CFG`` are set once per shell and a ``snake()`` shell function wraps
+  the Snakemake invocation — so the long ``combine/<run>/iter-NNN-<tag>`` path is
+  never re-typed (the historical source of typos that silently minted a fresh run
+  dir). A function is used rather than a ``SNAKE="…"`` string var because the
+  latter does not word-split under zsh (the macOS default shell); the function is
+  bash- and zsh-safe.
 * The Midway drivers are one-argument (``run_potts_align_align.sh $RR`` etc.); we
   orchestrate them, we do not reinvent them.
 * ``sync_models.sh`` always runs **from the Mac** (it SSHes to Midway): ``push``
@@ -33,8 +36,10 @@ from SBM.combine_config import CombineRunConfig
 _RULE = "=" * 78
 _SUB = "-" * 78
 
-#: The Mac-side Snakemake invocation, expressed via the shell vars set at the top.
-_SNAKE = "$SNAKE"
+#: The Mac-side Snakemake invocation. A ``snake()`` shell function (defined in the
+#: header) rather than a ``SNAKE="…"`` string var, so it word-splits correctly in
+#: both bash and zsh (a plain string var does not split under zsh).
+_SNAKE = "snake"
 _SNAKEFILE = "Snakefile.combine"
 
 
@@ -71,8 +76,8 @@ def _header(cfg: CombineRunConfig, run_root: str, config_path: str) -> list[str]
         "",
         f"    RR={run_root}",
         f"    CFG={config_path}",
-        f'    SNAKE="snakemake -s {_SNAKEFILE} --configfile $CFG '
-        "--config run_root=$RR --cores 8\"",
+        f'    snake() {{ snakemake -s {_SNAKEFILE} --configfile "$CFG" '
+        '--config run_root="$RR" --cores 8 "$@"; }',
         "",
     ]
 
@@ -138,7 +143,7 @@ def _stage_design(cfg: CombineRunConfig, run_root: str, *, force_cluster: bool =
     if not force_cluster and d.execution == "local":
         out += [
             "design.execution: local — the anneal + the four figs/design_*.pdf are",
-            "produced by Stage 1's `$SNAKE all`. Nothing extra to run here.",
+            f"produced by Stage 1's `{_SNAKE} all`. Nothing extra to run here.",
             "",
         ]
         return out
@@ -148,13 +153,13 @@ def _stage_design(cfg: CombineRunConfig, run_root: str, *, force_cluster: bool =
         out += [
             "design.execution: auto — Snakemake picks LOCAL or CLUSTER at DAG build",
             "and prints the verdict (predicted wall-time vs local_budget_minutes):",
-            "  * LOCAL   -> the anneal + figs come from Stage 1's `$SNAKE all`; skip this stage.",
-            "  * CLUSTER -> `$SNAKE all` wrote design/design_config.json and stopped; run:",
+            f"  * LOCAL   -> the anneal + figs come from Stage 1's `{_SNAKE} all`; skip this stage.",
+            f"  * CLUSTER -> `{_SNAKE} all` wrote design/design_config.json and stopped; run:",
             "",
         ]
     else:
         out += [
-            "design.execution: cluster — Stage 1's `$SNAKE all` wrote",
+            f"design.execution: cluster — Stage 1's `{_SNAKE} all` wrote",
             "design/design_config.json; run the anneal array on Midway.",
             "",
         ]
@@ -269,8 +274,8 @@ def design_handoff_text(cfg: CombineRunConfig, run_root: str, config_path: str) 
         "",
         f"    RR={run_root}",
         f"    CFG={config_path}",
-        f'    SNAKE="snakemake -s {_SNAKEFILE} --configfile $CFG '
-        "--config run_root=$RR --cores 8\"",
+        f'    snake() {{ snakemake -s {_SNAKEFILE} --configfile "$CFG" '
+        '--config run_root="$RR" --cores 8 "$@"; }',
         "",
     ]
     # This note is only written when the Snakefile actually routed to cluster, so
