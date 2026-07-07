@@ -26,7 +26,7 @@ train:                         # BM regime (Summary Note 3)
   mode: BM
   optimizer: LBFGS
   N_iter: 400
-  N_chains: 100
+  N_chains: 200                # raised from 100 for parity with ECCM (docs/TRAINING_CONVERGENCE.md); PPIC converged at 100 but kept equal
   m: 20
   lambda_J: 0.01
   lambda_h: 0.01

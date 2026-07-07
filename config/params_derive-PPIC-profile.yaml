@@ -9,7 +9,7 @@
 run_name: derive-PPIC-profile
 description: PPIC fields-only model (couplings zeroed post-hoc from the dense model)
 family: PPIC
-source_run_dir: results/PPIC-dense/iter-001-baseline
+source_run_dir: results/PPIC-dense/iter-002-nchains-200   # nc=200 dense; run that iter FIRST (docs/TRAINING_CONVERGENCE.md)
 seed: 42
 omp_num_threads: null
 
