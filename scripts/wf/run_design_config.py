@@ -28,6 +28,7 @@ config = d2m.resolve_design_config(
     combine_run=run_root, schedule=sched, master_seed=d.seed,
     start_random=d.start_random, start_natural_a=d.start_natural_a,
     start_natural_b=d.start_natural_b, do_polish=d.polish, polish_schedule=d.polish_schedule,
+    w_a=d.w_a, w_b=d.w_b,
 )
 
 out = Path(snakemake.output[0])  # noqa: F821

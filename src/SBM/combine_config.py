@@ -178,6 +178,14 @@ class DesignConfig:
     execution: str = "cluster"   # cluster (Midway, default) | local (Mac) | auto (predict wall-time vs budget)
     local_budget_minutes: float = 30.0
     n_shards: int = 32
+    # E_tot combining weights. Default (both None) = derive them post-hoc from the
+    # naturals (the `compute_weights` stage; equalizes each family's median native
+    # energy). Set both to override — e.g. `w_a: 0.5, w_b: 0.5` for an equal-weight
+    # design. Overriding drops the design stage's dependency on the naturals-derived
+    # energy_weights.json (and thus on `score`), so a re-weighted design can be
+    # regenerated without re-running the heavy scoring.
+    w_a: float | None = None
+    w_b: float | None = None
 
     @property
     def n_chains(self) -> int:
@@ -202,6 +210,13 @@ class DesignConfig:
         _require(obj.execution in _EXECUTION, f"design.execution must be one of {_EXECUTION}")
         _require(obj.polish_schedule in _POLISH_SCHEDULES,
                  f"design.polish_schedule must be one of {_POLISH_SCHEDULES}")
+        w_set = (obj.w_a is not None, obj.w_b is not None)
+        _require(all(w_set) or not any(w_set),
+                 "design.w_a and design.w_b must be set together (or both omitted to "
+                 "derive the E_tot weights post-hoc from the naturals)")
+        if obj.w_a is not None:
+            _require(obj.w_a > 0 and obj.w_b > 0,
+                     "design.w_a / design.w_b must be > 0 (E_tot = w_A·E_A + w_B·E_B)")
         return obj
 
 

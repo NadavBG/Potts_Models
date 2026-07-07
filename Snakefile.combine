@@ -358,10 +358,20 @@ rule compute_weights:
 # ── Two-model design: resolve the run spec, then run locally OR emit a hand-off ──
 if cfg.design.enabled:
 
+    def _design_config_inputs():
+        """design_config always needs models.json; it needs the naturals-derived
+        energy_weights.json ONLY when the weights are not overridden. Setting
+        design.w_a/w_b in the config (e.g. an equal-weight run) drops the
+        compute_weights -> score dependency, so a re-weighted design spec can be
+        regenerated without re-running the heavy scoring."""
+        d = {"models": MODELS_JSON}
+        if cfg.design.w_a is None:
+            d["weights"] = WEIGHTS_JSON
+        return d
+
     rule design_config:
         input:
-            models=MODELS_JSON,
-            weights=WEIGHTS_JSON,
+            **_design_config_inputs(),
         output:
             DESIGN_CONFIG,
         params:
